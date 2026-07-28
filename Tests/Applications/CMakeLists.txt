@@ -1,5 +1,6 @@
 add_executable(
     BlackframeRenderTests
+    RenderTest.cpp
     RenderTestsMain.cpp
 )
 blackframe_set_target_role(BlackframeRenderTests test)
@@ -9,6 +10,7 @@ target_link_libraries(
     PRIVATE
         Blackframe::Core
         Blackframe::ProjectOptions
+        GTest::gtest
 )
 
 set_target_properties(
@@ -16,6 +18,14 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME render_tests
         DEBUG_POSTFIX ""
+)
+
+gtest_discover_tests(
+    BlackframeRenderTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cpu"
 )
 
 add_test(
