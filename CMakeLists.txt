@@ -57,6 +57,10 @@ blackframe_create_project_options()
 
 add_subdirectory(Blackframe)
 
+blackframe_write_dependency_manifest(
+    "${CMAKE_BINARY_DIR}/blackframe-dependencies.json"
+)
+
 if(BLACKFRAME_BUILD_REFERENCE_PLUGINS)
     add_subdirectory(Plugins/XPU/ReferenceCpu)
 endif()

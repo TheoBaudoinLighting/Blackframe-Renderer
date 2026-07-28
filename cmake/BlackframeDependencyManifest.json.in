@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "project": {
+    "name": "Blackframe",
+    "version": "@PROJECT_VERSION@"
+  },
+  "dependencies": [
+    {
+      "name": "GoogleTest",
+      "kind": "FetchContent",
+      "enabled": @manifest_googletest_enabled@,
+      "version": "@BLACKFRAME_GOOGLETEST_VERSION@",
+      "revision": "@BLACKFRAME_GOOGLETEST_REVISION@",
+      "url": "@BLACKFRAME_GOOGLETEST_URL@",
+      "sha256": "@BLACKFRAME_GOOGLETEST_SHA256@"
+    },
+    {
+      "name": "Google Benchmark",
+      "kind": "FetchContent",
+      "enabled": @manifest_google_benchmark_enabled@,
+      "version": "@BLACKFRAME_GOOGLE_BENCHMARK_VERSION@",
+      "revision": "@BLACKFRAME_GOOGLE_BENCHMARK_REVISION@",
+      "url": "@BLACKFRAME_GOOGLE_BENCHMARK_URL@",
+      "sha256": "@BLACKFRAME_GOOGLE_BENCHMARK_SHA256@"
+    },
+    {
+      "name": "Embree",
+      "kind": "FetchContent",
+      "enabled": @manifest_embree_enabled@,
+      "version": "@BLACKFRAME_EMBREE_VERSION@",
+      "revision": "@BLACKFRAME_EMBREE_REVISION@",
+      "url": "@BLACKFRAME_EMBREE_URL@",
+      "sha256": "@BLACKFRAME_EMBREE_SHA256@"
+    },
+    {
+      "name": "stb",
+      "kind": "FetchContent",
+      "enabled": @manifest_stb_enabled@,
+      "version": "@BLACKFRAME_STB_REVISION@",
+      "revision": "@BLACKFRAME_STB_REVISION@",
+      "url": "@BLACKFRAME_STB_URL@",
+      "sha256": "@BLACKFRAME_STB_SHA256@"
+    },
+    {
+      "name": "CUDA Toolkit",
+      "kind": "system",
+      "enabled": @manifest_cuda_enabled@,
+      "version": "@BLACKFRAME_CUDA_TOOLKIT_VERSION@",
+      "exact": true,
+      "resolved_version": @manifest_cuda_resolved_version_json@,
+      "architectures": [@manifest_cuda_architectures_json@]
+    }
+  ]
+}
