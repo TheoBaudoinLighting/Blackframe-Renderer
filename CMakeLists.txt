@@ -29,7 +29,11 @@ option(BLACKFRAME_BUILD_DCC_MAYA "Build the Maya DCC plugin (requires the Maya S
 option(BLACKFRAME_ENABLE_EMBREE "Fetch the Embree 4 CPU ray-query dependency" ${PROJECT_IS_TOP_LEVEL})
 option(BLACKFRAME_ENABLE_STB "Fetch the stb image utility headers" ${PROJECT_IS_TOP_LEVEL})
 option(BLACKFRAME_ENABLE_CUDA "Expose the locally installed CUDA toolkit" ${PROJECT_IS_TOP_LEVEL})
-option(BLACKFRAME_WARNINGS_AS_ERRORS "Treat warnings in Blackframe targets as errors" OFF)
+option(
+    BLACKFRAME_WARNINGS_AS_ERRORS
+    "Treat warnings in Blackframe targets as errors"
+    ${PROJECT_IS_TOP_LEVEL}
+)
 option(BLACKFRAME_ENABLE_SANITIZERS "Enable supported address/undefined sanitizers" OFF)
 
 set(blackframe_plugin_output_directory "${CMAKE_BINARY_DIR}/plugins")
@@ -44,6 +48,8 @@ endif()
 
 if(BUILD_TESTING)
     blackframe_fetch_googletest()
+    blackframe_enable_dependency_sanitizers(gtest)
+    blackframe_enable_dependency_sanitizers(gtest_main)
 endif()
 
 if(BLACKFRAME_BUILD_BENCHMARKS)

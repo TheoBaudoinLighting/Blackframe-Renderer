@@ -49,6 +49,30 @@ function(blackframe_configure_cuda_target target)
             "${target}"
             PRIVATE
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:__cplusplus>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/W4>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4211>
         )
+        if(BLACKFRAME_WARNINGS_AS_ERRORS)
+            target_compile_options(
+                "${target}"
+                PRIVATE
+                    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/WX>
+                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:--Werror all-warnings>
+            )
+        endif()
+    else()
+        target_compile_options(
+            "${target}"
+            PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra,-Wpedantic>
+        )
+        if(BLACKFRAME_WARNINGS_AS_ERRORS)
+            target_compile_options(
+                "${target}"
+                PRIVATE
+                    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Werror>
+                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:--Werror all-warnings>
+            )
+        endif()
     endif()
 endfunction()

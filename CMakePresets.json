@@ -15,6 +15,7 @@
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
         "CMAKE_CXX_EXTENSIONS": false,
+        "BLACKFRAME_WARNINGS_AS_ERRORS": true,
         "BLACKFRAME_BUILD_TOOLS": true,
         "BLACKFRAME_BUILD_REFERENCE_PLUGINS": true,
         "BLACKFRAME_BUILD_DCC_MAYA": false,
@@ -126,7 +127,10 @@
         "windows-base",
         "cpu-base",
         "sanitizer-base"
-      ]
+      ],
+      "cacheVariables": {
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL"
+      }
     },
     {
       "name": "windows-cuda-debug",
@@ -315,7 +319,10 @@
     {
       "name": "windows-cpu-sanitizer",
       "inherits": "windows-test-base",
-      "configurePreset": "windows-cpu-sanitizer"
+      "configurePreset": "windows-cpu-sanitizer",
+      "environment": {
+        "PATH": "${sourceDir}/build/${presetName}/sanitizer-runtime;$penv{PATH}"
+      }
     },
     {
       "name": "windows-cuda-debug",

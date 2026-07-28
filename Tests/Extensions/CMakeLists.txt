@@ -88,7 +88,12 @@ add_executable(
 )
 blackframe_set_target_role(BlackframeExtensionAbiCTest test)
 
-target_link_libraries(BlackframeExtensionAbiCTest PRIVATE Blackframe::ExtensionAbi)
+target_link_libraries(
+    BlackframeExtensionAbiCTest
+    PRIVATE
+        Blackframe::ExtensionAbi
+        Blackframe::ProjectOptions
+)
 set_target_properties(
     BlackframeExtensionAbiCTest
     PROPERTIES
