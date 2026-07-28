@@ -10,30 +10,38 @@ function(blackframe_create_project_options)
         target_compile_options(
             BlackframeProjectOptions
             INTERFACE
-                /W4
-                /permissive-
-                /Zc:__cplusplus
-                /EHsc
-                /utf-8
+                $<$<COMPILE_LANGUAGE:CXX>:/W4>
+                $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+                $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>
+                $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+                $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
         )
     else()
         target_compile_options(
             BlackframeProjectOptions
             INTERFACE
-                -Wall
-                -Wextra
-                -Wpedantic
-                -Wconversion
-                -Wsign-conversion
-                -Wshadow
+                $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+                $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+                $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+                $<$<COMPILE_LANGUAGE:CXX>:-Wconversion>
+                $<$<COMPILE_LANGUAGE:CXX>:-Wsign-conversion>
+                $<$<COMPILE_LANGUAGE:CXX>:-Wshadow>
         )
     endif()
 
     if(BLACKFRAME_WARNINGS_AS_ERRORS)
         if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-            target_compile_options(BlackframeProjectOptions INTERFACE /WX)
+            target_compile_options(
+                BlackframeProjectOptions
+                INTERFACE
+                    $<$<COMPILE_LANGUAGE:CXX>:/WX>
+            )
         else()
-            target_compile_options(BlackframeProjectOptions INTERFACE -Werror)
+            target_compile_options(
+                BlackframeProjectOptions
+                INTERFACE
+                    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+            )
         endif()
     endif()
 
@@ -53,14 +61,18 @@ function(blackframe_create_project_options)
            NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             message(FATAL_ERROR "BLACKFRAME_ENABLE_SANITIZERS requires Clang or GCC.")
         elseif(WIN32)
-            target_compile_options(BlackframeProjectOptions INTERFACE -fsanitize=address)
+            target_compile_options(
+                BlackframeProjectOptions
+                INTERFACE
+                    $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address>
+            )
             target_link_options(BlackframeProjectOptions INTERFACE -fsanitize=address)
         else()
             target_compile_options(
                 BlackframeProjectOptions
                 INTERFACE
-                    -fno-omit-frame-pointer
-                    -fsanitize=address,undefined
+                    $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>
+                    $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined>
             )
             target_link_options(
                 BlackframeProjectOptions

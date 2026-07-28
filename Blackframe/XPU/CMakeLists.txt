@@ -53,3 +53,7 @@ target_link_libraries(
     PRIVATE
         Blackframe::ProjectOptions
 )
+
+if(BLACKFRAME_ENABLE_CUDA)
+    add_subdirectory(CUDA)
+endif()

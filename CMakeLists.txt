@@ -17,6 +17,7 @@ project(
 include(CTest)
 include(GNUInstallDirs)
 include(BlackframeDependencies)
+include(BlackframeCudaLanguage)
 include(BlackframeHostLanguage)
 include(BlackframeProjectOptions)
 
@@ -39,16 +40,16 @@ if(BLACKFRAME_ENABLE_STB)
     blackframe_fetch_stb()
 endif()
 
-if(BLACKFRAME_ENABLE_CUDA)
-    blackframe_find_cuda_toolkit()
-endif()
-
 if(BUILD_TESTING)
     blackframe_fetch_googletest()
 endif()
 
 if(BLACKFRAME_BUILD_BENCHMARKS)
     blackframe_fetch_google_benchmark()
+endif()
+
+if(BLACKFRAME_ENABLE_CUDA)
+    blackframe_require_explicit_cuda_architectures()
 endif()
 
 blackframe_require_host_cxx26()

@@ -21,7 +21,8 @@
         "BLACKFRAME_BUILD_DCC_MAYA": false,
         "BLACKFRAME_ENABLE_EMBREE": true,
         "BLACKFRAME_ENABLE_STB": true,
-        "BLACKFRAME_ENABLE_CUDA": true
+        "BLACKFRAME_ENABLE_CUDA": true,
+        "CMAKE_CUDA_ARCHITECTURES": "86"
       }
     },
     {
@@ -60,7 +61,8 @@
         "BLACKFRAME_BUILD_DCC_MAYA": false,
         "BLACKFRAME_ENABLE_EMBREE": true,
         "BLACKFRAME_ENABLE_STB": true,
-        "BLACKFRAME_ENABLE_CUDA": true
+        "BLACKFRAME_ENABLE_CUDA": true,
+        "CMAKE_CUDA_ARCHITECTURES": "86"
       }
     }
   ],

@@ -124,5 +124,10 @@ function(blackframe_find_cuda_toolkit)
 
     add_library(BlackframeCudaToolkit INTERFACE)
     add_library(Blackframe::CudaToolkit ALIAS BlackframeCudaToolkit)
-    target_link_libraries(BlackframeCudaToolkit INTERFACE CUDA::cuda_driver)
+    target_link_libraries(
+        BlackframeCudaToolkit
+        INTERFACE
+            CUDA::cuda_driver
+            CUDA::cudart
+    )
 endfunction()

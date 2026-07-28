@@ -7,3 +7,7 @@ add_subdirectory(Extensions)
 add_subdirectory(XPU)
 add_subdirectory(IPC)
 add_subdirectory(Engine)
+
+if(BLACKFRAME_ENABLE_CUDA)
+    add_subdirectory(CUDA)
+endif()

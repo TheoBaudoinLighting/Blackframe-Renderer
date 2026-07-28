@@ -1,0 +1,60 @@
+enable_language(CUDA)
+blackframe_require_cuda_cxx20()
+blackframe_find_cuda_toolkit()
+
+if(WIN32 AND CMAKE_CUDA_SIMULATE_ID STREQUAL "MSVC")
+    # NVCC emits MSVC librarian syntax; keep its compatible archiver local to
+    # this CUDA-only directory.
+    find_program(
+        blackframe_cuda_librarian
+        NAMES lib.exe
+        REQUIRED
+        NO_CACHE
+    )
+    set(CMAKE_AR "${blackframe_cuda_librarian}")
+endif()
+
+add_library(BlackframeCudaSharedHeaders INTERFACE)
+add_library(Blackframe::CudaSharedHeaders ALIAS BlackframeCudaSharedHeaders)
+
+target_sources(
+    BlackframeCudaSharedHeaders
+    INTERFACE
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
+)
+
+target_include_directories(
+    BlackframeCudaSharedHeaders
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+        $<INSTALL_INTERFACE:Include>
+)
+
+target_link_libraries(
+    BlackframeCudaSharedHeaders
+    INTERFACE
+        Blackframe::ProjectOptions
+)
+
+add_library(
+    BlackframeCudaSmokeKernel
+    STATIC
+        Source/CudaSharedHeaderContract.cu
+        Source/CudaSmokeKernel.cu
+)
+add_library(Blackframe::CudaSmokeKernel ALIAS BlackframeCudaSmokeKernel)
+
+blackframe_configure_cuda_target(BlackframeCudaSmokeKernel)
+
+target_link_libraries(
+    BlackframeCudaSmokeKernel
+    PUBLIC
+        Blackframe::CudaSharedHeaders
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)
