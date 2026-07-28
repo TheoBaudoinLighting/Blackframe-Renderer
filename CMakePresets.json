@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 9,
   "cmakeMinimumRequired": {
     "major": 3,
     "minor": 30,
@@ -7,7 +7,7 @@
   },
   "configurePresets": [
     {
-      "name": "development-base",
+      "name": "common-base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
@@ -15,78 +15,265 @@
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
         "CMAKE_CXX_EXTENSIONS": false,
-        "BUILD_TESTING": true,
-        "BLACKFRAME_BUILD_BENCHMARKS": true,
         "BLACKFRAME_BUILD_REFERENCE_PLUGINS": true,
         "BLACKFRAME_BUILD_DCC_MAYA": false,
         "BLACKFRAME_ENABLE_EMBREE": true,
-        "BLACKFRAME_ENABLE_STB": true,
-        "BLACKFRAME_ENABLE_CUDA": true,
-        "CMAKE_CUDA_ARCHITECTURES": "86"
+        "BLACKFRAME_ENABLE_STB": true
       }
     },
     {
-      "name": "dev",
-      "displayName": "Development",
-      "description": "Debug build using the compiler selected by the environment",
-      "inherits": "development-base",
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "common-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
-      }
-    },
-    {
-      "name": "clang-debug",
-      "displayName": "Clang Debug",
-      "description": "Debug build with Clang",
-      "inherits": "development-base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
       }
     },
     {
-      "name": "release",
-      "displayName": "Release",
-      "description": "Optimized build without tests or benchmarks",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "installDir": "${sourceDir}/build/install/${presetName}",
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "common-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "cpu-base",
+      "hidden": true,
+      "cacheVariables": {
+        "BLACKFRAME_ENABLE_CUDA": false
+      }
+    },
+    {
+      "name": "cuda-base",
+      "hidden": true,
+      "cacheVariables": {
+        "BLACKFRAME_ENABLE_CUDA": true,
+        "CMAKE_CUDA_ARCHITECTURES": {
+          "type": "STRING",
+          "value": "86"
+        }
+      }
+    },
+    {
+      "name": "debug-base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": true,
+        "BLACKFRAME_BUILD_BENCHMARKS": false,
+        "BLACKFRAME_ENABLE_SANITIZERS": false
+      }
+    },
+    {
+      "name": "release-base",
+      "hidden": true,
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_EXTENSIONS": false,
-        "BUILD_TESTING": false,
-        "BLACKFRAME_BUILD_BENCHMARKS": false,
-        "BLACKFRAME_BUILD_REFERENCE_PLUGINS": true,
-        "BLACKFRAME_BUILD_DCC_MAYA": false,
-        "BLACKFRAME_ENABLE_EMBREE": true,
-        "BLACKFRAME_ENABLE_STB": true,
-        "BLACKFRAME_ENABLE_CUDA": true,
-        "CMAKE_CUDA_ARCHITECTURES": "86"
+        "BUILD_TESTING": true,
+        "BLACKFRAME_BUILD_BENCHMARKS": true,
+        "BLACKFRAME_ENABLE_SANITIZERS": false
       }
+    },
+    {
+      "name": "sanitizer-base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": true,
+        "BLACKFRAME_BUILD_BENCHMARKS": false,
+        "BLACKFRAME_ENABLE_SANITIZERS": true
+      }
+    },
+    {
+      "name": "windows-cpu-debug",
+      "displayName": "Windows CPU Debug",
+      "description": "Debug build with the Embree CPU dependency and CUDA disabled",
+      "inherits": [
+        "windows-base",
+        "cpu-base",
+        "debug-base"
+      ]
+    },
+    {
+      "name": "windows-cpu-release",
+      "displayName": "Windows CPU Release",
+      "description": "Release build with the Embree CPU dependency and CUDA disabled",
+      "inherits": [
+        "windows-base",
+        "cpu-base",
+        "release-base"
+      ]
+    },
+    {
+      "name": "windows-cpu-sanitizer",
+      "displayName": "Windows CPU Sanitizer",
+      "description": "Debug CPU build with Clang AddressSanitizer enabled",
+      "inherits": [
+        "windows-base",
+        "cpu-base",
+        "sanitizer-base"
+      ]
+    },
+    {
+      "name": "windows-cuda-debug",
+      "displayName": "Windows CUDA Debug",
+      "description": "Debug CUDA build for architecture 86; requires a Visual Studio developer environment",
+      "inherits": [
+        "windows-base",
+        "cuda-base",
+        "debug-base"
+      ]
+    },
+    {
+      "name": "windows-cuda-release",
+      "displayName": "Windows CUDA Release",
+      "description": "Release CUDA build for architecture 86; requires a Visual Studio developer environment",
+      "inherits": [
+        "windows-base",
+        "cuda-base",
+        "release-base"
+      ]
+    },
+    {
+      "name": "linux-cpu-debug",
+      "displayName": "Linux CPU Debug",
+      "description": "Debug build with the Embree CPU dependency and CUDA disabled",
+      "inherits": [
+        "linux-base",
+        "cpu-base",
+        "debug-base"
+      ]
+    },
+    {
+      "name": "linux-cpu-release",
+      "displayName": "Linux CPU Release",
+      "description": "Release build with the Embree CPU dependency and CUDA disabled",
+      "inherits": [
+        "linux-base",
+        "cpu-base",
+        "release-base"
+      ]
+    },
+    {
+      "name": "linux-cpu-sanitizer",
+      "displayName": "Linux CPU Sanitizer",
+      "description": "Debug CPU build with Clang AddressSanitizer and UndefinedBehaviorSanitizer enabled",
+      "inherits": [
+        "linux-base",
+        "cpu-base",
+        "sanitizer-base"
+      ]
+    },
+    {
+      "name": "linux-cuda-debug",
+      "displayName": "Linux CUDA Debug",
+      "description": "Debug CUDA build for architecture 86; requires nvcc in PATH",
+      "inherits": [
+        "linux-base",
+        "cuda-base",
+        "debug-base"
+      ]
+    },
+    {
+      "name": "linux-cuda-release",
+      "displayName": "Linux CUDA Release",
+      "description": "Release CUDA build for architecture 86; requires nvcc in PATH",
+      "inherits": [
+        "linux-base",
+        "cuda-base",
+        "release-base"
+      ]
     }
   ],
   "buildPresets": [
     {
-      "name": "dev",
-      "configurePreset": "dev",
-      "jobs": 0
+      "name": "windows-build-base",
+      "hidden": true,
+      "jobs": 0,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
-      "name": "clang-debug",
-      "configurePreset": "clang-debug",
-      "jobs": 0
+      "name": "linux-build-base",
+      "hidden": true,
+      "jobs": 0,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     },
     {
-      "name": "release",
-      "configurePreset": "release",
-      "jobs": 0
+      "name": "windows-cpu-debug",
+      "inherits": "windows-build-base",
+      "configurePreset": "windows-cpu-debug"
+    },
+    {
+      "name": "windows-cpu-release",
+      "inherits": "windows-build-base",
+      "configurePreset": "windows-cpu-release"
+    },
+    {
+      "name": "windows-cpu-sanitizer",
+      "inherits": "windows-build-base",
+      "configurePreset": "windows-cpu-sanitizer"
+    },
+    {
+      "name": "windows-cuda-debug",
+      "inherits": "windows-build-base",
+      "configurePreset": "windows-cuda-debug"
+    },
+    {
+      "name": "windows-cuda-release",
+      "inherits": "windows-build-base",
+      "configurePreset": "windows-cuda-release"
+    },
+    {
+      "name": "linux-cpu-debug",
+      "inherits": "linux-build-base",
+      "configurePreset": "linux-cpu-debug"
+    },
+    {
+      "name": "linux-cpu-release",
+      "inherits": "linux-build-base",
+      "configurePreset": "linux-cpu-release"
+    },
+    {
+      "name": "linux-cpu-sanitizer",
+      "inherits": "linux-build-base",
+      "configurePreset": "linux-cpu-sanitizer"
+    },
+    {
+      "name": "linux-cuda-debug",
+      "inherits": "linux-build-base",
+      "configurePreset": "linux-cuda-debug"
+    },
+    {
+      "name": "linux-cuda-release",
+      "inherits": "linux-build-base",
+      "configurePreset": "linux-cuda-release"
     }
   ],
   "testPresets": [
     {
-      "name": "dev",
-      "configurePreset": "dev",
+      "name": "test-base",
+      "hidden": true,
       "output": {
         "outputOnFailure": true
       },
@@ -95,33 +282,74 @@
       }
     },
     {
-      "name": "clang-debug",
-      "configurePreset": "clang-debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
+      "name": "windows-test-base",
+      "hidden": true,
+      "inherits": "test-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
       }
-    }
-  ],
-  "workflowPresets": [
+    },
     {
-      "name": "clang-debug",
-      "steps": [
-        {
-          "type": "configure",
-          "name": "clang-debug"
-        },
-        {
-          "type": "build",
-          "name": "clang-debug"
-        },
-        {
-          "type": "test",
-          "name": "clang-debug"
-        }
-      ]
+      "name": "linux-test-base",
+      "hidden": true,
+      "inherits": "test-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "windows-cpu-debug",
+      "inherits": "windows-test-base",
+      "configurePreset": "windows-cpu-debug"
+    },
+    {
+      "name": "windows-cpu-release",
+      "inherits": "windows-test-base",
+      "configurePreset": "windows-cpu-release"
+    },
+    {
+      "name": "windows-cpu-sanitizer",
+      "inherits": "windows-test-base",
+      "configurePreset": "windows-cpu-sanitizer"
+    },
+    {
+      "name": "windows-cuda-debug",
+      "inherits": "windows-test-base",
+      "configurePreset": "windows-cuda-debug"
+    },
+    {
+      "name": "windows-cuda-release",
+      "inherits": "windows-test-base",
+      "configurePreset": "windows-cuda-release"
+    },
+    {
+      "name": "linux-cpu-debug",
+      "inherits": "linux-test-base",
+      "configurePreset": "linux-cpu-debug"
+    },
+    {
+      "name": "linux-cpu-release",
+      "inherits": "linux-test-base",
+      "configurePreset": "linux-cpu-release"
+    },
+    {
+      "name": "linux-cpu-sanitizer",
+      "inherits": "linux-test-base",
+      "configurePreset": "linux-cpu-sanitizer"
+    },
+    {
+      "name": "linux-cuda-debug",
+      "inherits": "linux-test-base",
+      "configurePreset": "linux-cuda-debug"
+    },
+    {
+      "name": "linux-cuda-release",
+      "inherits": "linux-test-base",
+      "configurePreset": "linux-cuda-release"
     }
   ]
 }
