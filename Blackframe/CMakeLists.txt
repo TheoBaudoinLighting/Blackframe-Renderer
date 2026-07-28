@@ -4,4 +4,7 @@ add_subdirectory(XPU)
 add_subdirectory(Renderer)
 add_subdirectory(IPC)
 add_subdirectory(Engine)
-add_subdirectory(Applications/Headless)
+
+if(BLACKFRAME_ENABLE_EMBREE)
+    add_subdirectory(Backends/CPU/Embree)
+endif()

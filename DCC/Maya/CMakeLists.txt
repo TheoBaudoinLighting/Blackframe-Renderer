@@ -30,6 +30,7 @@ find_library(
 )
 
 add_library(BlackframeMayaPlugin MODULE Source/MayaPluginEntry.cpp)
+blackframe_set_target_role(BlackframeMayaPlugin tool)
 
 target_include_directories(
     BlackframeMayaPlugin

@@ -2,6 +2,7 @@ add_executable(
     BlackframeXpuTests
     XpuBackendTest.cpp
 )
+blackframe_set_target_role(BlackframeXpuTests test)
 
 target_link_libraries(
     BlackframeXpuTests

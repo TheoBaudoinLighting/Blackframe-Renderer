@@ -3,6 +3,7 @@ add_executable(
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
 )
+blackframe_set_target_role(BlackframeRendererTests test)
 
 target_link_libraries(
     BlackframeRendererTests

@@ -5,6 +5,7 @@ add_executable(
     Source/DefaultLocalEndpointWindows.cpp
     Source/HeadlessMain.cpp
 )
+blackframe_set_target_role(BlackframeHeadless tool)
 
 if(WIN32)
     set_source_files_properties(Source/DefaultLocalEndpointPosix.cpp PROPERTIES HEADER_FILE_ONLY YES)
@@ -29,3 +30,7 @@ set_target_properties(
         OUTPUT_NAME Blackframe
         DEBUG_POSTFIX ""
 )
+
+add_custom_target(BlackframeTools)
+add_dependencies(BlackframeTools BlackframeHeadless)
+blackframe_set_target_role(BlackframeTools tool)

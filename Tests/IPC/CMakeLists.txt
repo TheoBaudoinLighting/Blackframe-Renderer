@@ -3,6 +3,7 @@ add_executable(
     LocalTransportTest.cpp
     ProtocolCodecTest.cpp
 )
+blackframe_set_target_role(BlackframeIpcTests test)
 
 target_link_libraries(
     BlackframeIpcTests

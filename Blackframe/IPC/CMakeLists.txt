@@ -1,5 +1,6 @@
 add_library(BlackframeIpc STATIC)
 add_library(Blackframe::IPC ALIAS BlackframeIpc)
+blackframe_set_target_role(BlackframeIpc core)
 
 target_sources(
     BlackframeIpc

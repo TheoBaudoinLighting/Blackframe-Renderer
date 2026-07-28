@@ -1,5 +1,6 @@
 add_library(BlackframeXpuBackendAbi INTERFACE)
 add_library(Blackframe::XpuBackendAbi ALIAS BlackframeXpuBackendAbi)
+blackframe_set_target_role(BlackframeXpuBackendAbi core)
 
 target_include_directories(
     BlackframeXpuBackendAbi
@@ -25,6 +26,7 @@ target_link_libraries(
 
 add_library(BlackframeXpuHost STATIC)
 add_library(Blackframe::XpuHost ALIAS BlackframeXpuHost)
+blackframe_set_target_role(BlackframeXpuHost core)
 
 target_sources(
     BlackframeXpuHost

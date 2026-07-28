@@ -3,6 +3,7 @@ add_executable(
     StatusTest.cpp
     VersionTest.cpp
 )
+blackframe_set_target_role(BlackframeCoreTests test)
 
 target_link_libraries(
     BlackframeCoreTests

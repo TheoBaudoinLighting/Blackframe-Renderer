@@ -9,6 +9,7 @@ add_library(
         Source/RenderSessionState.cpp
 )
 add_library(Blackframe::Renderer ALIAS BlackframeRenderer)
+blackframe_set_target_role(BlackframeRenderer core)
 
 target_include_directories(
     BlackframeRenderer

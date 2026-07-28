@@ -2,12 +2,12 @@ add_executable(
     BlackframeCudaSmokeTests
     CudaSmokeTest.cpp
 )
+blackframe_set_target_role(BlackframeCudaSmokeTests test)
 
 target_link_libraries(
     BlackframeCudaSmokeTests
     PRIVATE
-        Blackframe::CudaSharedHeaders
-        Blackframe::CudaSmokeKernel
+        Blackframe::Cuda
         Blackframe::ProjectOptions
         GTest::gtest_main
 )

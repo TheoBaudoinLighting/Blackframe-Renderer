@@ -1,4 +1,5 @@
 add_library(BlackframeXpuReferenceCpu MODULE)
+blackframe_set_target_role(BlackframeXpuReferenceCpu reference)
 
 target_sources(
     BlackframeXpuReferenceCpu

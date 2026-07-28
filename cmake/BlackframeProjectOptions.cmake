@@ -3,6 +3,7 @@ include_guard(GLOBAL)
 function(blackframe_create_project_options)
     add_library(BlackframeProjectOptions INTERFACE)
     add_library(Blackframe::ProjectOptions ALIAS BlackframeProjectOptions)
+    blackframe_set_target_role(BlackframeProjectOptions core)
 
     target_compile_features(BlackframeProjectOptions INTERFACE cxx_std_26)
 

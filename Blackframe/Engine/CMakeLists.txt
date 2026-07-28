@@ -5,6 +5,7 @@ add_library(
         Source/Engine.cpp
 )
 add_library(Blackframe::Engine ALIAS BlackframeEngine)
+blackframe_set_target_role(BlackframeEngine core)
 
 target_include_directories(
     BlackframeEngine

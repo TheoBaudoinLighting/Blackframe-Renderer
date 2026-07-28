@@ -2,6 +2,7 @@ add_executable(
     BlackframeHostLanguageTests
     Cxx26LanguageFeatureTest.cpp
 )
+blackframe_set_target_role(BlackframeHostLanguageTests test)
 
 target_link_libraries(
     BlackframeHostLanguageTests
@@ -62,6 +63,37 @@ add_test(
 
 set_tests_properties(
     Blackframe.Build.DependencyManifest
+    PROPERTIES
+        LABELS "unit;cpu"
+)
+
+add_test(
+    NAME Blackframe.Build.TargetGraph
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DTARGET_GRAPH_PATH=${CMAKE_BINARY_DIR}/blackframe-target-graph.json"
+        "-DCPU_EMBREE_ENABLED=${BLACKFRAME_ENABLE_EMBREE}"
+        "-DCUDA_ENABLED=${BLACKFRAME_ENABLE_CUDA}"
+        "-DTOOLS_ENABLED=${BLACKFRAME_BUILD_TOOLS}"
+        "-DBENCHMARKS_ENABLED=${BLACKFRAME_BUILD_BENCHMARKS}"
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/TargetGraphTest.cmake"
+)
+
+add_test(
+    NAME Blackframe.Build.TargetGraph.RejectsCycle
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DPROBE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/TargetGraphCycle"
+        "-DPROBE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/TargetGraphCycle"
+        "-DTARGET_GRAPH_MODULE=${CMAKE_SOURCE_DIR}/cmake/BlackframeTargetGraph.cmake"
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/TargetGraphCycleRejectionTest.cmake"
+)
+
+set_tests_properties(
+    Blackframe.Build.TargetGraph
+    Blackframe.Build.TargetGraph.RejectsCycle
     PROPERTIES
         LABELS "unit;cpu"
 )

@@ -2,6 +2,7 @@ add_executable(
     BlackframeEngineTests
     EngineTest.cpp
 )
+blackframe_set_target_role(BlackframeEngineTests test)
 
 target_link_libraries(
     BlackframeEngineTests

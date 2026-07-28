@@ -11,3 +11,22 @@ add_subdirectory(Engine)
 if(BLACKFRAME_ENABLE_CUDA)
     add_subdirectory(CUDA)
 endif()
+
+set(
+    blackframe_test_targets
+    BlackframeCoreTests
+    BlackframeEngineTests
+    BlackframeExtensionAbiCTest
+    BlackframeExtensionTests
+    BlackframeHostLanguageTests
+    BlackframeIpcTests
+    BlackframeRendererTests
+    BlackframeXpuTests
+)
+if(BLACKFRAME_ENABLE_CUDA)
+    list(APPEND blackframe_test_targets BlackframeCudaSmokeTests)
+endif()
+
+add_custom_target(BlackframeTests)
+add_dependencies(BlackframeTests ${blackframe_test_targets})
+blackframe_set_target_role(BlackframeTests test)

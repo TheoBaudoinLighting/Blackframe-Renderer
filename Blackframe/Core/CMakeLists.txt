@@ -7,6 +7,7 @@ add_library(
         Source/Version.cpp
 )
 add_library(Blackframe::Core ALIAS BlackframeCore)
+blackframe_set_target_role(BlackframeCore core)
 
 target_include_directories(
     BlackframeCore

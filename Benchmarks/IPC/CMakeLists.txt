@@ -2,6 +2,7 @@ add_executable(
     BlackframeIpcBenchmarks
     ProtocolCodecBenchmark.cpp
 )
+blackframe_set_target_role(BlackframeIpcBenchmarks benchmark)
 
 target_link_libraries(
     BlackframeIpcBenchmarks

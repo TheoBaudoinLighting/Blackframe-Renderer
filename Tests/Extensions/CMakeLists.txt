@@ -2,8 +2,10 @@ add_executable(
     BlackframeExtensionTests
     ExtensionModuleTest.cpp
 )
+blackframe_set_target_role(BlackframeExtensionTests test)
 
 add_library(BlackframeMissingQueryExtension MODULE Fixtures/MissingQueryExtension.cpp)
+blackframe_set_target_role(BlackframeMissingQueryExtension test)
 target_link_libraries(BlackframeMissingQueryExtension PRIVATE Blackframe::ProjectOptions)
 set_target_properties(
     BlackframeMissingQueryExtension
@@ -13,6 +15,7 @@ set_target_properties(
 )
 
 add_library(BlackframeIncompatibleExtension MODULE Fixtures/IncompatibleExtension.cpp)
+blackframe_set_target_role(BlackframeIncompatibleExtension test)
 target_link_libraries(
     BlackframeIncompatibleExtension
     PRIVATE
@@ -32,6 +35,7 @@ set_target_properties(
 )
 
 add_library(BlackframeLifecycleExtension MODULE Fixtures/LifecycleExtension.cpp)
+blackframe_set_target_role(BlackframeLifecycleExtension test)
 target_link_libraries(
     BlackframeLifecycleExtension
     PRIVATE
@@ -82,6 +86,7 @@ add_executable(
     BlackframeExtensionAbiCTest
     ExtensionAbiCCompilation.c
 )
+blackframe_set_target_role(BlackframeExtensionAbiCTest test)
 
 target_link_libraries(BlackframeExtensionAbiCTest PRIVATE Blackframe::ExtensionAbi)
 set_target_properties(

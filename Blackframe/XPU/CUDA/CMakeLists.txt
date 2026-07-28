@@ -16,6 +16,7 @@ endif()
 
 add_library(BlackframeCudaSharedHeaders INTERFACE)
 add_library(Blackframe::CudaSharedHeaders ALIAS BlackframeCudaSharedHeaders)
+blackframe_set_target_role(BlackframeCudaSharedHeaders cuda)
 
 target_sources(
     BlackframeCudaSharedHeaders
@@ -47,6 +48,7 @@ add_library(
         Source/CudaSmokeKernel.cu
 )
 add_library(Blackframe::CudaSmokeKernel ALIAS BlackframeCudaSmokeKernel)
+blackframe_set_target_role(BlackframeCudaSmokeKernel cuda)
 
 blackframe_configure_cuda_target(BlackframeCudaSmokeKernel)
 
@@ -58,3 +60,15 @@ target_link_libraries(
         Blackframe::CudaToolkit
         Blackframe::ProjectOptions
 )
+
+add_library(BlackframeCuda INTERFACE)
+add_library(Blackframe::Cuda ALIAS BlackframeCuda)
+
+target_link_libraries(
+    BlackframeCuda
+    INTERFACE
+        Blackframe::CudaSmokeKernel
+        Blackframe::ProjectOptions
+)
+
+blackframe_set_target_role(BlackframeCuda cuda)

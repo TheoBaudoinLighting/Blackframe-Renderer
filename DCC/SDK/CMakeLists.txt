@@ -1,5 +1,6 @@
 add_library(BlackframeDccSdk INTERFACE)
 add_library(Blackframe::DccSdk ALIAS BlackframeDccSdk)
+blackframe_set_target_role(BlackframeDccSdk tool)
 
 target_sources(
     BlackframeDccSdk

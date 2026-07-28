@@ -152,6 +152,7 @@ function(blackframe_fetch_embree)
     add_library(BlackframeEmbree INTERFACE)
     add_library(Blackframe::Embree ALIAS BlackframeEmbree)
     target_link_libraries(BlackframeEmbree INTERFACE embree)
+    blackframe_set_target_role(BlackframeEmbree dependency)
 endfunction()
 
 function(blackframe_fetch_stb)
@@ -174,6 +175,7 @@ function(blackframe_fetch_stb)
     add_library(BlackframeStb INTERFACE)
     add_library(Blackframe::Stb ALIAS BlackframeStb)
     target_include_directories(BlackframeStb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+    blackframe_set_target_role(BlackframeStb dependency)
 endfunction()
 
 function(blackframe_find_cuda_toolkit)
@@ -208,6 +210,7 @@ function(blackframe_find_cuda_toolkit)
             CUDA::cuda_driver
             CUDA::cudart
     )
+    blackframe_set_target_role(BlackframeCudaToolkit dependency)
 
     set_property(
         GLOBAL

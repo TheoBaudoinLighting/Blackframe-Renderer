@@ -1,5 +1,6 @@
 add_library(BlackframeExtensionAbi INTERFACE)
 add_library(Blackframe::ExtensionAbi ALIAS BlackframeExtensionAbi)
+blackframe_set_target_role(BlackframeExtensionAbi core)
 
 target_include_directories(
     BlackframeExtensionAbi
@@ -19,6 +20,7 @@ target_sources(
 
 add_library(BlackframeExtensionLoader STATIC)
 add_library(Blackframe::ExtensionLoader ALIAS BlackframeExtensionLoader)
+blackframe_set_target_role(BlackframeExtensionLoader core)
 
 target_sources(
     BlackframeExtensionLoader
