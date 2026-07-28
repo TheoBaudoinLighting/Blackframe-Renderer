@@ -1,5 +1,5 @@
 add_subdirectory(IPC)
 
 add_custom_target(BlackframeBenchmarks)
-add_dependencies(BlackframeBenchmarks BlackframeIpcBenchmarks)
+add_dependencies(BlackframeBenchmarks BlackframeRenderBenchmarks)
 blackframe_set_target_role(BlackframeBenchmarks benchmark)

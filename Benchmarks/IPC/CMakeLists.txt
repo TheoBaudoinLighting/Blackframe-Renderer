@@ -1,13 +1,34 @@
 add_executable(
-    BlackframeIpcBenchmarks
+    BlackframeRenderBenchmarks
     ProtocolCodecBenchmark.cpp
+    RenderBenchmarksMain.cpp
 )
-blackframe_set_target_role(BlackframeIpcBenchmarks benchmark)
+blackframe_set_target_role(BlackframeRenderBenchmarks benchmark)
 
 target_link_libraries(
-    BlackframeIpcBenchmarks
+    BlackframeRenderBenchmarks
     PRIVATE
         Blackframe::IPC
         Blackframe::ProjectOptions
-        benchmark::benchmark_main
+        benchmark::benchmark
 )
+
+set_target_properties(
+    BlackframeRenderBenchmarks
+    PROPERTIES
+        OUTPUT_NAME render_benchmarks
+        DEBUG_POSTFIX ""
+)
+
+if(BUILD_TESTING)
+    add_test(
+        NAME Blackframe.Executables.RenderBenchmarks.Help
+        COMMAND "$<TARGET_FILE:BlackframeRenderBenchmarks>" --help
+    )
+    set_tests_properties(
+        Blackframe.Executables.RenderBenchmarks.Help
+        PROPERTIES
+            LABELS "smoke;cpu"
+            PASS_REGULAR_EXPRESSION "render_benchmarks --help"
+    )
+endif()

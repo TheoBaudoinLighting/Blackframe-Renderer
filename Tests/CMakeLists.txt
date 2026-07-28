@@ -1,5 +1,6 @@
 include(GoogleTest)
 
+add_subdirectory(Applications)
 add_subdirectory(Core)
 add_subdirectory(Build)
 add_subdirectory(Renderer)
@@ -20,6 +21,7 @@ set(
     BlackframeExtensionTests
     BlackframeHostLanguageTests
     BlackframeIpcTests
+    BlackframeRenderTests
     BlackframeRendererTests
     BlackframeXpuTests
 )

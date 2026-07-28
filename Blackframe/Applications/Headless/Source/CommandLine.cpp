@@ -98,9 +98,10 @@ core::Result<CommandLine> parse_command_line(const int argument_count,
 std::string command_line_usage() {
     return "Blackframe\n"
            "Usage:\n"
-           "  Blackframe serve [--endpoint <address>] [--xpu-plugin <absolute-path>]...\n"
-           "  Blackframe request <ping|version|devices|shutdown> [--endpoint <address>]\n"
-           "  Blackframe --version\n";
+           "  render serve [--endpoint <address>] [--xpu-plugin <absolute-path>]...\n"
+           "  render request <ping|version|devices|shutdown> [--endpoint <address>]\n"
+           "  render --version\n"
+           "  render --help\n";
 }
 
 } // namespace blackframe::application
