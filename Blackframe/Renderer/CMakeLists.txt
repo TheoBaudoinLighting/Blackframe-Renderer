@@ -1,10 +1,12 @@
 add_library(
     BlackframeRenderer
     STATIC
+        Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
+        Source/CapabilityRegistry.cpp
         Source/RenderConfiguration.cpp
         Source/RenderConfigurationLimits.hpp
         Source/RenderConfigurationSchema.cpp
@@ -26,6 +28,14 @@ target_link_libraries(
         Blackframe::Core
     PRIVATE
         Blackframe::ProjectOptions
+)
+
+target_compile_definitions(
+    BlackframeRenderer
+    PRIVATE
+        BLACKFRAME_CAPABILITY_REFERENCE_CPU=$<BOOL:${BLACKFRAME_BUILD_REFERENCE_PLUGINS}>
+        BLACKFRAME_CAPABILITY_EMBREE=$<BOOL:${BLACKFRAME_ENABLE_EMBREE}>
+        BLACKFRAME_CAPABILITY_CUDA=$<BOOL:${BLACKFRAME_ENABLE_CUDA}>
 )
 
 set_target_properties(

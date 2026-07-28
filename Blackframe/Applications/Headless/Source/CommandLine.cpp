@@ -53,6 +53,10 @@ core::Result<CommandLine> parse_command_line(const int argument_count,
         command_line.operation = Operation::show_version;
         return command_line;
     }
+    if (operation == "--capabilities" || operation == "capabilities") {
+        command_line.operation = Operation::show_capabilities;
+        return command_line;
+    }
     if (operation == "serve") {
         command_line.operation = Operation::serve;
     } else if (operation == "request") {
@@ -100,6 +104,7 @@ std::string command_line_usage() {
            "Usage:\n"
            "  render serve [--endpoint <address>] [--xpu-plugin <absolute-path>]...\n"
            "  render request <ping|version|devices|shutdown> [--endpoint <address>]\n"
+           "  render --capabilities\n"
            "  render --version\n"
            "  render --help\n";
 }

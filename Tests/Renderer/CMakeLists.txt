@@ -1,5 +1,6 @@
 add_executable(
     BlackframeRendererTests
+    CapabilityRegistryTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
 )

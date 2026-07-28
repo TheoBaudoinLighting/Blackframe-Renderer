@@ -11,6 +11,7 @@ namespace blackframe::application {
 enum class Operation {
     show_help,
     show_version,
+    show_capabilities,
     serve,
     request,
 };

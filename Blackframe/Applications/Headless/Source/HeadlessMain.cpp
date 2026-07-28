@@ -4,6 +4,7 @@
 #include <Blackframe/Engine/Engine.hpp>
 #include <Blackframe/IPC/LocalTransport.hpp>
 #include <Blackframe/IPC/ProtocolCodec.hpp>
+#include <Blackframe/Renderer/CapabilityRegistry.hpp>
 #include <cstdint>
 #include <iostream>
 #include <string_view>
@@ -110,6 +111,9 @@ int main(const int argument_count, const char* const* const arguments) {
     case blackframe::application::Operation::show_version:
         std::cout << blackframe::core::product_name() << ' ' << blackframe::core::version_string()
                   << '\n';
+        return 0;
+    case blackframe::application::Operation::show_capabilities:
+        std::cout << blackframe::renderer::backend_capability_manifest();
         return 0;
     case blackframe::application::Operation::serve:
         return serve(*command_line);

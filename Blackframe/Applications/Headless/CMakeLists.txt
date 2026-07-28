@@ -22,6 +22,7 @@ target_link_libraries(
         Blackframe::Engine
         Blackframe::IPC
         Blackframe::ProjectOptions
+        Blackframe::Renderer
 )
 
 set_target_properties(

@@ -44,6 +44,38 @@ if(TARGET BlackframeRender)
             LABELS "smoke;cpu"
             PASS_REGULAR_EXPRESSION "render --help"
     )
+
+    if(BLACKFRAME_BUILD_REFERENCE_PLUGINS)
+        set(reference_cpu_status experimental)
+    else()
+        set(reference_cpu_status unavailable)
+    endif()
+    if(BLACKFRAME_ENABLE_EMBREE)
+        set(embree_status supported)
+    else()
+        set(embree_status unavailable)
+    endif()
+    if(BLACKFRAME_ENABLE_CUDA)
+        set(cuda_status supported)
+    else()
+        set(cuda_status unavailable)
+    endif()
+
+    add_test(
+        NAME Blackframe.Executables.Render.Capabilities
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DRENDER_EXECUTABLE=$<TARGET_FILE:BlackframeRender>"
+            "-DREFERENCE_CPU_STATUS=${reference_cpu_status}"
+            "-DEMBREE_STATUS=${embree_status}"
+            "-DCUDA_STATUS=${cuda_status}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/ValidateCapabilityManifest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.Executables.Render.Capabilities
+        PROPERTIES
+            LABELS "smoke;cpu"
+    )
 endif()
 
 set_tests_properties(
