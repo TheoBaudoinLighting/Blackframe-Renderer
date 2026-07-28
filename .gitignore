@@ -1,0 +1,14 @@
+/build/*
+!/build/.gitkeep
+/user/**
+/CMakeUserPresets.json
+
+# Local editor and operating-system state.
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo
+*.swp
+.DS_Store
+Thumbs.db

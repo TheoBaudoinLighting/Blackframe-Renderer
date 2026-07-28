@@ -1,0 +1,7 @@
+add_subdirectory(Core)
+add_subdirectory(Extensions)
+add_subdirectory(XPU)
+add_subdirectory(Renderer)
+add_subdirectory(IPC)
+add_subdirectory(Engine)
+add_subdirectory(Applications/Headless)

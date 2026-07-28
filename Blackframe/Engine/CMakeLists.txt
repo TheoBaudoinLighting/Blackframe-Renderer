@@ -1,0 +1,32 @@
+add_library(
+    BlackframeEngine
+    STATIC
+        Include/Blackframe/Engine/Engine.hpp
+        Source/Engine.cpp
+)
+add_library(Blackframe::Engine ALIAS BlackframeEngine)
+
+target_include_directories(
+    BlackframeEngine
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+target_link_libraries(
+    BlackframeEngine
+    PUBLIC
+        Blackframe::Core
+        Blackframe::IPC
+        Blackframe::Renderer
+        Blackframe::XpuHost
+    PRIVATE
+        Blackframe::ProjectOptions
+)
+
+set_target_properties(
+    BlackframeEngine
+    PROPERTIES
+        OUTPUT_NAME BlackframeEngine
+        DEBUG_POSTFIX d
+)
