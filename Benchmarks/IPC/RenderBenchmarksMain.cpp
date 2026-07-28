@@ -9,7 +9,9 @@ constexpr auto usage = std::string_view{
     "Blackframe benchmark runner\n"
     "Usage:\n"
     "  render_benchmarks [Google Benchmark options]\n"
-    "  render_benchmarks --help\n",
+    "  render_benchmarks --help\n"
+    "JSON output:\n"
+    "  render_benchmarks --benchmark_out=<path> --benchmark_out_format=json\n",
 };
 
 } // namespace
