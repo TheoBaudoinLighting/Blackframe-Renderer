@@ -14,11 +14,10 @@ project(
     LANGUAGES C CXX
 )
 
-set(CMAKE_CXX_EXTENSIONS OFF)
-
 include(CTest)
 include(GNUInstallDirs)
 include(BlackframeDependencies)
+include(BlackframeHostLanguage)
 include(BlackframeProjectOptions)
 
 option(BLACKFRAME_BUILD_BENCHMARKS "Build Blackframe microbenchmarks" ${PROJECT_IS_TOP_LEVEL})
@@ -31,8 +30,6 @@ option(BLACKFRAME_WARNINGS_AS_ERRORS "Treat warnings in Blackframe targets as er
 option(BLACKFRAME_ENABLE_SANITIZERS "Enable supported address/undefined sanitizers" OFF)
 
 set(blackframe_plugin_output_directory "${CMAKE_BINARY_DIR}/plugins")
-
-blackframe_create_project_options()
 
 if(BLACKFRAME_ENABLE_EMBREE)
     blackframe_fetch_embree()
@@ -53,6 +50,9 @@ endif()
 if(BLACKFRAME_BUILD_BENCHMARKS)
     blackframe_fetch_google_benchmark()
 endif()
+
+blackframe_require_host_cxx26()
+blackframe_create_project_options()
 
 add_subdirectory(Blackframe)
 

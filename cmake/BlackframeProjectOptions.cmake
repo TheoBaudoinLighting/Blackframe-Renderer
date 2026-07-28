@@ -4,11 +4,7 @@ function(blackframe_create_project_options)
     add_library(BlackframeProjectOptions INTERFACE)
     add_library(Blackframe::ProjectOptions ALIAS BlackframeProjectOptions)
 
-    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-        target_compile_options(BlackframeProjectOptions INTERFACE /std:c++latest)
-    else()
-        target_compile_features(BlackframeProjectOptions INTERFACE cxx_std_26)
-    endif()
+    target_compile_features(BlackframeProjectOptions INTERFACE cxx_std_26)
 
     if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         target_compile_options(
