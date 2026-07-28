@@ -128,6 +128,14 @@ function(blackframe_fetch_embree)
     set(EMBREE_INSTALL_DEPENDENCIES OFF CACHE BOOL "" FORCE)
     set(EMBREE_TESTING_INTENSITY 0 CACHE STRING "" FORCE)
 
+    # Embree's Clang flags still request C++11, which is too old for the
+    # current MSVC standard library used by clang++. A later CMake-managed
+    # standard flag keeps the dependency build portable without leaking into
+    # Blackframe targets.
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+
     # Embree's test CMake defines helper macros only when BUILD_TESTING is true,
     # even at intensity zero. Keep that local requirement from changing the
     # Blackframe option seen after this function returns.
