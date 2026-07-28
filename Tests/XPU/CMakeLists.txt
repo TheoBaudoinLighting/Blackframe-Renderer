@@ -30,4 +30,6 @@ gtest_discover_tests(
     BlackframeXpuTests
     DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "smoke;regression;nightly;cpu"
 )

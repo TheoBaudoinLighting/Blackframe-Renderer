@@ -80,6 +80,8 @@ gtest_discover_tests(
     BlackframeExtensionTests
     DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "smoke;regression;nightly;cpu"
 )
 
 add_executable(
@@ -103,3 +105,8 @@ set_target_properties(
 )
 
 add_test(NAME Blackframe.ExtensionAbi.CCompilation COMMAND BlackframeExtensionAbiCTest)
+set_tests_properties(
+    Blackframe.ExtensionAbi.CCompilation
+    PROPERTIES
+        LABELS "unit;cpu"
+)

@@ -97,3 +97,24 @@ set_tests_properties(
     PROPERTIES
         LABELS "unit;cpu"
 )
+
+set(blackframe_required_ctest_labels "unit,smoke,regression,nightly,cpu")
+if(BLACKFRAME_ENABLE_CUDA)
+    string(APPEND blackframe_required_ctest_labels ",cuda")
+endif()
+
+add_test(
+    NAME Blackframe.Build.CTestLabelInventory
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DCTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
+        "-DBINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
+        "-DREQUIRED_LABELS=${blackframe_required_ctest_labels}"
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/CTestLabelInventoryTest.cmake"
+)
+set_tests_properties(
+    Blackframe.Build.CTestLabelInventory
+    PROPERTIES
+        LABELS "smoke;cpu"
+)
