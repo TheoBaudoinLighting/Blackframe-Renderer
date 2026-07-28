@@ -6,6 +6,8 @@ add_library(
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Source/RenderConfiguration.cpp
+        Source/RenderConfigurationLimits.hpp
+        Source/RenderConfigurationSchema.cpp
         Source/RenderSessionState.cpp
 )
 add_library(Blackframe::Renderer ALIAS BlackframeRenderer)
