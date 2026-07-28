@@ -67,6 +67,25 @@ set_tests_properties(
         LABELS "unit;cpu"
 )
 
+if(NOT BLACKFRAME_ENABLE_CUDA)
+    add_test(
+        NAME Blackframe.Capabilities.CudaUnavailable
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMANIFEST_PATH=${BLACKFRAME_DEPENDENCY_MANIFEST}"
+            "-DTARGET_GRAPH_PATH=${CMAKE_BINARY_DIR}/blackframe-target-graph.json"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/CudaCapabilityUnavailableTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.Capabilities.CudaUnavailable
+        PROPERTIES
+            LABELS "smoke;cpu"
+            PASS_REGULAR_EXPRESSION
+                "CUDA capability is explicitly unavailable in this CPU-only build"
+    )
+endif()
+
 add_test(
     NAME Blackframe.Build.TargetGraph
     COMMAND

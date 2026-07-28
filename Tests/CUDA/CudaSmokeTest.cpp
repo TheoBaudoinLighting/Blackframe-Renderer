@@ -1,6 +1,7 @@
 #include <Blackframe/XPU/CUDA/SmokeKernel.hpp>
 #include <Blackframe/XPU/CUDA/SmokeKernelPayload.hpp>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
 #include <type_traits>
 
@@ -17,9 +18,18 @@ TEST(CudaSmoke, ExecutesKernelOnDevice) {
     int device_count = 0;
     const auto status = blackframe_cuda_run_smoke(input, xor_mask, &output, &device_count);
 
-    ASSERT_EQ(status, 0);
+    ASSERT_EQ(status, static_cast<int>(cudaSuccess))
+        << cudaGetErrorString(static_cast<cudaError_t>(status));
     EXPECT_GT(device_count, 0);
     EXPECT_EQ(output, input ^ xor_mask);
+
+    int active_device = -1;
+    ASSERT_EQ(cudaGetDevice(&active_device), cudaSuccess);
+    EXPECT_EQ(active_device, 0);
+
+    cudaDeviceProp device_properties{};
+    ASSERT_EQ(cudaGetDeviceProperties(&device_properties, active_device), cudaSuccess);
+    EXPECT_NE(device_properties.name[0], '\0');
 }
 
 TEST(CudaSharedHeaders, CompileAsCudaCxx20) {

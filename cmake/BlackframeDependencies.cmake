@@ -157,6 +157,15 @@ function(blackframe_fetch_embree)
         message(FATAL_ERROR "The pinned Embree source did not provide the expected `embree` target.")
     endif()
 
+    if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # A static Embree archive does not need Windows version metadata.
+        # Removing the resource avoids mixing the SDK resource compiler with
+        # Clang dependency flags when nvcc selects an MSVC host environment.
+        get_target_property(blackframe_embree_sources embree SOURCES)
+        list(FILTER blackframe_embree_sources EXCLUDE REGEX "\\.rc$")
+        set_property(TARGET embree PROPERTY SOURCES "${blackframe_embree_sources}")
+    endif()
+
     add_library(BlackframeEmbree INTERFACE)
     add_library(Blackframe::Embree ALIAS BlackframeEmbree)
     target_link_libraries(BlackframeEmbree INTERFACE embree)

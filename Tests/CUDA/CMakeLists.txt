@@ -8,6 +8,7 @@ target_link_libraries(
     BlackframeCudaSmokeTests
     PRIVATE
         Blackframe::Cuda
+        Blackframe::CudaToolkit
         Blackframe::ProjectOptions
         GTest::gtest_main
 )
