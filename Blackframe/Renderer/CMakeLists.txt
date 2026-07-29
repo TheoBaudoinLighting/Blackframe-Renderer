@@ -4,6 +4,7 @@ add_library(
         Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/Color.hpp
+        Include/Blackframe/Renderer/Disk.hpp
         Include/Blackframe/Renderer/DisplayPsnr.hpp
         Include/Blackframe/Renderer/DisplayTransform.hpp
         Include/Blackframe/Renderer/Film.hpp
@@ -20,6 +21,7 @@ add_library(
         Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/PinholeCamera.hpp
         Include/Blackframe/Renderer/PixelJitter.hpp
+        Include/Blackframe/Renderer/Plane.hpp
         Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/Ray.hpp
         Include/Blackframe/Renderer/RayDiagnostics.hpp
