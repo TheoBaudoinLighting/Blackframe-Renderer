@@ -4,6 +4,8 @@ add_library(
         Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/Color.hpp
+        Include/Blackframe/Renderer/DisplayPsnr.hpp
+        Include/Blackframe/Renderer/DisplayTransform.hpp
         Include/Blackframe/Renderer/Film.hpp
         Include/Blackframe/Renderer/FilmTile.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp

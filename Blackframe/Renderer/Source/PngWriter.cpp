@@ -1,3 +1,4 @@
+#include <Blackframe/Renderer/DisplayTransform.hpp>
 #include <Blackframe/Renderer/PngWriter.hpp>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
@@ -20,12 +21,6 @@ namespace blackframe::renderer {
 namespace {
 
 inline constexpr auto channel_count = std::size_t{3};
-inline constexpr auto preview_exposure_multiplier = 1.0;
-inline constexpr auto srgb_linear_threshold = 0.0031308;
-inline constexpr auto srgb_linear_scale = 12.92;
-inline constexpr auto srgb_power_scale = 1.055;
-inline constexpr auto srgb_power = 1.0 / 2.4;
-inline constexpr auto srgb_power_offset = 0.055;
 
 struct EncodedPng final {
     std::vector<std::uint8_t> bytes;
@@ -84,13 +79,7 @@ struct EncodedPng final {
     return {};
 }
 
-[[nodiscard]] std::uint8_t encode_srgb_channel(const TransportScalar scene_linear) {
-    const auto exposed =
-        std::clamp(static_cast<double>(scene_linear) * preview_exposure_multiplier, 0.0, 1.0);
-    const auto display_value =
-        exposed <= srgb_linear_threshold
-            ? srgb_linear_scale * exposed
-            : srgb_power_scale * std::pow(exposed, srgb_power) - srgb_power_offset;
+[[nodiscard]] std::uint8_t quantize_display_channel(const ReferenceScalar display_value) {
     const auto quantized = std::floor(display_value * 255.0 + 0.5);
     return static_cast<std::uint8_t>(std::clamp(quantized, 0.0, 255.0));
 }
@@ -138,9 +127,13 @@ void append_encoded_bytes(void* const context, void* const data, const int size)
                 if (!color.has_value()) {
                     return std::unexpected(color.error());
                 }
-                pixels[destination++] = encode_srgb_channel(color->red);
-                pixels[destination++] = encode_srgb_channel(color->green);
-                pixels[destination++] = encode_srgb_channel(color->blue);
+                const auto display = apply_fixed_display_transform(*color);
+                if (!display.has_value()) {
+                    return std::unexpected(display.error());
+                }
+                pixels[destination++] = quantize_display_channel(display->red);
+                pixels[destination++] = quantize_display_channel(display->green);
+                pixels[destination++] = quantize_display_channel(display->blue);
             }
         }
         return pixels;
