@@ -26,6 +26,26 @@ template <AccumulationPrecision Precision> struct FilmPixelT final {
     [[nodiscard]] constexpr bool operator==(const FilmPixelT&) const noexcept = default;
 };
 
+namespace film_detail {
+
+template <AccumulationPrecision Precision> struct StoragePixelT;
+
+template <> struct StoragePixelT<AccumulationPrecision::float32> final {
+    LinearRgbT<AccumulationScalar<AccumulationPrecision::float32>> weighted_sum{};
+    AccumulationScalar<AccumulationPrecision::float32> weight_sum{};
+    std::uint64_t sample_count{};
+};
+
+template <> struct StoragePixelT<AccumulationPrecision::float64> final {
+    LinearRgbT<AccumulationScalar<AccumulationPrecision::float64>> weighted_sum{};
+    LinearRgbT<AccumulationScalar<AccumulationPrecision::float64>> weighted_compensation{};
+    AccumulationScalar<AccumulationPrecision::float64> weight_sum{};
+    AccumulationScalar<AccumulationPrecision::float64> weight_compensation{};
+    std::uint64_t sample_count{};
+};
+
+} // namespace film_detail
+
 template <AccumulationPrecision Precision> class FilmT final {
   public:
     using Scalar = AccumulationScalar<Precision>;
@@ -41,7 +61,7 @@ template <AccumulationPrecision Precision> class FilmT final {
         const auto pixel_count =
             static_cast<std::size_t>(extent.width) * static_cast<std::size_t>(extent.height);
         try {
-            return FilmT{extent, std::vector<Pixel>(pixel_count)};
+            return FilmT{extent, std::vector<StoragePixel>(pixel_count)};
         } catch (const std::bad_alloc&) {
             return allocation_error();
         } catch (const std::length_error&) {
@@ -62,7 +82,7 @@ template <AccumulationPrecision Precision> class FilmT final {
         if (!index.has_value()) {
             return std::unexpected(index.error());
         }
-        return pixels_[*index];
+        return snapshot(pixels_[*index]);
     }
 
     [[nodiscard]] core::Status add_sample(const std::uint32_t x, const std::uint32_t y,
@@ -84,17 +104,13 @@ template <AccumulationPrecision Precision> class FilmT final {
             });
         }
 
-        const auto candidate = Pixel{
-            .weighted_sum =
-                Color{
-                    .red = current.weighted_sum.red + sample.red * weight,
-                    .green = current.weighted_sum.green + sample.green * weight,
-                    .blue = current.weighted_sum.blue + sample.blue * weight,
-                },
-            .weight_sum = current.weight_sum + weight,
-            .sample_count = current.sample_count + 1,
-        };
-        if (!finite(candidate.weighted_sum) || !std::isfinite(candidate.weight_sum)) {
+        auto candidate = current;
+        accumulate_sample(candidate, sample, weight);
+        ++candidate.sample_count;
+
+        const auto candidate_snapshot = snapshot(candidate);
+        if (!finite_storage(candidate) || !finite(candidate_snapshot.weighted_sum) ||
+            !std::isfinite(candidate_snapshot.weight_sum)) {
             return std::unexpected(
                 invalid_sample_error("Film accumulation produced a non-finite value."));
         }
@@ -129,11 +145,72 @@ template <AccumulationPrecision Precision> class FilmT final {
     }
 
   private:
-    FilmT(const RenderExtent extent, std::vector<Pixel> pixels) noexcept
+    using StoragePixel = film_detail::StoragePixelT<Precision>;
+
+    FilmT(const RenderExtent extent, std::vector<StoragePixel> pixels) noexcept
         : extent_{extent}, pixels_{std::move(pixels)} {}
 
     [[nodiscard]] static bool finite(const Color color) noexcept {
         return std::isfinite(color.red) && std::isfinite(color.green) && std::isfinite(color.blue);
+    }
+
+    // Neumaier compensation recovers terms smaller than the current double-precision sum.
+    static void accumulate(Scalar& sum, Scalar& compensation, const Scalar value) noexcept {
+        const auto updated = sum + value;
+        if (std::abs(sum) >= std::abs(value)) {
+            compensation += (sum - updated) + value;
+        } else {
+            compensation += (value - updated) + sum;
+        }
+        sum = updated;
+    }
+
+    static void accumulate_sample(StoragePixel& stored, const Color sample,
+                                  const Scalar weight) noexcept {
+        if constexpr (Precision == AccumulationPrecision::float64) {
+            accumulate(stored.weighted_sum.red, stored.weighted_compensation.red,
+                       sample.red * weight);
+            accumulate(stored.weighted_sum.green, stored.weighted_compensation.green,
+                       sample.green * weight);
+            accumulate(stored.weighted_sum.blue, stored.weighted_compensation.blue,
+                       sample.blue * weight);
+            accumulate(stored.weight_sum, stored.weight_compensation, weight);
+        } else {
+            stored.weighted_sum.red += sample.red * weight;
+            stored.weighted_sum.green += sample.green * weight;
+            stored.weighted_sum.blue += sample.blue * weight;
+            stored.weight_sum += weight;
+        }
+    }
+
+    [[nodiscard]] static Pixel snapshot(const StoragePixel& stored) noexcept {
+        if constexpr (Precision == AccumulationPrecision::float64) {
+            return Pixel{
+                .weighted_sum =
+                    Color{
+                        .red = stored.weighted_sum.red + stored.weighted_compensation.red,
+                        .green = stored.weighted_sum.green + stored.weighted_compensation.green,
+                        .blue = stored.weighted_sum.blue + stored.weighted_compensation.blue,
+                    },
+                .weight_sum = stored.weight_sum + stored.weight_compensation,
+                .sample_count = stored.sample_count,
+            };
+        } else {
+            return Pixel{
+                .weighted_sum = stored.weighted_sum,
+                .weight_sum = stored.weight_sum,
+                .sample_count = stored.sample_count,
+            };
+        }
+    }
+
+    [[nodiscard]] static bool finite_storage(const StoragePixel& stored) noexcept {
+        if constexpr (Precision == AccumulationPrecision::float64) {
+            return finite(stored.weighted_sum) && finite(stored.weighted_compensation) &&
+                   std::isfinite(stored.weight_sum) && std::isfinite(stored.weight_compensation);
+        } else {
+            return finite(stored.weighted_sum) && std::isfinite(stored.weight_sum);
+        }
     }
 
     [[nodiscard]] static core::Result<FilmT> allocation_error() {
@@ -163,10 +240,11 @@ template <AccumulationPrecision Precision> class FilmT final {
     }
 
     RenderExtent extent_;
-    std::vector<Pixel> pixels_;
+    std::vector<StoragePixel> pixels_;
 };
 
 using Film = FilmT<AccumulationPrecision::float32>;
-using DoubleAccumulationFilm = FilmT<AccumulationPrecision::float64>;
+using ReferenceFilm = FilmT<AccumulationPrecision::float64>;
+using DoubleAccumulationFilm = ReferenceFilm;
 
 } // namespace blackframe::renderer

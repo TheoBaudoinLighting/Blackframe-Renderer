@@ -37,10 +37,11 @@ TEST(FilmTest, StoresExactWeightedSumsWeightsAndSampleCountsPerPixel) {
 
 TEST(FilmTest, SupportsExplicitDoublePrecisionAccumulation) {
     static_assert(std::same_as<Film::Scalar, TransportScalar>);
-    static_assert(std::same_as<DoubleAccumulationFilm::Scalar, ReferenceScalar>);
-    static_assert(!std::same_as<Film, DoubleAccumulationFilm>);
+    static_assert(std::same_as<ReferenceFilm::Scalar, ReferenceScalar>);
+    static_assert(std::same_as<ReferenceFilm, DoubleAccumulationFilm>);
+    static_assert(!std::same_as<Film, ReferenceFilm>);
 
-    auto film = DoubleAccumulationFilm::create(RenderExtent{.width = 1, .height = 1});
+    auto film = ReferenceFilm::create(RenderExtent{.width = 1, .height = 1});
     ASSERT_TRUE(film.has_value());
     EXPECT_TRUE(
         film->add_sample(0, 0, ReferenceLinearRGB{.red = 0.5, .green = 1.0, .blue = 1.5}, 2.0)
@@ -51,6 +52,33 @@ TEST(FilmTest, SupportsExplicitDoublePrecisionAccumulation) {
     EXPECT_EQ(pixel->weighted_sum, (ReferenceLinearRGB{.red = 1.0, .green = 2.0, .blue = 3.0}));
     EXPECT_DOUBLE_EQ(pixel->weight_sum, 2.0);
     EXPECT_EQ(pixel->sample_count, 1U);
+}
+
+TEST(FilmTest, ReferenceModeRecoversALongIllConditionedSum) {
+    constexpr auto small_sample_count = std::uint64_t{65'536};
+    constexpr auto cancellation_weight = ReferenceScalar{1.0E16};
+    constexpr auto sample = ReferenceLinearRGB{.red = 1.0, .green = 2.0, .blue = -1.0};
+    auto film = ReferenceFilm::create(RenderExtent{.width = 1, .height = 1});
+    ASSERT_TRUE(film.has_value());
+
+    ASSERT_TRUE(film->add_sample(0, 0, sample, cancellation_weight).has_value());
+    for (std::uint64_t index = 0; index < small_sample_count; ++index) {
+        ASSERT_TRUE(film->add_sample(0, 0, sample, 1.0).has_value());
+    }
+    ASSERT_TRUE(film->add_sample(0, 0, sample, -cancellation_weight).has_value());
+
+    const auto pixel = film->pixel(0, 0);
+    ASSERT_TRUE(pixel.has_value());
+    EXPECT_DOUBLE_EQ(pixel->weighted_sum.red, static_cast<ReferenceScalar>(small_sample_count));
+    EXPECT_DOUBLE_EQ(pixel->weighted_sum.green,
+                     static_cast<ReferenceScalar>(2 * small_sample_count));
+    EXPECT_DOUBLE_EQ(pixel->weighted_sum.blue, -static_cast<ReferenceScalar>(small_sample_count));
+    EXPECT_DOUBLE_EQ(pixel->weight_sum, static_cast<ReferenceScalar>(small_sample_count));
+    EXPECT_EQ(pixel->sample_count, small_sample_count + 2);
+
+    const auto resolved = film->resolved_pixel(0, 0);
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(*resolved, sample);
 }
 
 TEST(FilmTest, InitializesEveryPixelIndependently) {
