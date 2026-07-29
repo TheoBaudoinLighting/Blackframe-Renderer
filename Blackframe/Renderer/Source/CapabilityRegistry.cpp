@@ -34,14 +34,17 @@ constexpr auto registered_backends = std::array{
     BackendCapability{
         .identifier = "reference_cpu",
         .status = reference_cpu_status,
+        .required_dependency = "BlackframeXpuReferenceCpu",
     },
     BackendCapability{
         .identifier = "cpu_embree",
         .status = embree_status,
+        .required_dependency = "Embree",
     },
     BackendCapability{
         .identifier = "gpu_cuda",
         .status = cuda_status,
+        .required_dependency = "CUDA Toolkit",
     },
 };
 
@@ -78,6 +81,28 @@ std::string backend_capability_manifest() {
     }
     manifest += "  ]\n}\n";
     return manifest;
+}
+
+core::Status require_backend_capability(const std::string_view identifier) {
+    for (const auto& backend : registered_backends) {
+        if (backend.identifier != identifier) {
+            continue;
+        }
+        if (backend.status != BackendCapabilityStatus::unavailable) {
+            return {};
+        }
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::unavailable,
+            .message = "Backend capability '" + std::string{identifier} +
+                       "' is unavailable; missing dependency '" +
+                       std::string{backend.required_dependency} + "'.",
+        });
+    }
+
+    return std::unexpected(core::Error{
+        .code = core::StatusCode::invalid_argument,
+        .message = "Unknown backend capability '" + std::string{identifier} + "'.",
+    });
 }
 
 } // namespace blackframe::renderer
