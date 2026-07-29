@@ -2,6 +2,7 @@ add_executable(
     BlackframeRendererTests
     BoundsTest.cpp
     CapabilityRegistryTest.cpp
+    ExrWriterTest.cpp
     FilmTest.cpp
     FilmTileTest.cpp
     GeometryTypesTest.cpp
@@ -20,8 +21,17 @@ target_link_libraries(
     BlackframeRendererTests
     PRIVATE
         Blackframe::Renderer
+        Blackframe::Exr
+        Blackframe::OpenExr
         Blackframe::ProjectOptions
         GTest::gtest_main
+)
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
+target_compile_definitions(
+    BlackframeRendererTests
+    PRIVATE
+        BLACKFRAME_RENDERER_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
 )
 
 gtest_discover_tests(

@@ -10,6 +10,7 @@ set(
     cuda
     dependency
     reference
+    renderer_io
     test
     tool
 )
@@ -33,6 +34,8 @@ function(blackframe_set_target_role target role)
         set(target_folder "Blackframe/Dependencies")
     elseif(role STREQUAL "reference")
         set(target_folder "Blackframe/Reference")
+    elseif(role STREQUAL "renderer_io")
+        set(target_folder "Blackframe/Renderer")
     elseif(role STREQUAL "tool")
         set(target_folder "Blackframe/Tools")
     elseif(role STREQUAL "test")
@@ -89,12 +92,14 @@ function(_blackframe_role_allows_dependency source_role dependency_role output_v
         set(allowed_roles dependency)
     elseif(source_role STREQUAL "reference")
         set(allowed_roles core reference)
+    elseif(source_role STREQUAL "renderer_io")
+        set(allowed_roles core dependency renderer_io)
     elseif(source_role STREQUAL "tool")
-        set(allowed_roles core cpu_embree cuda dependency tool)
+        set(allowed_roles core cpu_embree cuda dependency renderer_io tool)
     elseif(source_role STREQUAL "test")
-        set(allowed_roles core cpu_embree cuda dependency reference test)
+        set(allowed_roles core cpu_embree cuda dependency reference renderer_io test)
     elseif(source_role STREQUAL "benchmark")
-        set(allowed_roles benchmark core cpu_embree cuda dependency)
+        set(allowed_roles benchmark core cpu_embree cuda dependency renderer_io)
     else()
         message(FATAL_ERROR "No dependency policy exists for target role '${source_role}'.")
     endif()

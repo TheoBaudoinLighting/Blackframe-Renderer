@@ -74,8 +74,8 @@ endif()
 require_json_value("1" schema_version)
 require_json_value("Blackframe" project name)
 string(JSON dependency_count LENGTH "${manifest}" dependencies)
-if(NOT dependency_count EQUAL 5)
-    message(FATAL_ERROR "Dependency manifest contains ${dependency_count} entries, expected 5.")
+if(NOT dependency_count EQUAL 7)
+    message(FATAL_ERROR "Dependency manifest contains ${dependency_count} entries, expected 7.")
 endif()
 
 require_fetch_dependency(
@@ -110,21 +110,37 @@ require_fetch_dependency(
     "${STB_SHA256}"
     "${STB_ENABLED}"
 )
+require_fetch_dependency(
+    4
+    "Imath"
+    "${IMATH_VERSION}"
+    "${IMATH_REVISION}"
+    "${IMATH_SHA256}"
+    ON
+)
+require_fetch_dependency(
+    5
+    "OpenEXR"
+    "${OPENEXR_VERSION}"
+    "${OPENEXR_REVISION}"
+    "${OPENEXR_SHA256}"
+    ON
+)
 
-require_json_value("CUDA Toolkit" dependencies 4 name)
-require_json_value("system" dependencies 4 kind)
+require_json_value("CUDA Toolkit" dependencies 6 name)
+require_json_value("system" dependencies 6 kind)
 if(CUDA_ENABLED)
     set(expected_cuda_enabled ON)
 else()
     set(expected_cuda_enabled OFF)
 endif()
-require_json_value("${expected_cuda_enabled}" dependencies 4 enabled)
-require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 4 version)
-require_json_value("ON" dependencies 4 exact)
+require_json_value("${expected_cuda_enabled}" dependencies 6 enabled)
+require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 6 version)
+require_json_value("ON" dependencies 6 exact)
 
-string(JSON manifest_cuda_architecture_count LENGTH "${manifest}" dependencies 4 architectures)
+string(JSON manifest_cuda_architecture_count LENGTH "${manifest}" dependencies 6 architectures)
 if(CUDA_ENABLED)
-    require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 4 resolved_version)
+    require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 6 resolved_version)
 
     list(LENGTH CUDA_ARCHITECTURES expected_cuda_architecture_count)
     if(NOT manifest_cuda_architecture_count EQUAL expected_cuda_architecture_count)
@@ -136,7 +152,7 @@ if(CUDA_ENABLED)
         require_json_value(
             "${cuda_architecture}"
             dependencies
-            4
+            6
             architectures
             "${cuda_architecture_index}"
         )

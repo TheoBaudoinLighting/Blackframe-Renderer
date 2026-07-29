@@ -25,6 +25,18 @@ set(BLACKFRAME_STB_SHA256
     "e4e3bba9c572a4a4148373a914d88ea0f0d11de8cc2c66739926e7eca0223319"
 )
 
+set(BLACKFRAME_IMATH_VERSION "3.2.2")
+set(BLACKFRAME_IMATH_REVISION "1e480d11cb98b032a2dece9b9a8730512effc7f6")
+set(BLACKFRAME_IMATH_SHA256
+    "e5847ee5f19aa6adfe5512fd05584338e7656cd84c6f7644707251c6f3fa0cdb"
+)
+
+set(BLACKFRAME_OPENEXR_VERSION "3.4.13")
+set(BLACKFRAME_OPENEXR_REVISION "c1194b2cb23a1bdf76fe5e756b22e8436b9a98c9")
+set(BLACKFRAME_OPENEXR_SHA256
+    "c4a5fb903facf83a1bffcce25a8fed931bfa4d179b3aa8d0541069f56644d7aa"
+)
+
 set(BLACKFRAME_CUDA_TOOLKIT_VERSION "13.3.33")
 
 set(
@@ -42,6 +54,14 @@ set(
 set(
     BLACKFRAME_STB_URL
     "https://github.com/nothings/stb/archive/${BLACKFRAME_STB_REVISION}.tar.gz"
+)
+set(
+    BLACKFRAME_IMATH_URL
+    "https://github.com/AcademySoftwareFoundation/Imath/archive/${BLACKFRAME_IMATH_REVISION}.tar.gz"
+)
+set(
+    BLACKFRAME_OPENEXR_URL
+    "https://github.com/AcademySoftwareFoundation/openexr/archive/${BLACKFRAME_OPENEXR_REVISION}.tar.gz"
 )
 
 set(
@@ -193,6 +213,88 @@ function(blackframe_fetch_stb)
     add_library(Blackframe::Stb ALIAS BlackframeStb)
     target_include_directories(BlackframeStb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
     blackframe_set_target_role(BlackframeStb dependency)
+endfunction()
+
+function(blackframe_fetch_openexr)
+    if(TARGET Blackframe::OpenExr)
+        return()
+    endif()
+
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(IMATH_INSTALL OFF CACHE BOOL "" FORCE)
+    set(IMATH_INSTALL_PKG_CONFIG OFF CACHE BOOL "" FORCE)
+    set(IMATH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(PYTHON OFF CACHE BOOL "" FORCE)
+    set(PYBIND11 OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        imath
+        URL
+            "${BLACKFRAME_IMATH_URL}"
+        URL_HASH
+            "SHA256=${BLACKFRAME_IMATH_SHA256}"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SYSTEM
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(imath)
+    if(NOT TARGET Imath::Imath)
+        message(
+            FATAL_ERROR
+            "Imath ${BLACKFRAME_IMATH_VERSION} did not provide Imath::Imath."
+        )
+    endif()
+
+    set(OPENEXR_INSTALL OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_INSTALL_TOOLS OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_INSTALL_DEVELOPER_TOOLS OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_INSTALL_PKG_CONFIG OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_BUILD_LIBS ON CACHE BOOL "" FORCE)
+    set(OPENEXR_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_BUILD_OSS_FUZZ OFF CACHE BOOL "" FORCE)
+    set(OPENEXR_FORCE_INTERNAL_DEFLATE ON CACHE BOOL "" FORCE)
+    set(OPENEXR_FORCE_INTERNAL_OPENJPH ON CACHE BOOL "" FORCE)
+    # The pinned Imath target is already present. Prevent OpenEXR from probing a
+    # system package or re-fetching its tag-based fallback.
+    set(OPENEXR_FORCE_INTERNAL_IMATH ON CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        openexr
+        URL
+            "${BLACKFRAME_OPENEXR_URL}"
+        URL_HASH
+            "SHA256=${BLACKFRAME_OPENEXR_SHA256}"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SYSTEM
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(openexr)
+    if(NOT TARGET OpenEXR::OpenEXR)
+        message(
+            FATAL_ERROR
+            "OpenEXR ${BLACKFRAME_OPENEXR_VERSION} did not provide OpenEXR::OpenEXR."
+        )
+    endif()
+    if(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND
+       CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ARM")
+        # OpenEXR's Windows ZIP path follows MSVC and enables its SSE4.1
+        # intrinsics on x64. The GNU-style Clang driver additionally requires
+        # the matching target feature to compile those same intrinsics.
+        target_compile_options(OpenEXRCore PRIVATE -msse4.1)
+        target_compile_options(OpenEXR PRIVATE -msse4.1)
+    endif()
+
+    add_library(BlackframeOpenExr INTERFACE)
+    add_library(Blackframe::OpenExr ALIAS BlackframeOpenExr)
+    target_link_libraries(
+        BlackframeOpenExr
+        INTERFACE
+            OpenEXR::OpenEXR
+    )
+    blackframe_set_target_role(BlackframeOpenExr dependency)
 endfunction()
 
 function(blackframe_find_cuda_toolkit)

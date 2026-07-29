@@ -64,3 +64,35 @@ set_target_properties(
         OUTPUT_NAME BlackframeRenderer
         DEBUG_POSTFIX d
 )
+
+add_library(
+    BlackframeExr
+    STATIC
+        Include/Blackframe/Renderer/ExrWriter.hpp
+        Source/ExrWriter.cpp
+)
+add_library(Blackframe::Exr ALIAS BlackframeExr)
+blackframe_set_target_role(BlackframeExr renderer_io)
+
+target_include_directories(
+    BlackframeExr
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+target_link_libraries(
+    BlackframeExr
+    PUBLIC
+        Blackframe::Renderer
+    PRIVATE
+        Blackframe::OpenExr
+        Blackframe::ProjectOptions
+)
+
+set_target_properties(
+    BlackframeExr
+    PROPERTIES
+        OUTPUT_NAME BlackframeExr
+        DEBUG_POSTFIX d
+)

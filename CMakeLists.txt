@@ -46,6 +46,8 @@ if(BLACKFRAME_ENABLE_STB)
     blackframe_fetch_stb()
 endif()
 
+blackframe_fetch_openexr()
+
 if(BUILD_TESTING)
     blackframe_fetch_googletest()
     blackframe_enable_dependency_sanitizers(gtest)

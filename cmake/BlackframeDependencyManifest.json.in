@@ -42,6 +42,24 @@
       "sha256": "@BLACKFRAME_STB_SHA256@"
     },
     {
+      "name": "Imath",
+      "kind": "FetchContent",
+      "enabled": true,
+      "version": "@BLACKFRAME_IMATH_VERSION@",
+      "revision": "@BLACKFRAME_IMATH_REVISION@",
+      "url": "@BLACKFRAME_IMATH_URL@",
+      "sha256": "@BLACKFRAME_IMATH_SHA256@"
+    },
+    {
+      "name": "OpenEXR",
+      "kind": "FetchContent",
+      "enabled": true,
+      "version": "@BLACKFRAME_OPENEXR_VERSION@",
+      "revision": "@BLACKFRAME_OPENEXR_REVISION@",
+      "url": "@BLACKFRAME_OPENEXR_URL@",
+      "sha256": "@BLACKFRAME_OPENEXR_SHA256@"
+    },
+    {
       "name": "CUDA Toolkit",
       "kind": "system",
       "enabled": @manifest_cuda_enabled@,
