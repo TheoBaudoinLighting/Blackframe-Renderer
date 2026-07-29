@@ -6,6 +6,9 @@ endif()
 if(NOT DEFINED OUTPUT_PATH OR NOT IS_ABSOLUTE "${OUTPUT_PATH}")
     message(FATAL_ERROR "The PNG checksum output path must be absolute.")
 endif()
+if(NOT DEFINED GTEST_FILTER OR GTEST_FILTER STREQUAL "")
+    message(FATAL_ERROR "The PNG checksum GoogleTest filter is required.")
+endif()
 string(LENGTH "${EXPECTED_SHA256}" expected_sha256_length)
 if(NOT DEFINED EXPECTED_SHA256 OR
    NOT expected_sha256_length EQUAL 64 OR
@@ -19,7 +22,7 @@ execute_process(
         "${CMAKE_COMMAND}" -E env
         "BLACKFRAME_PNG_CHECKSUM_OUTPUT=${OUTPUT_PATH}"
         "${TEST_EXECUTABLE}"
-        "--gtest_filter=PngWriterTest.WritesFixedDisplayTransformForSyntheticCrop"
+        "--gtest_filter=${GTEST_FILTER}"
         "--gtest_color=no"
     RESULT_VARIABLE test_result
     OUTPUT_VARIABLE test_output
@@ -28,11 +31,11 @@ execute_process(
 if(NOT test_result EQUAL 0)
     message(
         FATAL_ERROR
-        "The synthetic PNG generation failed.\n${test_output}\n${test_error}"
+        "The PNG generation failed for '${GTEST_FILTER}'.\n${test_output}\n${test_error}"
     )
 endif()
 if(NOT EXISTS "${OUTPUT_PATH}")
-    message(FATAL_ERROR "The synthetic PNG was not written: ${OUTPUT_PATH}")
+    message(FATAL_ERROR "The PNG was not written for '${GTEST_FILTER}': ${OUTPUT_PATH}")
 endif()
 
 file(SHA256 "${OUTPUT_PATH}" actual_sha256)
@@ -40,6 +43,6 @@ file(REMOVE "${OUTPUT_PATH}")
 if(NOT actual_sha256 STREQUAL EXPECTED_SHA256)
     message(
         FATAL_ERROR
-        "Synthetic PNG SHA-256 is '${actual_sha256}', expected '${EXPECTED_SHA256}'."
+        "PNG SHA-256 for '${GTEST_FILTER}' is '${actual_sha256}', expected '${EXPECTED_SHA256}'."
     )
 endif()
