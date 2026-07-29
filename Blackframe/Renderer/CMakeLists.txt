@@ -2,11 +2,14 @@ add_library(
     BlackframeRenderer
     STATIC
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
+        Include/Blackframe/Renderer/NumericConversion.hpp
+        Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Source/CapabilityRegistry.cpp
+        Source/NumericConversion.cpp
         Source/RenderConfiguration.cpp
         Source/RenderConfigurationLimits.hpp
         Source/RenderConfigurationSchema.cpp

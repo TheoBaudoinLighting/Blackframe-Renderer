@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Blackframe/Renderer/NumericPrecision.hpp>
 #include <cstdint>
 
 namespace blackframe::renderer {
@@ -16,7 +17,7 @@ enum class ProbabilityMeasure : std::uint8_t {
 };
 
 struct ProbabilityDensity {
-    float value{};
+    TransportScalar value{};
     ProbabilityMeasure measure{ProbabilityMeasure::discrete};
 };
 
@@ -40,7 +41,7 @@ enum class TransportEvent : std::uint8_t {
 };
 
 struct WavelengthSample {
-    float nanometers{};
+    TransportScalar nanometers{};
     ProbabilityDensity probability{
         .value = 0.0F,
         .measure = ProbabilityMeasure::wavelength,
