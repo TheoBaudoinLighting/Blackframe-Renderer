@@ -22,6 +22,7 @@ add_executable(
     SphereTest.cpp
     SpectrumTest.cpp
     TransformsTest.cpp
+    TriangleTest.cpp
 )
 blackframe_set_target_role(BlackframeRendererTests test)
 

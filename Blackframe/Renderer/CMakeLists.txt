@@ -33,6 +33,7 @@ add_library(
         Include/Blackframe/Renderer/Transforms.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
+        Include/Blackframe/Renderer/Triangle.hpp
         Source/CapabilityRegistry.cpp
         Source/NumericConversion.cpp
         Source/RayDiagnostics.cpp
