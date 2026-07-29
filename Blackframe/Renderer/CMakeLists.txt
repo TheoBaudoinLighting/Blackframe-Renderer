@@ -3,6 +3,7 @@ add_library(
     STATIC
         Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
+        Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
         Include/Blackframe/Renderer/Interval.hpp
@@ -17,6 +18,7 @@ add_library(
         Include/Blackframe/Renderer/RayOriginOffset.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
+        Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Transforms.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp

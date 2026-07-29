@@ -9,6 +9,7 @@ add_executable(
     RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
+    SpectrumTest.cpp
     TransformsTest.cpp
 )
 blackframe_set_target_role(BlackframeRendererTests test)
