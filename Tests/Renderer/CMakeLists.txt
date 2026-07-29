@@ -2,6 +2,7 @@ add_executable(
     BlackframeRendererTests
     BoundsTest.cpp
     CapabilityRegistryTest.cpp
+    FilmTest.cpp
     GeometryTypesTest.cpp
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp

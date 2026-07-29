@@ -19,6 +19,31 @@ namespace {
 
 } // namespace
 
+core::Status validate_render_extent(const RenderExtent extent) {
+    if (extent.width == 0) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "Render extent width must be greater than zero.",
+        });
+    }
+    if (extent.height == 0) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "Render extent height must be greater than zero.",
+        });
+    }
+    if (extent.width > limits::maximum_dimension || extent.height > limits::maximum_dimension) {
+        return resource_limit_error("Render dimensions exceed the configured safety limit.");
+    }
+
+    const auto pixel_count =
+        static_cast<std::uint64_t>(extent.width) * static_cast<std::uint64_t>(extent.height);
+    if (pixel_count > limits::maximum_pixel_count) {
+        return resource_limit_error("The requested image contains too many pixels.");
+    }
+    return {};
+}
+
 core::Status validate_render_configuration(const RenderConfiguration& configuration) {
     if (configuration.schema_version != CurrentRenderConfigurationSchemaVersion) {
         return std::unexpected(core::Error{
@@ -29,29 +54,13 @@ core::Status validate_render_configuration(const RenderConfiguration& configurat
         });
     }
 
-    if (configuration.extent.width == 0) {
-        return std::unexpected(core::Error{
-            .code = core::StatusCode::invalid_argument,
-            .message = "Render configuration key 'width' must be greater than zero.",
-        });
-    }
-    if (configuration.extent.height == 0) {
-        return std::unexpected(core::Error{
-            .code = core::StatusCode::invalid_argument,
-            .message = "Render configuration key 'height' must be greater than zero.",
-        });
-    }
-
-    if (configuration.extent.width > limits::maximum_dimension ||
-        configuration.extent.height > limits::maximum_dimension) {
-        return resource_limit_error("Render dimensions exceed the configured safety limit.");
+    const auto extent_status = validate_render_extent(configuration.extent);
+    if (!extent_status.has_value()) {
+        return extent_status;
     }
 
     const auto pixel_count = static_cast<std::uint64_t>(configuration.extent.width) *
                              static_cast<std::uint64_t>(configuration.extent.height);
-    if (pixel_count > limits::maximum_pixel_count) {
-        return resource_limit_error("The requested image contains too many pixels.");
-    }
 
     if (configuration.samples_per_pixel == 0) {
         return std::unexpected(core::Error{

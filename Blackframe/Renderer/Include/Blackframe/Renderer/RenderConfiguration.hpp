@@ -36,6 +36,8 @@ struct RenderExtent {
     std::uint32_t height{720};
 };
 
+[[nodiscard]] core::Status validate_render_extent(RenderExtent extent);
+
 struct RenderConfiguration {
     std::uint32_t schema_version{CurrentRenderConfigurationSchemaVersion};
     RenderExtent extent{};
