@@ -1,6 +1,7 @@
 add_executable(
     BlackframeRendererTests
     CapabilityRegistryTest.cpp
+    GeometryTypesTest.cpp
     NumericPrecisionTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp

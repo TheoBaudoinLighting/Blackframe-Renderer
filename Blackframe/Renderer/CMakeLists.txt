@@ -2,6 +2,8 @@ add_library(
     BlackframeRenderer
     STATIC
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
+        Include/Blackframe/Renderer/GeometryOperations.hpp
+        Include/Blackframe/Renderer/GeometryTypes.hpp
         Include/Blackframe/Renderer/NumericConversion.hpp
         Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
