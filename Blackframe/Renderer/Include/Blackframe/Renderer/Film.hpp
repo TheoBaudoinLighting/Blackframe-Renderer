@@ -9,11 +9,62 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace blackframe::renderer {
+
+struct FilmCrop final {
+    std::uint32_t minimum_x{};
+    std::uint32_t minimum_y{};
+    std::uint32_t maximum_x{};
+    std::uint32_t maximum_y{};
+
+    [[nodiscard]] constexpr std::uint32_t width() const noexcept {
+        return maximum_x - minimum_x;
+    }
+
+    [[nodiscard]] constexpr std::uint32_t height() const noexcept {
+        return maximum_y - minimum_y;
+    }
+
+    [[nodiscard]] constexpr bool contains(const std::uint32_t x,
+                                          const std::uint32_t y) const noexcept {
+        return x >= minimum_x && x < maximum_x && y >= minimum_y && y < maximum_y;
+    }
+
+    [[nodiscard]] constexpr bool operator==(const FilmCrop&) const noexcept = default;
+};
+
+[[nodiscard]] constexpr FilmCrop full_film_crop(const RenderExtent extent) noexcept {
+    return FilmCrop{
+        .maximum_x = extent.width,
+        .maximum_y = extent.height,
+    };
+}
+
+[[nodiscard]] inline core::Status validate_film_crop(const RenderExtent extent,
+                                                     const FilmCrop crop) {
+    const auto extent_status = validate_render_extent(extent);
+    if (!extent_status.has_value()) {
+        return extent_status;
+    }
+    if (crop.minimum_x >= crop.maximum_x || crop.minimum_y >= crop.maximum_y) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "A film crop must have a non-empty half-open pixel range.",
+        });
+    }
+    if (crop.maximum_x > extent.width || crop.maximum_y > extent.height) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "A film crop must remain inside the full image extent.",
+        });
+    }
+    return {};
+}
 
 template <AccumulationPrecision Precision> struct FilmPixelT final {
     using Scalar = AccumulationScalar<Precision>;
@@ -46,6 +97,8 @@ template <> struct StoragePixelT<AccumulationPrecision::float64> final {
 
 } // namespace film_detail
 
+template <AccumulationPrecision Precision> class FilmTileT;
+
 template <AccumulationPrecision Precision> class FilmT final {
   public:
     using Scalar = AccumulationScalar<Precision>;
@@ -53,15 +106,20 @@ template <AccumulationPrecision Precision> class FilmT final {
     using Pixel = FilmPixelT<Precision>;
 
     [[nodiscard]] static core::Result<FilmT> create(const RenderExtent extent) {
-        const auto extent_status = validate_render_extent(extent);
-        if (!extent_status.has_value()) {
-            return std::unexpected(extent_status.error());
+        return create(extent, full_film_crop(extent));
+    }
+
+    [[nodiscard]] static core::Result<FilmT> create(const RenderExtent extent,
+                                                    const FilmCrop crop) {
+        const auto crop_status = validate_film_crop(extent, crop);
+        if (!crop_status.has_value()) {
+            return std::unexpected(crop_status.error());
         }
 
         const auto pixel_count =
-            static_cast<std::size_t>(extent.width) * static_cast<std::size_t>(extent.height);
+            static_cast<std::size_t>(crop.width()) * static_cast<std::size_t>(crop.height());
         try {
-            return FilmT{extent, std::vector<StoragePixel>(pixel_count)};
+            return FilmT{extent, crop, std::vector<StoragePixel>(pixel_count)};
         } catch (const std::bad_alloc&) {
             return allocation_error();
         } catch (const std::length_error&) {
@@ -71,6 +129,10 @@ template <AccumulationPrecision Precision> class FilmT final {
 
     [[nodiscard]] constexpr RenderExtent extent() const noexcept {
         return extent_;
+    }
+
+    [[nodiscard]] constexpr FilmCrop crop() const noexcept {
+        return crop_;
     }
 
     [[nodiscard]] std::size_t pixel_count() const noexcept {
@@ -144,11 +206,13 @@ template <AccumulationPrecision Precision> class FilmT final {
         return resolved;
     }
 
+    [[nodiscard]] core::Status merge_tiles(std::span<const FilmTileT<Precision>> tiles);
+
   private:
     using StoragePixel = film_detail::StoragePixelT<Precision>;
 
-    FilmT(const RenderExtent extent, std::vector<StoragePixel> pixels) noexcept
-        : extent_{extent}, pixels_{std::move(pixels)} {}
+    FilmT(const RenderExtent extent, const FilmCrop crop, std::vector<StoragePixel> pixels) noexcept
+        : extent_{extent}, crop_{crop}, pixels_{std::move(pixels)} {}
 
     [[nodiscard]] static bool finite(const Color color) noexcept {
         return std::isfinite(color.red) && std::isfinite(color.green) && std::isfinite(color.blue);
@@ -229,17 +293,21 @@ template <AccumulationPrecision Precision> class FilmT final {
 
     [[nodiscard]] core::Result<std::size_t> pixel_index(const std::uint32_t x,
                                                         const std::uint32_t y) const {
-        if (x >= extent_.width || y >= extent_.height) {
+        if (!crop_.contains(x, y)) {
             return std::unexpected(core::Error{
                 .code = core::StatusCode::invalid_argument,
-                .message = "Film pixel coordinates are outside the image extent.",
+                .message = "Film pixel coordinates are outside the active crop.",
             });
         }
-        return static_cast<std::size_t>(y) * static_cast<std::size_t>(extent_.width) +
-               static_cast<std::size_t>(x);
+        return static_cast<std::size_t>(y - crop_.minimum_y) *
+                   static_cast<std::size_t>(crop_.width()) +
+               static_cast<std::size_t>(x - crop_.minimum_x);
     }
 
+    friend class FilmTileT<Precision>;
+
     RenderExtent extent_;
+    FilmCrop crop_;
     std::vector<StoragePixel> pixels_;
 };
 

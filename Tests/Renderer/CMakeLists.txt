@@ -3,6 +3,7 @@ add_executable(
     BoundsTest.cpp
     CapabilityRegistryTest.cpp
     FilmTest.cpp
+    FilmTileTest.cpp
     GeometryTypesTest.cpp
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp
