@@ -1,9 +1,11 @@
 add_library(
     BlackframeRenderer
     STATIC
+        Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
+        Include/Blackframe/Renderer/Interval.hpp
         Include/Blackframe/Renderer/LocalFrame.hpp
         Include/Blackframe/Renderer/MatrixOperations.hpp
         Include/Blackframe/Renderer/MatrixTypes.hpp

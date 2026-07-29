@@ -10,6 +10,13 @@ template <typename Scalar>
 concept GeometryScalar =
     std::same_as<Scalar, TransportScalar> || std::same_as<Scalar, ReferenceScalar>;
 
+template <GeometryScalar Scalar> struct Point2T final {
+    Scalar x{};
+    Scalar y{};
+
+    [[nodiscard]] constexpr bool operator==(const Point2T&) const noexcept = default;
+};
+
 template <GeometryScalar Scalar> struct Vector3T final {
     Scalar x{};
     Scalar y{};
@@ -33,6 +40,9 @@ template <GeometryScalar Scalar> struct Normal3T final {
 
     [[nodiscard]] constexpr bool operator==(const Normal3T&) const noexcept = default;
 };
+
+using Point2 = Point2T<TransportScalar>;
+using ReferencePoint2 = Point2T<ReferenceScalar>;
 
 using Vector3 = Vector3T<TransportScalar>;
 using Point3 = Point3T<TransportScalar>;
@@ -236,12 +246,15 @@ static_assert(!std::is_same_v<Vector3, Point3>);
 static_assert(!std::is_same_v<Vector3, Normal3>);
 static_assert(!std::is_same_v<Point3, Normal3>);
 static_assert(std::is_standard_layout_v<Vector3>);
+static_assert(std::is_standard_layout_v<Point2>);
 static_assert(std::is_standard_layout_v<Point3>);
 static_assert(std::is_standard_layout_v<Normal3>);
 static_assert(std::is_trivially_copyable_v<Vector3>);
+static_assert(std::is_trivially_copyable_v<Point2>);
 static_assert(std::is_trivially_copyable_v<Point3>);
 static_assert(std::is_trivially_copyable_v<Normal3>);
 static_assert(sizeof(Vector3) == 3 * sizeof(TransportScalar));
+static_assert(sizeof(Point2) == 2 * sizeof(TransportScalar));
 static_assert(sizeof(Point3) == 3 * sizeof(TransportScalar));
 static_assert(sizeof(Normal3) == 3 * sizeof(TransportScalar));
 

@@ -1,5 +1,6 @@
 add_executable(
     BlackframeRendererTests
+    BoundsTest.cpp
     CapabilityRegistryTest.cpp
     GeometryTypesTest.cpp
     LocalFrameTest.cpp
