@@ -4,6 +4,7 @@ add_library(
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
+        Include/Blackframe/Renderer/LocalFrame.hpp
         Include/Blackframe/Renderer/MatrixOperations.hpp
         Include/Blackframe/Renderer/MatrixTypes.hpp
         Include/Blackframe/Renderer/NumericConversion.hpp
