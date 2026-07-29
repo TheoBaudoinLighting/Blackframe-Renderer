@@ -6,6 +6,7 @@ add_executable(
     FilmTest.cpp
     FilmTileTest.cpp
     GeometryTypesTest.cpp
+    HdrMetricsTest.cpp
     LinearMetricsTest.cpp
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp
