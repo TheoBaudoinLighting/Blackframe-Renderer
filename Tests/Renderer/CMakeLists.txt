@@ -18,6 +18,7 @@ add_executable(
     RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
+    SphereTest.cpp
     SpectrumTest.cpp
     TransformsTest.cpp
 )
