@@ -16,6 +16,7 @@ add_library(
         Include/Blackframe/Renderer/IndependentSampler.hpp
         Include/Blackframe/Renderer/Interval.hpp
         Include/Blackframe/Renderer/LocalFrame.hpp
+        Include/Blackframe/Renderer/LocalPcg32.hpp
         Include/Blackframe/Renderer/LinearMetrics.hpp
         Include/Blackframe/Renderer/MatrixOperations.hpp
         Include/Blackframe/Renderer/MatrixTypes.hpp

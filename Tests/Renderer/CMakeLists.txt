@@ -13,6 +13,7 @@ add_executable(
     IndependentSamplerTest.cpp
     LinearMetricsTest.cpp
     LocalFrameTest.cpp
+    LocalPcg32Test.cpp
     NumericPrecisionTest.cpp
     PinholeCameraTest.cpp
     PixelJitterTest.cpp
