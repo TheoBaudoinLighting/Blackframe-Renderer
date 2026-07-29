@@ -5,6 +5,7 @@ add_executable(
     NumericPrecisionTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
+    TransformsTest.cpp
 )
 blackframe_set_target_role(BlackframeRendererTests test)
 

@@ -4,10 +4,14 @@ add_library(
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
+        Include/Blackframe/Renderer/MatrixOperations.hpp
+        Include/Blackframe/Renderer/MatrixTypes.hpp
         Include/Blackframe/Renderer/NumericConversion.hpp
         Include/Blackframe/Renderer/NumericPrecision.hpp
+        Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
+        Include/Blackframe/Renderer/Transforms.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Source/CapabilityRegistry.cpp
