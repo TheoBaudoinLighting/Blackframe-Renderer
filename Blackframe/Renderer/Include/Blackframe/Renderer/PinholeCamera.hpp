@@ -2,6 +2,7 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/LocalFrame.hpp>
+#include <Blackframe/Renderer/PixelJitter.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/RenderConfiguration.hpp>
 #include <algorithm>
@@ -102,29 +103,42 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
             return std::unexpected(pinhole_camera_detail::invalid_camera_input(
                 "A pinhole raster sample must be finite and inside the half-open image extent."));
         }
-        if (!std::isfinite(time)) {
+
+        return generate_primary_ray_from_normalized_raster(
+            Scalar{2} * raster_sample.x / raster_width - Scalar{1},
+            Scalar{1} - Scalar{2} * raster_sample.y / raster_height, time);
+    }
+
+    [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray(const PixelSampleT<Scalar> sample,
+                                                                  const Scalar time) const {
+        if (sample.pixel_x >= extent_.width || sample.pixel_y >= extent_.height) {
             return std::unexpected(pinhole_camera_detail::invalid_camera_input(
-                "A pinhole primary-ray time must be finite."));
+                "A pinhole pixel sample must address a pixel inside the image extent."));
+        }
+        if (!std::isfinite(sample.offset_x) || !std::isfinite(sample.offset_y) ||
+            sample.offset_x < Scalar{0} || sample.offset_x >= Scalar{1} ||
+            sample.offset_y < Scalar{0} || sample.offset_y >= Scalar{1}) {
+            return std::unexpected(pinhole_camera_detail::invalid_camera_input(
+                "Pinhole subpixel offsets must be finite and inside [0, 1)."));
         }
 
-        const auto camera_direction = Vector3T<Scalar>{
-            .x = (Scalar{2} * raster_sample.x / raster_width - Scalar{1}) * half_width_,
-            .y = (Scalar{1} - Scalar{2} * raster_sample.y / raster_height) * half_height_,
-            .z = Scalar{-1},
-        };
-        const auto unit_camera_direction =
-            pinhole_camera_detail::robust_unit_direction(camera_direction);
-        if (!unit_camera_direction.has_value()) {
-            return std::unexpected(unit_camera_direction.error());
-        }
-        const auto world_direction = pinhole_camera_detail::robust_unit_direction(
-            orientation_.to_world(*unit_camera_direction));
-        if (!world_direction.has_value()) {
-            return std::unexpected(world_direction.error());
-        }
+        const auto raster_width = static_cast<Scalar>(extent_.width);
+        const auto raster_height = static_cast<Scalar>(extent_.height);
+        const auto twice_pixel_x = Scalar{2} * static_cast<Scalar>(sample.pixel_x);
+        const auto twice_pixel_y = Scalar{2} * static_cast<Scalar>(sample.pixel_y);
+        return generate_primary_ray_from_normalized_raster(
+            (twice_pixel_x + Scalar{2} * sample.offset_x) / raster_width - Scalar{1},
+            Scalar{1} - (twice_pixel_y + Scalar{2} * sample.offset_y) / raster_height, time);
+    }
 
-        return RayT<Scalar>::create(origin_, *world_direction, t_min_, t_max_, time, mask_,
-                                    current_medium_);
+    [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray(const PixelSampleIndex index,
+                                                                  const PixelJitterMode mode,
+                                                                  const Scalar time) const {
+        const auto sample = generate_pixel_sample<Scalar>(index, mode);
+        if (!sample.has_value()) {
+            return std::unexpected(sample.error());
+        }
+        return generate_primary_ray(*sample, time);
     }
 
     [[nodiscard]] constexpr const Point3T<Scalar>& origin() const noexcept {
@@ -144,6 +158,33 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
     }
 
   private:
+    [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray_from_normalized_raster(
+        const Scalar normalized_x, const Scalar normalized_y, const Scalar time) const {
+        if (!std::isfinite(time)) {
+            return std::unexpected(pinhole_camera_detail::invalid_camera_input(
+                "A pinhole primary-ray time must be finite."));
+        }
+
+        const auto camera_direction = Vector3T<Scalar>{
+            .x = normalized_x * half_width_,
+            .y = normalized_y * half_height_,
+            .z = Scalar{-1},
+        };
+        const auto unit_camera_direction =
+            pinhole_camera_detail::robust_unit_direction(camera_direction);
+        if (!unit_camera_direction.has_value()) {
+            return std::unexpected(unit_camera_direction.error());
+        }
+        const auto world_direction = pinhole_camera_detail::robust_unit_direction(
+            orientation_.to_world(*unit_camera_direction));
+        if (!world_direction.has_value()) {
+            return std::unexpected(world_direction.error());
+        }
+
+        return RayT<Scalar>::create(origin_, *world_direction, t_min_, t_max_, time, mask_,
+                                    current_medium_);
+    }
+
     constexpr PinholeCameraT(const Point3T<Scalar> origin,
                              const OrthonormalFrameT<Scalar> orientation, const RenderExtent extent,
                              const Scalar vertical_field_of_view_radians, const Scalar half_width,

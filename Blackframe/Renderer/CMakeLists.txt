@@ -19,6 +19,7 @@ add_library(
         Include/Blackframe/Renderer/NumericConversion.hpp
         Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/PinholeCamera.hpp
+        Include/Blackframe/Renderer/PixelJitter.hpp
         Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/Ray.hpp
         Include/Blackframe/Renderer/RayDiagnostics.hpp

@@ -12,6 +12,7 @@ add_executable(
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp
     PinholeCameraTest.cpp
+    PixelJitterTest.cpp
     PngWriterTest.cpp
     RayTest.cpp
     RayOriginOffsetTest.cpp
