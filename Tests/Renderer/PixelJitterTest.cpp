@@ -142,6 +142,21 @@ TEST(PixelJitterTest, UniformModeIsIndexedAndOrderIndependent) {
     }
 }
 
+TEST(PixelJitterTest, UniformModePreservesTheEstablishedIndexedSequence) {
+    constexpr auto index =
+        PixelSampleIndex{.pixel_x = 17, .pixel_y = 29, .sample_index = 27, .seed = 42};
+
+    const auto transport = generate_pixel_sample<TransportScalar>(index, PixelJitterMode::uniform);
+    ASSERT_TRUE(transport.has_value());
+    EXPECT_EQ(transport->offset_x, static_cast<TransportScalar>(0x4D67A7U) * 0x1p-24F);
+    EXPECT_EQ(transport->offset_y, static_cast<TransportScalar>(0x6B1427U) * 0x1p-24F);
+
+    const auto reference = generate_pixel_sample<ReferenceScalar>(index, PixelJitterMode::uniform);
+    ASSERT_TRUE(reference.has_value());
+    EXPECT_EQ(reference->offset_x, static_cast<ReferenceScalar>(0x09ACF4FCA1CACBULL) * 0x1p-53);
+    EXPECT_EQ(reference->offset_y, static_cast<ReferenceScalar>(0x0D6284E8FBF171ULL) * 0x1p-53);
+}
+
 TEST(PixelJitterTest, UniformTransportModeHasAUniformTwoDimensionalDistribution) {
     expect_uniform_two_dimensional_distribution<TransportScalar>();
 }

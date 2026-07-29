@@ -29,6 +29,7 @@ add_library(
         Include/Blackframe/Renderer/RayOriginOffset.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
+        Include/Blackframe/Renderer/SampleStream.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Sphere.hpp
         Include/Blackframe/Renderer/SurfaceInteraction.hpp

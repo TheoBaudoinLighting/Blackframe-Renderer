@@ -1,12 +1,12 @@
 #pragma once
 
+#include <Blackframe/Renderer/SampleStream.hpp>
 #include <Blackframe/Renderer/TransportConventions.hpp>
 
 namespace blackframe::renderer {
 
-// These are the only five central interfaces in the transport domain. Their operations remain
-// intentionally undefined until the complete renderer feature inventory is approved.
-struct SampleStream;
+// SampleStream and these four reserved contracts are the only five central transport interfaces.
+// The remaining operations stay undefined until their owning features are implemented.
 struct ClosureSet;
 struct LightSampler;
 struct MediumTracker;
