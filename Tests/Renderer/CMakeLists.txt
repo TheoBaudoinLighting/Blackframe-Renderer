@@ -21,6 +21,7 @@ add_executable(
     RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
+    SampleDimensionMapTest.cpp
     SampleStreamTest.cpp
     SphereTest.cpp
     SpectrumTest.cpp

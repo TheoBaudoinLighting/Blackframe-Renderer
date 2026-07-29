@@ -2,6 +2,7 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
+#include <Blackframe/Renderer/SampleDimensionMap.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
 #include <cstdint>
 
@@ -48,8 +49,8 @@ template <GeometryScalar Scalar>
         return PixelSampleT<Scalar>{
             .pixel_x = index.pixel_x,
             .pixel_y = index.pixel_y,
-            .offset_x = stream.sample_1d(0xA24BAED4963EE407ULL),
-            .offset_y = stream.sample_1d(0x9FB21C651E98DF25ULL),
+            .offset_x = stream.sample_1d(PrimarySampleDimensionMap.camera_raster_x),
+            .offset_y = stream.sample_1d(PrimarySampleDimensionMap.camera_raster_y),
         };
     }
 

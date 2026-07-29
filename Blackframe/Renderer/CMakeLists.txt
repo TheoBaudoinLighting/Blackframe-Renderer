@@ -29,6 +29,7 @@ add_library(
         Include/Blackframe/Renderer/RayOriginOffset.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
+        Include/Blackframe/Renderer/SampleDimensionMap.hpp
         Include/Blackframe/Renderer/SampleStream.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Sphere.hpp
@@ -44,6 +45,7 @@ add_library(
         Source/RenderConfigurationLimits.hpp
         Source/RenderConfigurationSchema.cpp
         Source/RenderSessionState.cpp
+        Source/SampleDimensionMap.cpp
 )
 add_library(Blackframe::Renderer ALIAS BlackframeRenderer)
 blackframe_set_target_role(BlackframeRenderer core)
