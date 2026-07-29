@@ -21,6 +21,7 @@ add_executable(
     RenderSessionStateTest.cpp
     SphereTest.cpp
     SpectrumTest.cpp
+    SurfaceInteractionTest.cpp
     TransformsTest.cpp
     TriangleTest.cpp
 )
