@@ -14,6 +14,7 @@ add_library(
         Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/Ray.hpp
         Include/Blackframe/Renderer/RayDiagnostics.hpp
+        Include/Blackframe/Renderer/RayOriginOffset.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/Transforms.hpp

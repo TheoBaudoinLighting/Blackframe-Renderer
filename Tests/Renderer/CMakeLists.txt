@@ -6,6 +6,7 @@ add_executable(
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp
     RayTest.cpp
+    RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
     TransformsTest.cpp
