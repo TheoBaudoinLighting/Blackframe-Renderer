@@ -96,3 +96,37 @@ set_target_properties(
         OUTPUT_NAME BlackframeExr
         DEBUG_POSTFIX d
 )
+
+if(TARGET Blackframe::Stb)
+    add_library(
+        BlackframePng
+        STATIC
+            Include/Blackframe/Renderer/PngWriter.hpp
+            Source/PngWriter.cpp
+    )
+    add_library(Blackframe::Png ALIAS BlackframePng)
+    blackframe_set_target_role(BlackframePng renderer_io)
+
+    target_include_directories(
+        BlackframePng
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+
+    target_link_libraries(
+        BlackframePng
+        PUBLIC
+            Blackframe::Renderer
+        PRIVATE
+            Blackframe::Stb
+            Blackframe::ProjectOptions
+    )
+
+    set_target_properties(
+        BlackframePng
+        PROPERTIES
+            OUTPUT_NAME BlackframePng
+            DEBUG_POSTFIX d
+    )
+endif()
