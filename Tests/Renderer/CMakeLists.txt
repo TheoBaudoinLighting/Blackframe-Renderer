@@ -10,6 +10,7 @@ add_executable(
     FilmTileTest.cpp
     GeometryTypesTest.cpp
     HdrMetricsTest.cpp
+    IndependentSamplerTest.cpp
     LinearMetricsTest.cpp
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp

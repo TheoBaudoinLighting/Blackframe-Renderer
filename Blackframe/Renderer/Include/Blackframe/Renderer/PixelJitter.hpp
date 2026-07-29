@@ -2,6 +2,7 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
+#include <Blackframe/Renderer/IndependentSampler.hpp>
 #include <Blackframe/Renderer/SampleDimensionMap.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
 #include <cstdint>
@@ -45,7 +46,8 @@ template <GeometryScalar Scalar>
             .offset_y = Scalar{0.5},
         };
     case PixelJitterMode::uniform:
-        const auto stream = SampleStreamT<Scalar>{index};
+        const auto sampler = IndependentSamplerT<Scalar>{index.seed};
+        const auto stream = sampler.make_stream(index.pixel_x, index.pixel_y, index.sample_index);
         return PixelSampleT<Scalar>{
             .pixel_x = index.pixel_x,
             .pixel_y = index.pixel_y,

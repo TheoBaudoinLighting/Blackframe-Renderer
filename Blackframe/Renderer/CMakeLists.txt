@@ -13,6 +13,7 @@ add_library(
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
         Include/Blackframe/Renderer/HdrMetrics.hpp
+        Include/Blackframe/Renderer/IndependentSampler.hpp
         Include/Blackframe/Renderer/Interval.hpp
         Include/Blackframe/Renderer/LocalFrame.hpp
         Include/Blackframe/Renderer/LinearMetrics.hpp
