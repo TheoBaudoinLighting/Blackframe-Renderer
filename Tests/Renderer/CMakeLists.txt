@@ -5,6 +5,7 @@ add_executable(
     GeometryTypesTest.cpp
     LocalFrameTest.cpp
     NumericPrecisionTest.cpp
+    RayTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
     TransformsTest.cpp

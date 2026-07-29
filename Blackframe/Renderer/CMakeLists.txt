@@ -12,6 +12,8 @@ add_library(
         Include/Blackframe/Renderer/NumericConversion.hpp
         Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/Quaternion.hpp
+        Include/Blackframe/Renderer/Ray.hpp
+        Include/Blackframe/Renderer/RayDiagnostics.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/Transforms.hpp
@@ -19,6 +21,7 @@ add_library(
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Source/CapabilityRegistry.cpp
         Source/NumericConversion.cpp
+        Source/RayDiagnostics.cpp
         Source/RenderConfiguration.cpp
         Source/RenderConfigurationLimits.hpp
         Source/RenderConfigurationSchema.cpp
