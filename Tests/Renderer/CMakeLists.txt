@@ -105,6 +105,140 @@ gtest_discover_tests(
         LABELS "regression;cpu"
 )
 
+set(blackframe_cornell_scene_dir "${PROJECT_SOURCE_DIR}/scenes")
+set(blackframe_cornell_reference_dir "${blackframe_cornell_scene_dir}/references")
+set(
+    blackframe_cornell_reference_index
+    "${blackframe_cornell_reference_dir}/S02_CornellDiffuse.references.json"
+)
+set(blackframe_cornell_scene_64
+    "${blackframe_cornell_scene_dir}/S02_CornellDiffuse_64x64.json"
+)
+set(blackframe_cornell_scene_256
+    "${blackframe_cornell_scene_dir}/S02_CornellDiffuse_256x256.json"
+)
+set_property(
+    DIRECTORY
+    APPEND
+    PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${blackframe_cornell_reference_index}"
+        "${blackframe_cornell_scene_64}"
+        "${blackframe_cornell_scene_256}"
+)
+file(SHA256 "${blackframe_cornell_scene_64}" blackframe_cornell_scene_64_sha256)
+file(SHA256 "${blackframe_cornell_scene_256}" blackframe_cornell_scene_256_sha256)
+set(
+    blackframe_cornell_expected_scene_64_sha256
+    "1bf6ccd4c740cdbad4509426e7faa9797950db3dd3e34c2209ed67d22b8fd635"
+)
+set(
+    blackframe_cornell_expected_scene_256_sha256
+    "b7791857eae37db887b9bc23ba820cbfae1bc727b5d9fe2366a7a2e48ba86972"
+)
+if(NOT blackframe_cornell_scene_64_sha256 STREQUAL
+       blackframe_cornell_expected_scene_64_sha256 OR
+   NOT blackframe_cornell_scene_256_sha256 STREQUAL
+       blackframe_cornell_expected_scene_256_sha256)
+    message(FATAL_ERROR "A closed Cornell scene fixture changed without an explicit revision.")
+endif()
+file(READ "${blackframe_cornell_reference_index}" blackframe_cornell_reference_manifest)
+string(
+    JSON blackframe_cornell_source_base_commit
+    GET "${blackframe_cornell_reference_manifest}" source_snapshot base_commit
+)
+
+function(
+    blackframe_add_cornell_reference_test
+    target_name
+    test_prefix
+    variant_is_64
+    scene_sha256
+    test_labels
+)
+    add_executable(
+        "${target_name}"
+        CornellDiffuseReferenceTest.cpp
+    )
+    blackframe_set_target_role("${target_name}" test)
+    target_link_libraries(
+        "${target_name}"
+        PRIVATE
+            Blackframe::Renderer
+            Blackframe::OpenExr
+            Blackframe::ProjectOptions
+            GTest::gtest_main
+    )
+    target_compile_definitions(
+        "${target_name}"
+        PRIVATE
+            BLACKFRAME_CORNELL_REFERENCE_DIR="${blackframe_cornell_reference_dir}"
+            BLACKFRAME_CORNELL_SCENE_SHA256="${scene_sha256}"
+            BLACKFRAME_CORNELL_SOURCE_BASE_COMMIT="${blackframe_cornell_source_base_commit}"
+            BLACKFRAME_CORNELL_VARIANT_64=${variant_is_64}
+    )
+    gtest_discover_tests(
+        "${target_name}"
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 30
+        TEST_PREFIX "${test_prefix}"
+        PROPERTIES
+            LABELS "${test_labels}"
+            PROCESSORS 8
+    )
+endfunction()
+
+blackframe_add_cornell_reference_test(
+    BlackframeCornellReference64Tests
+    "Cornell64."
+    1
+    "${blackframe_cornell_scene_64_sha256}"
+    "regression;cpu"
+)
+blackframe_add_cornell_reference_test(
+    BlackframeCornellReference256Tests
+    "Cornell256."
+    0
+    "${blackframe_cornell_scene_256_sha256}"
+    "regression;nightly;cpu"
+)
+
+add_test(
+    NAME Blackframe.CornellReferences.Manifest
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DREPOSITORY_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/ValidateCornellReferences.cmake"
+)
+set_tests_properties(
+    Blackframe.CornellReferences.Manifest
+    PROPERTIES
+        LABELS "regression;cpu"
+)
+
+add_executable(
+    BlackframeCornellReferenceGenerator
+    EXCLUDE_FROM_ALL
+    CornellDiffuseReferenceGenerator.cpp
+)
+blackframe_set_target_role(BlackframeCornellReferenceGenerator tool)
+target_link_libraries(
+    BlackframeCornellReferenceGenerator
+    PRIVATE
+        Blackframe::Exr
+        Blackframe::ProjectOptions
+)
+target_compile_definitions(
+    BlackframeCornellReferenceGenerator
+    PRIVATE
+        BLACKFRAME_CORNELL_SCENE_64_SHA256="${blackframe_cornell_expected_scene_64_sha256}"
+        BLACKFRAME_CORNELL_SCENE_256_SHA256="${blackframe_cornell_expected_scene_256_sha256}"
+)
+set_target_properties(
+    BlackframeCornellReferenceGenerator
+    PROPERTIES
+        OUTPUT_NAME blackframe_cornell_reference_generator
+)
+
 function(blackframe_add_png_checksum_test test_name gtest_filter output_filename expected_sha256)
     add_test(
         NAME "${test_name}"

@@ -26,6 +26,8 @@ set(
     BlackframeHostLanguageTests
     BlackframeIpcTests
     BlackframeRenderTests
+    BlackframeCornellReference64Tests
+    BlackframeCornellReference256Tests
     BlackframeRendererTests
     BlackframeXpuTests
 )

@@ -1,0 +1,53 @@
+{
+  "schema": "blackframe.cornell_reference_set",
+  "schema_version": 1,
+  "source_snapshot": {
+    "base_commit": "a20ef631f22837ebc087e259134d6b7624d9b9fa",
+    "files": [
+      {
+        "path": "Tests/Renderer/CMakeLists.txt",
+        "sha256": "a04883d598be37e392eebadfcf164d86dfa4dd1c668d444e9cb68851557673a5"
+      },
+      {
+        "path": "Tests/Renderer/CornellDiffuseImageRenderer.hpp",
+        "sha256": "3a9b0ff453c00e64446000d73fd2beee9115cfd8f83156f1b0ed822fa5ad5fe2"
+      },
+      {
+        "path": "Tests/Renderer/CornellDiffuseReferenceGenerator.cpp",
+        "sha256": "779135188988f72b9c3b52288aed28f0ab060d662d5888db26d82643b1d68911"
+      },
+      {
+        "path": "Tests/Renderer/CornellDiffuseReferenceImage.hpp",
+        "sha256": "0c9aae5a2b6165a8f6d7738e90fddee6860a7a6882d9810671b14ce23be1c4b4"
+      },
+      {
+        "path": "Tests/Renderer/CornellDiffuseReferenceTest.cpp",
+        "sha256": "e16b38f477a9c66c15dcb7e02a59fc4f37f10d7220c8b3a36e7b25af4cf6b452"
+      },
+      {
+        "path": "Tests/Renderer/CornellDiffuseTestScene.hpp",
+        "sha256": "18d06c78918b743e6ecea16e577cf6fce4013a0a08bd690053102544de8d8ea2"
+      }
+    ]
+  },
+  "references": [
+    {
+      "variant": "64x64",
+      "scene": "scenes/S02_CornellDiffuse_64x64.json",
+      "scene_sha256": "1bf6ccd4c740cdbad4509426e7faa9797950db3dd3e34c2209ed67d22b8fd635",
+      "image": "scenes/references/S02_CornellDiffuse_64x64_scalar_ref_4096spp.exr",
+      "image_sha256": "153beb6781fe5f3f6f251adb7cd6082cfd10e2ae2f89c9c4086c6dcf0d96f518",
+      "samples_per_pixel": 4096,
+      "seed": "0x243F6A8885A308D3"
+    },
+    {
+      "variant": "256x256",
+      "scene": "scenes/S02_CornellDiffuse_256x256.json",
+      "scene_sha256": "b7791857eae37db887b9bc23ba820cbfae1bc727b5d9fe2366a7a2e48ba86972",
+      "image": "scenes/references/S02_CornellDiffuse_256x256_scalar_ref_1024spp.exr",
+      "image_sha256": "d0328917021e7298ab2ec85bb2b1ae79c559f88b0ddc7fac7f0aaceff2f34c8d",
+      "samples_per_pixel": 1024,
+      "seed": "0x243F6A8885A308D3"
+    }
+  ]
+}

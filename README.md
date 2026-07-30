@@ -41,6 +41,10 @@ silently selecting another path.
   optional stb-backed PNG preview writer with a fixed display transform.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
+  Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
+  references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
+  and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
+  convergence checks.
 - **Host control:** bounded versioned local IPC, a C extension ABI, explicit absolute-path loading,
   XPU device discovery, a reference discovery plugin, and a headless `render` control executable.
 - **Backend integration:** explicit capability reporting and pre-dispatch checks, a pinned Embree 4
@@ -54,7 +58,8 @@ material or lighting system, a production acceleration pipeline, or a CUDA wavef
 current BSDF-only loop is a narrow deterministic scalar oracle over resolved Lambertian triangles,
 not a production backend. The headless executable currently supports local engine control and
 device discovery; it does not yet accept a scene and render an image from the command line. A
-consumable CMake install/export package is also not available yet.
+consumable CMake install/export package is also not available yet. The CornellDiffuse JSON files
+are closed validation descriptors, not a general scene-interchange format or a hidden scene loader.
 
 ## Building
 

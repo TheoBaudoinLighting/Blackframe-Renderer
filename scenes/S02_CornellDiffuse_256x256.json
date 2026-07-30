@@ -1,0 +1,181 @@
+{
+  "schema": "blackframe.cornell_diffuse_fixture",
+  "schema_version": 1,
+  "scene_id": "S02_CornellDiffuse",
+  "variant": "256x256",
+  "film": {
+    "width": 256,
+    "height": 256,
+    "crop": [0, 0, 256, 256],
+    "pixel_aspect_ratio": 1.0
+  },
+  "camera": {
+    "type": "pinhole",
+    "origin": [0.0, 0.0, 3.0],
+    "forward": [0.0, 0.0, -1.0],
+    "up": [0.0, 1.0, 0.0],
+    "vertical_field_of_view_degrees": 90.0,
+    "clip": {
+      "minimum": 0.0,
+      "maximum": "infinity"
+    },
+    "time": 0.0,
+    "visibility_mask": 4294967295,
+    "medium": 0
+  },
+  "sampling": {
+    "type": "independent",
+    "pixel_jitter": "uniform",
+    "sample_dimension_map_version": 1,
+    "wavelength_packet": {
+      "mode": "fixed",
+      "seed": "0x0000000000000000",
+      "nanometers": [
+        471.21290429136445,
+        588.7129042913645,
+        706.2129042913645,
+        823.7129042913645
+      ],
+      "marginal_pdf": {
+        "value": 0.002127659574468085,
+        "measure": "wavelength",
+        "unit": "inverse_nanometer"
+      }
+    }
+  },
+  "integrator": {
+    "type": "bsdf_only",
+    "next_event_estimation": false,
+    "multiple_importance_sampling": false,
+    "depth_limits": {
+      "diffuse": 3,
+      "glossy": 0,
+      "specular": 0,
+      "transmission": 0,
+      "volume": 0
+    },
+    "russian_roulette": {
+      "enabled": false
+    }
+  },
+  "environment": {
+    "type": "constant_resolved_spectrum4",
+    "radiance": [0.0, 0.0, 0.0, 0.0]
+  },
+  "surfaces": [
+    {
+      "id": "back_wall",
+      "type": "quad",
+      "vertices": [
+        [-1.0, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0]
+      ],
+      "triangulation": [[0, 1, 2], [0, 2, 3]],
+      "visibility_mask": 4294967295,
+      "reflection": {
+        "type": "lambert_resolved_spectrum4",
+        "reflectance": [0.75, 0.75, 0.75, 0.75]
+      },
+      "emission": {
+        "type": "one_sided_resolved_spectrum4",
+        "radiance": [0.0, 0.0, 0.0, 0.0]
+      }
+    },
+    {
+      "id": "floor",
+      "type": "quad",
+      "vertices": [
+        [-1.0, -1.0, 0.0],
+        [-1.0, -1.0, 2.0],
+        [1.0, -1.0, 2.0],
+        [1.0, -1.0, 0.0]
+      ],
+      "triangulation": [[0, 1, 2], [0, 2, 3]],
+      "visibility_mask": 4294967295,
+      "reflection": {
+        "type": "lambert_resolved_spectrum4",
+        "reflectance": [0.75, 0.75, 0.75, 0.75]
+      },
+      "emission": {
+        "type": "one_sided_resolved_spectrum4",
+        "radiance": [0.0, 0.0, 0.0, 0.0]
+      }
+    },
+    {
+      "id": "ceiling",
+      "type": "quad",
+      "vertices": [
+        [-1.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 1.0, 2.0],
+        [-1.0, 1.0, 2.0]
+      ],
+      "triangulation": [[0, 1, 2], [0, 2, 3]],
+      "visibility_mask": 4294967295,
+      "reflection": {
+        "type": "lambert_resolved_spectrum4",
+        "reflectance": [0.0, 0.0, 0.0, 0.0]
+      },
+      "emission": {
+        "type": "one_sided_resolved_spectrum4",
+        "radiance": [8.0, 6.0, 4.0, 2.0]
+      }
+    },
+    {
+      "id": "left_wall",
+      "type": "quad",
+      "vertices": [
+        [-1.0, -1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [-1.0, 1.0, 2.0],
+        [-1.0, -1.0, 2.0]
+      ],
+      "triangulation": [[0, 1, 2], [0, 2, 3]],
+      "visibility_mask": 4294967295,
+      "reflection": {
+        "type": "lambert_resolved_spectrum4",
+        "reflectance": [0.75, 0.25, 0.25, 0.2]
+      },
+      "emission": {
+        "type": "one_sided_resolved_spectrum4",
+        "radiance": [0.0, 0.0, 0.0, 0.0]
+      }
+    },
+    {
+      "id": "right_wall",
+      "type": "quad",
+      "vertices": [
+        [1.0, -1.0, 0.0],
+        [1.0, -1.0, 2.0],
+        [1.0, 1.0, 2.0],
+        [1.0, 1.0, 0.0]
+      ],
+      "triangulation": [[0, 1, 2], [0, 2, 3]],
+      "visibility_mask": 4294967295,
+      "reflection": {
+        "type": "lambert_resolved_spectrum4",
+        "reflectance": [0.2, 0.75, 0.25, 0.2]
+      },
+      "emission": {
+        "type": "one_sided_resolved_spectrum4",
+        "radiance": [0.0, 0.0, 0.0, 0.0]
+      }
+    }
+  ],
+  "reference": {
+    "backend": "scalar_ref",
+    "seed": "0x243F6A8885A308D3",
+    "numeric_mode": "reference_float64",
+    "film_accumulation": "float64_compensated",
+    "samples_per_pixel": 1024,
+    "image": "scenes/references/S02_CornellDiffuse_256x256_scalar_ref_1024spp.exr",
+    "image_encoding": {
+      "container": "openexr",
+      "channels": "RGB",
+      "channel_type": "float32",
+      "color_space": "scene-linear-srgb"
+    }
+  }
+}
