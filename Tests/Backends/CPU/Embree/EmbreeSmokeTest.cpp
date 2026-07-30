@@ -1,98 +1,67 @@
-#include <cstdint>
-#include <embree4/rtcore.h>
-#include <gtest/gtest.h>
-#include <limits>
-#include <memory>
-#include <type_traits>
+#include "../../../Engine/AccelBackendContract.hpp"
 
+#include <Blackframe/Backends/CPU/Embree/AccelBackend.hpp>
+#include <Blackframe/Engine/AccelBackend.hpp>
+#include <Blackframe/Renderer/CapabilityRegistry.hpp>
+#include <gtest/gtest.h>
+#include <memory>
+#include <span>
+#include <type_traits>
+#include <vector>
+
+namespace blackframe::engine {
 namespace {
 
-struct DeviceDeleter {
-    void operator()(RTCDevice device) const noexcept {
-        rtcReleaseDevice(device);
+static_assert(std::is_same_v<decltype(&create_analytic_accel_backend), AccelBackendFactory>);
+static_assert(std::is_same_v<decltype(&create_embree_accel_backend), AccelBackendFactory>);
+
+TEST(AccelBackendSelectionTest, SelectsBothImplementationsThroughTheSameInterface) {
+    auto geometries = test::make_geometry_set();
+    auto retained_meshes = std::vector<std::weak_ptr<const TriangleMesh>>{};
+    retained_meshes.reserve(geometries.size());
+    for (const auto& geometry : geometries) {
+        retained_meshes.emplace_back(geometry.mesh);
     }
-};
+    const auto capability = renderer::require_backend_capability("cpu_embree");
+    ASSERT_TRUE(capability.has_value()) << capability.error().message;
 
-struct SceneDeleter {
-    void operator()(RTCScene scene) const noexcept {
-        rtcReleaseScene(scene);
+    const AccelBackendFactory analytic_factory = &create_analytic_accel_backend;
+    const AccelBackendFactory embree_factory = &create_embree_accel_backend;
+    auto analytic = analytic_factory(geometries);
+    ASSERT_TRUE(analytic.has_value()) << analytic.error().message;
+    auto embree = embree_factory(geometries);
+    ASSERT_TRUE(embree.has_value()) << embree.error().message;
+
+    for (auto& geometry : geometries) {
+        geometry.mesh.reset();
     }
-};
-
-struct GeometryDeleter {
-    void operator()(RTCGeometry geometry) const noexcept {
-        rtcReleaseGeometry(geometry);
+    for (const auto& mesh : retained_meshes) {
+        EXPECT_FALSE(mesh.expired());
     }
-};
 
-using DeviceHandle = std::unique_ptr<std::remove_pointer_t<RTCDevice>, DeviceDeleter>;
-using SceneHandle = std::unique_ptr<std::remove_pointer_t<RTCScene>, SceneDeleter>;
-using GeometryHandle = std::unique_ptr<std::remove_pointer_t<RTCGeometry>, GeometryDeleter>;
+    test::expect_backend_contract(**analytic, AccelBackendKind::analytic_reference);
+    test::expect_backend_contract(**embree, AccelBackendKind::embree);
 
-struct Vertex {
-    float x;
-    float y;
-    float z;
-};
+    analytic->reset();
+    for (const auto& mesh : retained_meshes) {
+        EXPECT_FALSE(mesh.expired());
+    }
+    embree->reset();
+    for (const auto& mesh : retained_meshes) {
+        EXPECT_TRUE(mesh.expired());
+    }
+}
 
-struct Triangle {
-    std::uint32_t vertex_0;
-    std::uint32_t vertex_1;
-    std::uint32_t vertex_2;
-};
+TEST(AccelBackendSelectionTest, BothFactoriesRepresentAnEmptyWorldExplicitly) {
+    const auto empty = std::span<const AccelGeometry>{};
+    auto analytic = create_analytic_accel_backend(empty);
+    ASSERT_TRUE(analytic.has_value()) << analytic.error().message;
+    auto embree = create_embree_accel_backend(empty);
+    ASSERT_TRUE(embree.has_value()) << embree.error().message;
 
-TEST(EmbreeSmokeTest, CreatesADeviceAndTracesARayAgainstATriangle) {
-    DeviceHandle device{rtcNewDevice(nullptr)};
-    ASSERT_NE(device, nullptr);
-
-    SceneHandle scene{rtcNewScene(device.get())};
-    ASSERT_NE(scene, nullptr);
-
-    GeometryHandle geometry{rtcNewGeometry(device.get(), RTC_GEOMETRY_TYPE_TRIANGLE)};
-    ASSERT_NE(geometry, nullptr);
-
-    auto* vertices = static_cast<Vertex*>(rtcSetNewGeometryBuffer(
-        geometry.get(), RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, sizeof(Vertex), 3));
-    ASSERT_NE(vertices, nullptr);
-    vertices[0] = Vertex{0.0F, 0.0F, 0.0F};
-    vertices[1] = Vertex{1.0F, 0.0F, 0.0F};
-    vertices[2] = Vertex{0.0F, 1.0F, 0.0F};
-
-    auto* triangles = static_cast<Triangle*>(rtcSetNewGeometryBuffer(
-        geometry.get(), RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, sizeof(Triangle), 1));
-    ASSERT_NE(triangles, nullptr);
-    triangles[0] = Triangle{0, 1, 2};
-
-    rtcCommitGeometry(geometry.get());
-    const auto geometry_id = rtcAttachGeometry(scene.get(), geometry.get());
-    ASSERT_NE(geometry_id, RTC_INVALID_GEOMETRY_ID);
-    geometry.reset();
-    rtcCommitScene(scene.get());
-
-    RTCRayHit ray_hit{};
-    ray_hit.ray.org_x = 0.25F;
-    ray_hit.ray.org_y = 0.25F;
-    ray_hit.ray.org_z = -1.0F;
-    ray_hit.ray.dir_x = 0.0F;
-    ray_hit.ray.dir_y = 0.0F;
-    ray_hit.ray.dir_z = 1.0F;
-    ray_hit.ray.tnear = 0.0F;
-    ray_hit.ray.tfar = std::numeric_limits<float>::infinity();
-    ray_hit.ray.mask = std::numeric_limits<std::uint32_t>::max();
-    ray_hit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
-    ray_hit.hit.primID = RTC_INVALID_GEOMETRY_ID;
-    ray_hit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
-
-    RTCIntersectArguments arguments{};
-    rtcInitIntersectArguments(&arguments);
-    rtcIntersect1(scene.get(), &ray_hit, &arguments);
-
-    EXPECT_EQ(ray_hit.hit.geomID, geometry_id);
-    EXPECT_EQ(ray_hit.hit.primID, 0U);
-    EXPECT_FLOAT_EQ(ray_hit.ray.tfar, 1.0F);
-    EXPECT_FLOAT_EQ(ray_hit.hit.u, 0.25F);
-    EXPECT_FLOAT_EQ(ray_hit.hit.v, 0.25F);
-    EXPECT_EQ(rtcGetDeviceError(device.get()), RTC_ERROR_NONE);
+    test::expect_empty_backend(**analytic, AccelBackendKind::analytic_reference);
+    test::expect_empty_backend(**embree, AccelBackendKind::embree);
 }
 
 } // namespace
+} // namespace blackframe::engine

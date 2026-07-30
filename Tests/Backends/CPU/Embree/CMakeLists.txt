@@ -17,5 +17,5 @@ gtest_discover_tests(
     DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 30
     PROPERTIES
-        LABELS "smoke;cpu"
+        LABELS "unit;smoke;regression;cpu"
 )

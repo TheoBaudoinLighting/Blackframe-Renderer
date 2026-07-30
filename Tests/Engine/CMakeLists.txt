@@ -54,6 +54,29 @@ gtest_discover_tests(
 )
 
 add_executable(
+    BlackframeAccelBackendTests
+    AccelBackendContract.hpp
+    AccelBackendTest.cpp
+)
+blackframe_set_target_role(BlackframeAccelBackendTests test)
+
+target_link_libraries(
+    BlackframeAccelBackendTests
+    PRIVATE
+        Blackframe::ProjectOptions
+        Blackframe::SceneGeometry
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeAccelBackendTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;smoke;cpu"
+)
+
+add_executable(
     BlackframeMeshImportTests
     TriangleMeshImportTest.cpp
 )

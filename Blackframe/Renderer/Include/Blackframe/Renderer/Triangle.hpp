@@ -9,9 +9,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <limits>
 #include <optional>
 #include <type_traits>
+#include <utility>
 
 namespace blackframe::renderer {
 
@@ -38,12 +40,38 @@ template <GeometryScalar Scalar> struct TriangleHitT final {
 using TriangleHit = TriangleHitT<TransportScalar>;
 using ReferenceTriangleHit = TriangleHitT<ReferenceScalar>;
 
+enum class TriangleIntersectionErrorKind : std::uint8_t {
+    numerical_failure,
+    coplanar_ambiguity,
+};
+
+struct TriangleIntersectionError final {
+    TriangleIntersectionErrorKind kind{TriangleIntersectionErrorKind::numerical_failure};
+    core::Error diagnostic;
+};
+
+template <GeometryScalar Scalar>
+using TriangleIntersectionResultT =
+    std::expected<std::optional<TriangleHitT<Scalar>>, TriangleIntersectionError>;
+
 namespace triangle_detail {
+
+inline constexpr char CoplanarIntersectionMessage[] =
+    "A coplanar ray does not define a unique triangle intersection.";
 
 [[nodiscard]] inline core::Error triangle_error(const char* const message) {
     return core::Error{
         .code = core::StatusCode::invalid_argument,
         .message = message,
+    };
+}
+
+[[nodiscard]] inline TriangleIntersectionError triangle_intersection_error(
+    core::Error diagnostic,
+    const TriangleIntersectionErrorKind kind = TriangleIntersectionErrorKind::numerical_failure) {
+    return TriangleIntersectionError{
+        .kind = kind,
+        .diagnostic = std::move(diagnostic),
     };
 }
 
@@ -607,10 +635,20 @@ template <GeometryScalar Scalar> class TriangleT final {
         return TriangleT{{vertex0, vertex1, vertex2}, *geometric_normal};
     }
 
-    // A successful null optional is a geometric miss or clipped intersection.
-    // A coplanar ray has no unique hit and is reported as an explicit error.
     [[nodiscard]] core::Result<std::optional<TriangleHitT<Scalar>>>
     intersect(const RayT<Scalar>& ray) const {
+        auto intersection = intersect_classified(ray);
+        if (!intersection) {
+            return std::unexpected(std::move(intersection.error().diagnostic));
+        }
+        return std::move(*intersection);
+    }
+
+    // A successful null optional is a geometric miss or clipped intersection.
+    // A coplanar ray has no unique hit and has a typed classification so
+    // acceleration structures can define their crossing policy explicitly.
+    [[nodiscard]] TriangleIntersectionResultT<Scalar>
+    intersect_classified(const RayT<Scalar>& ray) const {
         const auto spatial_exponents = triangle_detail::AxisExponents{
             .x = triangle_detail::scaling_exponent(
                 std::array{vertices_[0].x, vertices_[1].x, vertices_[2].x, ray.origin().x}),
@@ -632,21 +670,22 @@ template <GeometryScalar Scalar> class TriangleT final {
             !triangle_detail::scaling_preserves(vertices_[2], scaled_vertex2) ||
             !triangle_detail::scaling_preserves(ray.origin(), scaled_origin) ||
             !triangle_detail::scaling_preserves(ray.direction(), scaled_direction)) {
-            return std::unexpected(triangle_detail::triangle_error(
-                "Triangle intersection scaling is not representable."));
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(triangle_detail::triangle_error(
+                    "Triangle intersection scaling is not representable.")));
         }
 
         const auto point0 = triangle_detail::exact_relative_vector(scaled_vertex0, scaled_origin);
         const auto point1 = triangle_detail::exact_relative_vector(scaled_vertex1, scaled_origin);
         const auto point2 = triangle_detail::exact_relative_vector(scaled_vertex2, scaled_origin);
         if (!point0.has_value()) {
-            return std::unexpected(point0.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(point0.error()));
         }
         if (!point1.has_value()) {
-            return std::unexpected(point1.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(point1.error()));
         }
         if (!point2.has_value()) {
-            return std::unexpected(point2.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(point2.error()));
         }
         const auto direction = triangle_detail::exact_vector(scaled_direction);
 
@@ -655,32 +694,34 @@ template <GeometryScalar Scalar> class TriangleT final {
         const auto edge2 = triangle_detail::exact_determinant(*point0, *point1, direction);
         const auto volume = triangle_detail::exact_determinant(*point0, *point1, *point2);
         if (!edge0.has_value()) {
-            return std::unexpected(edge0.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(edge0.error()));
         }
         if (!edge1.has_value()) {
-            return std::unexpected(edge1.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(edge1.error()));
         }
         if (!edge2.has_value()) {
-            return std::unexpected(edge2.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(edge2.error()));
         }
         if (!volume.has_value()) {
-            return std::unexpected(volume.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(volume.error()));
         }
 
         auto determinant = triangle_detail::DeterminantExpansion<Scalar>{};
         if (!triangle_detail::add_expansion(determinant, *edge0) ||
             !triangle_detail::add_expansion(determinant, *edge1) ||
             !triangle_detail::add_expansion(determinant, *edge2)) {
-            return std::unexpected(triangle_detail::triangle_error(
-                "Triangle edge determinant sum is not representable."));
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(triangle_detail::triangle_error(
+                    "Triangle edge determinant sum is not representable.")));
         }
 
         const auto determinant_sign = triangle_detail::expansion_sign(determinant);
         const auto volume_sign = triangle_detail::expansion_sign(*volume);
         if (determinant_sign == 0) {
             if (volume_sign == 0) {
-                return std::unexpected(triangle_detail::triangle_error(
-                    "A coplanar ray does not define a unique triangle intersection."));
+                return std::unexpected(triangle_detail::triangle_intersection_error(
+                    triangle_detail::triangle_error(triangle_detail::CoplanarIntersectionMessage),
+                    TriangleIntersectionErrorKind::coplanar_ambiguity));
             }
             return std::optional<TriangleHitT<Scalar>>{};
         }
@@ -697,13 +738,15 @@ template <GeometryScalar Scalar> class TriangleT final {
         const auto scaled_parameter = triangle_detail::correctly_rounded_quotient(
             *volume, determinant, "Triangle intersection parameter is not representable.");
         if (!scaled_parameter.has_value()) {
-            return std::unexpected(scaled_parameter.error());
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(scaled_parameter.error()));
         }
         const auto parameter = std::ldexp(*scaled_parameter, -direction_exponent);
         if (!std::isfinite(parameter) ||
             (*scaled_parameter != Scalar{0} && parameter == Scalar{0})) {
-            return std::unexpected(triangle_detail::triangle_error(
-                "Triangle intersection parameter is not representable."));
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(triangle_detail::triangle_error(
+                    "Triangle intersection parameter is not representable.")));
         }
         if (!ray.contains_parameter(parameter)) {
             return std::optional<TriangleHitT<Scalar>>{};
@@ -716,18 +759,21 @@ template <GeometryScalar Scalar> class TriangleT final {
         const auto barycentric2 = triangle_detail::correctly_rounded_quotient(
             *edge2, determinant, "Triangle barycentric coordinate is not representable.");
         if (!barycentric0.has_value()) {
-            return std::unexpected(barycentric0.error());
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(barycentric0.error()));
         }
         if (!barycentric1.has_value()) {
-            return std::unexpected(barycentric1.error());
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(barycentric1.error()));
         }
         if (!barycentric2.has_value()) {
-            return std::unexpected(barycentric2.error());
+            return std::unexpected(
+                triangle_detail::triangle_intersection_error(barycentric2.error()));
         }
 
         const auto position = ray.at(parameter);
         if (!position.has_value()) {
-            return std::unexpected(position.error());
+            return std::unexpected(triangle_detail::triangle_intersection_error(position.error()));
         }
         return std::optional<TriangleHitT<Scalar>>{TriangleHitT<Scalar>{
             .parameter = parameter,

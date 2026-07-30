@@ -242,10 +242,14 @@ TEST(TriangleIntersectionTest, DistinguishesParallelMissFromCoplanarAmbiguity) {
 
     const auto miss = triangle->intersect(*parallel);
     const auto ambiguous = triangle->intersect(*coplanar);
+    const auto classified_ambiguity = triangle->intersect_classified(*coplanar);
     ASSERT_TRUE(miss.has_value());
     EXPECT_FALSE(miss->has_value());
     ASSERT_FALSE(ambiguous.has_value());
     EXPECT_EQ(ambiguous.error().code, core::StatusCode::invalid_argument);
+    ASSERT_FALSE(classified_ambiguity.has_value());
+    EXPECT_EQ(classified_ambiguity.error().kind, TriangleIntersectionErrorKind::coplanar_ambiguity);
+    EXPECT_EQ(classified_ambiguity.error().diagnostic.code, core::StatusCode::invalid_argument);
 }
 
 TEST(TriangleWatertightTest, IncludesBothOwnersOfASharedEdge) {

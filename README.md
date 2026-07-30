@@ -32,6 +32,11 @@ silently selecting another path.
   preserving distinct seams. Its byte accounting derives from the four contiguous POD buffers that
   a CPU renderer or future CUDA upload consumes, with an expanded-corner comparison and no allocator
   or container-capacity estimate.
+- **Acceleration queries:** one Engine-owned `AccelBackend` contract exposes closest-hit and
+  occlusion queries over immutable world-space triangle meshes, stable surface identifiers, and
+  visibility masks. The deterministic analytic oracle and the pinned Embree implementation are
+  selected through distinct factories returning that same interface; backend failures and
+  unsupported Embree requirements are reported without analytic substitution.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar
@@ -60,19 +65,21 @@ silently selecting another path.
   convergence checks.
 - **Host control:** bounded versioned local IPC, a C extension ABI, explicit absolute-path loading,
   XPU device discovery, a reference discovery plugin, and a headless `render` control executable.
-- **Backend integration:** explicit capability reporting and pre-dispatch checks, a pinned Embree 4
-  smoke test, and an optional CUDA C++20 smoke kernel. These are integration contracts, not complete
-  rendering backends.
+- **Backend integration:** explicit capability reporting and pre-dispatch checks, pinned Embree 4
+  closest-hit/occlusion queries, and an optional CUDA C++20 smoke kernel. These are narrow
+  integration contracts, not complete rendering backends.
 
 ## Current boundary
 
 Blackframe does not yet provide a production path-tracing integrator, a scene loader, a general
-material or lighting system, a production acceleration pipeline, or a CUDA wavefront renderer. The
-current BSDF-only loop is a narrow deterministic scalar oracle over resolved Lambertian triangles,
-not a production backend. The headless executable currently supports local engine control and
-device discovery; it does not yet accept a scene and render an image from the command line. A
-consumable CMake install/export package is also not available yet. The CornellDiffuse JSON files
-are closed validation descriptors, not a general scene-interchange format or a hidden scene loader.
+material or lighting system, a scene-integrated acceleration pipeline, or a CUDA wavefront
+renderer. The current BSDF-only loop is a narrow deterministic scalar oracle over resolved
+Lambertian triangles, not a production backend. The acceleration contract currently consumes
+explicit world-space meshes; it does not yet apply the internal scene graph or hierarchical
+instances. The headless executable currently supports local engine control and device discovery; it
+does not yet accept a scene and render an image from the command line. A consumable CMake
+install/export package is also not available yet. The CornellDiffuse JSON files are closed
+validation descriptors, not a general scene-interchange format or a hidden scene loader.
 
 ## Building
 

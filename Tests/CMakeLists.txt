@@ -19,6 +19,7 @@ endif()
 
 set(
     blackframe_test_targets
+    BlackframeAccelBackendTests
     BlackframeCoreTests
     BlackframeEngineTests
     BlackframeExtensionAbiCTest
