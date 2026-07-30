@@ -8,7 +8,7 @@
 namespace blackframe::renderer {
 namespace {
 
-static_assert(CurrentPathStateDiagnosticSchemaVersion == 1);
+static_assert(CurrentPathStateDiagnosticSchemaVersion == 2);
 
 template <typename Unsigned> void append_hex(std::string& output, const Unsigned value) {
     static_assert(std::is_unsigned_v<Unsigned>);
@@ -60,6 +60,20 @@ void append_wavelengths(std::string& output, const SampledWavelengthsT<Scalar>& 
     output += "]";
 }
 
+void append_depth_counters(std::string& output, const PathDepthCounters& counters) {
+    output += R"({"diffuse":)";
+    output += std::to_string(counters.diffuse);
+    output += R"(,"glossy":)";
+    output += std::to_string(counters.glossy);
+    output += R"(,"specular":)";
+    output += std::to_string(counters.specular);
+    output += R"(,"transmission":)";
+    output += std::to_string(counters.transmission);
+    output += R"(,"volume":)";
+    output += std::to_string(counters.volume);
+    output += "}";
+}
+
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<std::string> serialize(const PathStateT<Scalar>& state,
                                                   const std::uint32_t schema_version) {
@@ -74,7 +88,7 @@ template <SpectrumScalar Scalar>
 
     auto output = std::string{};
     output.reserve(std::same_as<Scalar, TransportScalar> ? 800U : 1100U);
-    output += R"({"schema_version":1,"precision":")";
+    output += R"({"schema_version":2,"precision":")";
     output += std::same_as<Scalar, TransportScalar> ? "float32" : "float64";
     output += R"(","throughput_bits":)";
     append_spectrum(output, state.beta());
@@ -82,6 +96,8 @@ template <SpectrumScalar Scalar>
     append_spectrum(output, state.accumulated_radiance());
     output += R"(,"depth":)";
     output += std::to_string(state.depth());
+    output += R"(,"depth_counters":)";
+    append_depth_counters(output, state.depth_counters());
     output += R"(,"eta_scale_bits":")";
     append_scalar(output, state.eta_scale());
     output += R"(","wavelengths":)";

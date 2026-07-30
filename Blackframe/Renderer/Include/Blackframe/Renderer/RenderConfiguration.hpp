@@ -42,6 +42,7 @@ struct RenderConfiguration {
     std::uint32_t schema_version{CurrentRenderConfigurationSchemaVersion};
     RenderExtent extent{};
     std::uint32_t samples_per_pixel{1};
+    // Global workload safety ceiling; it is not mapped to per-category PathDepthLimits.
     std::uint32_t maximum_path_depth{4};
     std::uint32_t tile_edge_length{16};
     std::uint64_t seed{0};

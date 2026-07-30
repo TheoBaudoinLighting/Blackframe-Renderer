@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Blackframe/Core/Status.hpp>
+#include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
 #include <Blackframe/Renderer/WavelengthSampling.hpp>
@@ -65,10 +66,11 @@ finite_spectrum(const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& spe
 
 } // namespace path_state_detail
 
-// Path depth counts accepted surface or medium scattering events. beta is the spectral path
-// throughput and accumulated_radiance is L; neither contains wavelength-PDF compensation.
-// eta_scale is the positive transmission compensation factor reserved for Russian roulette, not a
-// current index of refraction. The wavelength packet and medium identity are owned by value.
+// Path depth counts accepted surface or medium scattering events and is derived from the bound
+// category counters. beta is the spectral path throughput and accumulated_radiance is L; neither
+// contains wavelength-PDF compensation. eta_scale is the positive transmission compensation factor
+// reserved for Russian roulette, not a current index of refraction. The wavelength packet and
+// medium identity are owned by value.
 template <SpectrumScalar Scalar> class PathStateT final {
   public:
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
@@ -76,8 +78,9 @@ template <SpectrumScalar Scalar> class PathStateT final {
 
     [[nodiscard]] static core::Result<PathStateT>
     create(const spectrum_type beta, const spectrum_type accumulated_radiance,
-           const std::uint32_t depth, const Scalar eta_scale, const wavelengths_type wavelengths,
-           const PathDeltaFlags delta_flags, const MediumId current_medium) {
+           const PathDepthCounters depth_counters, const Scalar eta_scale,
+           const wavelengths_type wavelengths, const PathDeltaFlags delta_flags,
+           const MediumId current_medium) {
         if (!path_state_detail::finite_spectrum(beta)) {
             return std::unexpected(path_state_detail::invalid_path_state(
                 "Path beta requires every spectral lane to be finite."));
@@ -89,6 +92,15 @@ template <SpectrumScalar Scalar> class PathStateT final {
         if (!std::isfinite(eta_scale) || !(eta_scale > Scalar{0})) {
             return std::unexpected(path_state_detail::invalid_path_state(
                 "Path eta scale must be finite and strictly positive."));
+        }
+
+        const auto counters_status = validate_path_depth_counters(depth_counters);
+        if (!counters_status.has_value()) {
+            return std::unexpected(counters_status.error());
+        }
+        const auto depth = path_depth_total(depth_counters);
+        if (!depth.has_value()) {
+            return std::unexpected(depth.error());
         }
 
         for (const auto& wavelength : wavelengths.samples) {
@@ -111,34 +123,48 @@ template <SpectrumScalar Scalar> class PathStateT final {
             return std::unexpected(path_state_detail::invalid_path_state(
                 "Path delta flags contain unsupported bits."));
         }
-        if (depth == 0 && delta_flags != PathDeltaFlags::none) {
+        if (*depth == 0 && delta_flags != PathDeltaFlags::none) {
             return std::unexpected(path_state_detail::invalid_path_state(
                 "A primary path cannot report completed-bounce delta flags."));
         }
-        if (depth == 1 &&
+        if (*depth == 1 &&
             has_path_delta_flag(delta_flags, PathDeltaFlags::previous_bounce_was_delta) &&
             has_path_delta_flag(delta_flags, PathDeltaFlags::any_non_delta_bounces)) {
             return std::unexpected(path_state_detail::invalid_path_state(
                 "A one-bounce path cannot combine a delta previous bounce with non-delta "
                 "history."));
         }
-        if (depth != 0 &&
+        if (*depth != 0 &&
             !has_path_delta_flag(delta_flags, PathDeltaFlags::previous_bounce_was_delta) &&
             !has_path_delta_flag(delta_flags, PathDeltaFlags::any_non_delta_bounces)) {
             return std::unexpected(path_state_detail::invalid_path_state(
                 "A non-delta previous bounce must be recorded in the path history."));
         }
+        const auto non_delta_depth = static_cast<std::uint64_t>(depth_counters.diffuse) +
+                                     static_cast<std::uint64_t>(depth_counters.glossy) +
+                                     static_cast<std::uint64_t>(depth_counters.volume);
+        const auto previous_was_delta =
+            has_path_delta_flag(delta_flags, PathDeltaFlags::previous_bounce_was_delta);
+        const auto has_non_delta_history =
+            has_path_delta_flag(delta_flags, PathDeltaFlags::any_non_delta_bounces);
+        if ((non_delta_depth != 0) != has_non_delta_history ||
+            (previous_was_delta && depth_counters.specular == 0) ||
+            (*depth == 1 && previous_was_delta && depth_counters.specular != 1) ||
+            (*depth == 1 && !previous_was_delta && depth_counters.specular != 0)) {
+            return std::unexpected(path_state_detail::invalid_path_state(
+                "Path depth counters are inconsistent with the delta history."));
+        }
 
-        return PathStateT{beta,        accumulated_radiance, depth,         eta_scale,
-                          wavelengths, delta_flags,          current_medium};
+        return PathStateT{beta,      accumulated_radiance, depth_counters, *depth,
+                          eta_scale, wavelengths,          delta_flags,    current_medium};
     }
 
     [[nodiscard]] static core::Result<PathStateT> create_initial(const wavelengths_type wavelengths,
                                                                  const MediumId current_medium) {
         auto beta = spectrum_type{};
         beta.values.fill(Scalar{1});
-        return create(beta, spectrum_type{}, 0, Scalar{1}, wavelengths, PathDeltaFlags::none,
-                      current_medium);
+        return create(beta, spectrum_type{}, PathDepthCounters{}, Scalar{1}, wavelengths,
+                      PathDeltaFlags::none, current_medium);
     }
 
     [[nodiscard]] constexpr const spectrum_type& beta() const noexcept {
@@ -151,6 +177,10 @@ template <SpectrumScalar Scalar> class PathStateT final {
 
     [[nodiscard]] constexpr std::uint32_t depth() const noexcept {
         return depth_;
+    }
+
+    [[nodiscard]] constexpr const PathDepthCounters& depth_counters() const noexcept {
+        return depth_counters_;
     }
 
     [[nodiscard]] constexpr Scalar eta_scale() const noexcept {
@@ -171,15 +201,16 @@ template <SpectrumScalar Scalar> class PathStateT final {
 
   private:
     constexpr PathStateT(const spectrum_type beta, const spectrum_type accumulated_radiance,
-                         const std::uint32_t depth, const Scalar eta_scale,
-                         const wavelengths_type wavelengths, const PathDeltaFlags delta_flags,
-                         const MediumId current_medium) noexcept
-        : beta_{beta}, accumulated_radiance_{accumulated_radiance}, depth_{depth},
-          eta_scale_{eta_scale}, wavelengths_{wavelengths}, delta_flags_{delta_flags},
-          current_medium_{current_medium} {}
+                         const PathDepthCounters depth_counters, const std::uint32_t depth,
+                         const Scalar eta_scale, const wavelengths_type wavelengths,
+                         const PathDeltaFlags delta_flags, const MediumId current_medium) noexcept
+        : beta_{beta}, accumulated_radiance_{accumulated_radiance}, depth_counters_{depth_counters},
+          depth_{depth}, eta_scale_{eta_scale}, wavelengths_{wavelengths},
+          delta_flags_{delta_flags}, current_medium_{current_medium} {}
 
     spectrum_type beta_;
     spectrum_type accumulated_radiance_;
+    PathDepthCounters depth_counters_;
     std::uint32_t depth_;
     Scalar eta_scale_;
     wavelengths_type wavelengths_;

@@ -213,10 +213,15 @@ template <SpectrumScalar Scalar>
 make_result(const PathSpectrum<Scalar>& beta, const PathSpectrum<Scalar>& radiance,
             const std::uint32_t depth, const Scalar eta_scale,
             const SampledWavelengthsT<Scalar>& wavelengths, const PathDeltaFlags delta_flags,
-            const MediumId current_medium, const RayT<Scalar>& terminal_ray,
-            const BsdfOnlyPathTermination termination) {
-    const auto state = PathStateT<Scalar>::create(beta, radiance, depth, eta_scale, wavelengths,
-                                                  delta_flags, current_medium);
+            const MediumId current_medium, const PathDepthLimits& depth_limits,
+            const PathDepthCounters& depth_counters, const RayT<Scalar>& terminal_ray,
+            const BsdfOnlyPathTermination termination, const ScatteringLobe blocked_depth_limits) {
+    const auto depth_status = validate_path_depth_state(depth_limits, depth_counters, depth);
+    if (!depth_status.has_value()) {
+        return std::unexpected(depth_status.error());
+    }
+    const auto state = PathStateT<Scalar>::create(beta, radiance, depth_counters, eta_scale,
+                                                  wavelengths, delta_flags, current_medium);
     if (!state.has_value()) {
         return std::unexpected(state.error());
     }
@@ -224,6 +229,7 @@ make_result(const PathSpectrum<Scalar>& beta, const PathSpectrum<Scalar>& radian
         .state = *state,
         .terminal_ray = terminal_ray,
         .termination = termination,
+        .blocked_depth_limits = blocked_depth_limits,
     };
 }
 
@@ -233,7 +239,7 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
                      const SampleStreamT<Scalar>& sample_stream,
                      const std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces,
                      const BsdfOnlyEnvironmentT<Scalar>& environment,
-                     const std::uint32_t maximum_depth) {
+                     const PathDepthLimits& depth_limits) {
     if (initial_ray.current_medium() != initial_state.current_medium()) {
         return std::unexpected(path_loop_error(
             "The BSDF-only ray and path state must carry the same current medium."));
@@ -241,6 +247,11 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
     if (!finite_non_negative(initial_state.beta())) {
         return std::unexpected(
             path_loop_error("BSDF-only path throughput must be finite and non-negative."));
+    }
+    const auto initial_depth_status = validate_path_depth_state(
+        depth_limits, initial_state.depth_counters(), initial_state.depth());
+    if (!initial_depth_status.has_value()) {
+        return std::unexpected(initial_depth_status.error());
     }
     if (environment.wavelengths() != initial_state.wavelengths()) {
         return std::unexpected(
@@ -256,16 +267,19 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
     auto beta = initial_state.beta();
     auto radiance = initial_state.accumulated_radiance();
     auto depth = initial_state.depth();
+    auto depth_counters = initial_state.depth_counters();
     const auto eta_scale = initial_state.eta_scale();
     const auto wavelengths = initial_state.wavelengths();
     auto delta_flags = initial_state.delta_flags();
     const auto current_medium = initial_state.current_medium();
     auto ray = initial_ray;
 
-    const auto finish = [&](const BsdfOnlyPathTermination termination)
+    const auto finish = [&](const BsdfOnlyPathTermination termination,
+                            const ScatteringLobe blocked_depth_limits)
         -> core::Result<BsdfOnlyPathResultT<Scalar>> {
         return make_result(beta, radiance, depth, eta_scale, wavelengths, delta_flags,
-                           current_medium, ray, termination);
+                           current_medium, depth_limits, depth_counters, ray, termination,
+                           blocked_depth_limits);
     };
 
     while (true) {
@@ -284,7 +298,7 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
                 return std::unexpected(accumulated.error());
             }
             radiance = *accumulated;
-            return finish(BsdfOnlyPathTermination::escaped_environment);
+            return finish(BsdfOnlyPathTermination::escaped_environment, ScatteringLobe::none);
         }
 
         const auto& surface_hit = **resolved;
@@ -299,11 +313,17 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
         }
         radiance = *accumulated;
 
-        if (depth >= maximum_depth) {
-            return finish(BsdfOnlyPathTermination::maximum_depth);
+        constexpr auto diffuse_reflection = ScatteringLobe::diffuse | ScatteringLobe::reflection;
+        const auto depth_event =
+            evaluate_path_depth_event(depth_limits, depth_counters, diffuse_reflection);
+        if (!depth_event.has_value()) {
+            return std::unexpected(depth_event.error());
+        }
+        if (!depth_event->accepted()) {
+            return finish(BsdfOnlyPathTermination::depth_limit, depth_event->blocked_limits);
         }
         if (zero_spectrum(beta)) {
-            return finish(BsdfOnlyPathTermination::zero_throughput);
+            return finish(BsdfOnlyPathTermination::zero_throughput, ScatteringLobe::none);
         }
 
         const auto frame = OrthonormalFrameT<Scalar>::from_normal(surface_hit.hit.geometric_normal);
@@ -330,7 +350,7 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
             return std::unexpected(sampled.error());
         }
         if (!sampled->has_value()) {
-            return finish(BsdfOnlyPathTermination::outside_bsdf_support);
+            return finish(BsdfOnlyPathTermination::outside_bsdf_support, ScatteringLobe::none);
         }
 
         const auto& bsdf_sample = **sampled;
@@ -362,10 +382,10 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
                 path_loop_error("A Lambertian continuation left the geometric-normal support."));
         }
 
-        if (depth == std::numeric_limits<std::uint32_t>::max()) {
-            return std::unexpected(path_loop_error("BSDF-only path depth cannot be incremented."));
+        const auto next_depth = path_depth_total(depth_event->counters);
+        if (!next_depth.has_value()) {
+            return std::unexpected(next_depth.error());
         }
-        const auto next_depth = depth + 1U;
         constexpr auto next_delta_flags = PathDeltaFlags::any_non_delta_bounces;
 
         const auto position = triangle_position_with_error(surface_hit);
@@ -390,11 +410,12 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
         }
 
         beta = *updated_beta;
-        depth = next_depth;
+        depth = *next_depth;
+        depth_counters = depth_event->counters;
         delta_flags = next_delta_flags;
         ray = *next_ray;
         if (zero_spectrum(beta)) {
-            return finish(BsdfOnlyPathTermination::zero_throughput);
+            return finish(BsdfOnlyPathTermination::zero_throughput, ScatteringLobe::none);
         }
     }
 }
@@ -405,9 +426,9 @@ core::Result<BsdfOnlyPathResult>
 trace_bsdf_only(const Ray& initial_ray, const PathState& initial_state,
                 const SampleStream& sample_stream,
                 const std::span<const BsdfOnlyTriangleSurface> surfaces,
-                const BsdfOnlyEnvironment& environment, const std::uint32_t maximum_depth) {
+                const BsdfOnlyEnvironment& environment, const PathDepthLimits& depth_limits) {
     return trace_bsdf_only_impl(initial_ray, initial_state, sample_stream, surfaces, environment,
-                                maximum_depth);
+                                depth_limits);
 }
 
 core::Result<ReferenceBsdfOnlyPathResult>
@@ -415,9 +436,9 @@ trace_bsdf_only(const ReferenceRay& initial_ray, const ReferencePathState& initi
                 const ReferenceSampleStream& sample_stream,
                 const std::span<const ReferenceBsdfOnlyTriangleSurface> surfaces,
                 const ReferenceBsdfOnlyEnvironment& environment,
-                const std::uint32_t maximum_depth) {
+                const PathDepthLimits& depth_limits) {
     return trace_bsdf_only_impl(initial_ray, initial_state, sample_stream, surfaces, environment,
-                                maximum_depth);
+                                depth_limits);
 }
 
 } // namespace blackframe::renderer

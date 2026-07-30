@@ -21,6 +21,7 @@ add_executable(
     LocalPcg32Test.cpp
     NumericPrecisionTest.cpp
     OwenScramblingTest.cpp
+    PathDepthLimitsTest.cpp
     PathStateTest.cpp
     PinholeCameraTest.cpp
     PixelJitterTest.cpp

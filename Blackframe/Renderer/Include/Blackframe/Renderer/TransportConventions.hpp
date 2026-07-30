@@ -36,6 +36,22 @@ enum class ScatteringLobe : std::uint32_t {
     volume = 1U << 5U,
 };
 
+[[nodiscard]] constexpr ScatteringLobe operator|(const ScatteringLobe left,
+                                                 const ScatteringLobe right) noexcept {
+    return static_cast<ScatteringLobe>(static_cast<std::uint32_t>(left) |
+                                       static_cast<std::uint32_t>(right));
+}
+
+[[nodiscard]] constexpr bool has_scattering_lobe(const ScatteringLobe lobes,
+                                                 const ScatteringLobe lobe) noexcept {
+    const auto bits = static_cast<std::uint32_t>(lobes);
+    const auto requested = static_cast<std::uint32_t>(lobe);
+    if (requested == 0) {
+        return bits == 0;
+    }
+    return (bits & requested) == requested;
+}
+
 enum class TransportEvent : std::uint8_t {
     none,
     surface_scattering,

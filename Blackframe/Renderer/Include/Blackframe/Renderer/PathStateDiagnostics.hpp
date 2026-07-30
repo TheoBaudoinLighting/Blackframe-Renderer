@@ -7,7 +7,7 @@
 
 namespace blackframe::renderer {
 
-inline constexpr std::uint32_t CurrentPathStateDiagnosticSchemaVersion = 1;
+inline constexpr std::uint32_t CurrentPathStateDiagnosticSchemaVersion = 2;
 
 // Floating-point values are emitted as fixed-width IEEE bit patterns. The requested version is
 // mandatory so an unsupported diagnostic schema cannot silently fall back to the current one.

@@ -20,11 +20,14 @@ silently selecting another path.
 - **Surface data:** a separate validated `SurfaceInteraction` contract stores position, geometric
   and shading normals, UVs, derivatives, identifiers, and time.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
-  accumulated radiance, depth, refraction scaling, wavelengths, delta history, and medium identity,
-  with a versioned bit-exact diagnostic dump. A bounded scalar BSDF-only loop linearly traces
-  explicit wavelength-resolved diffuse triangle surfaces, accumulates every encountered emitter or
-  environment, and spawns continuation rays from derived position-error bounds without NEE, MIS, or
-  a hidden backend.
+  accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
+  history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar
+  BSDF-only loop linearly traces explicit wavelength-resolved diffuse triangle surfaces,
+  accumulates every encountered emitter or environment, and spawns continuation rays from derived
+  position-error bounds without NEE, MIS, or a hidden backend. Explicit depth budgets count
+  diffuse, glossy, specular, transmission, and volume events separately; transmitted surface
+  events advance both their scattering family and transmission counters. The current Lambertian
+  loop consumes only diffuse-reflection depth.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, and common disk/sphere/hemisphere mappings. No global mutable RNG is used.

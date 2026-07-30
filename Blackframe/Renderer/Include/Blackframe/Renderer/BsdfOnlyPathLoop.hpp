@@ -3,6 +3,7 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/Emission.hpp>
 #include <Blackframe/Renderer/LambertianReflection.hpp>
+#include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
 #include <Blackframe/Renderer/Triangle.hpp>
@@ -81,7 +82,7 @@ using ReferenceBsdfOnlyEnvironment = BsdfOnlyEnvironmentT<ReferenceScalar>;
 
 enum class BsdfOnlyPathTermination : std::uint8_t {
     escaped_environment,
-    maximum_depth,
+    depth_limit,
     outside_bsdf_support,
     zero_throughput,
 };
@@ -90,6 +91,7 @@ template <SpectrumScalar Scalar> struct BsdfOnlyPathResultT final {
     PathStateT<Scalar> state;
     RayT<Scalar> terminal_ray;
     BsdfOnlyPathTermination termination;
+    ScatteringLobe blocked_depth_limits;
 };
 
 using BsdfOnlyPathResult = BsdfOnlyPathResultT<TransportScalar>;
@@ -98,19 +100,22 @@ using ReferenceBsdfOnlyPathResult = BsdfOnlyPathResultT<ReferenceScalar>;
 // Traces Lambertian continuation rays through a linearly searched triangle span. Emission is
 // accumulated at every hit and the required constant environment is accumulated on a miss. There
 // is intentionally no next-event estimation, light sampling, MIS, Russian roulette, or fallback
-// backend. maximum_depth counts accepted scattering events; surface emission remains visible at
-// the cutoff. Secondary rays use [0, +infinity] while preserving time, mask, and medium.
+// backend. Its only scattering event is explicitly diffuse reflection. Surface emission remains
+// visible when the diffuse limit is reached. Category counters are bound to PathState, so resumed
+// paths cannot be reclassified. Secondary rays use [0, +infinity] while preserving time, mask, and
+// medium.
 [[nodiscard]] core::Result<BsdfOnlyPathResult>
 trace_bsdf_only(const Ray& initial_ray, const PathState& initial_state,
                 const SampleStream& sample_stream,
                 std::span<const BsdfOnlyTriangleSurface> surfaces,
-                const BsdfOnlyEnvironment& environment, std::uint32_t maximum_depth);
+                const BsdfOnlyEnvironment& environment, const PathDepthLimits& depth_limits);
 
 [[nodiscard]] core::Result<ReferenceBsdfOnlyPathResult>
 trace_bsdf_only(const ReferenceRay& initial_ray, const ReferencePathState& initial_state,
                 const ReferenceSampleStream& sample_stream,
                 std::span<const ReferenceBsdfOnlyTriangleSurface> surfaces,
-                const ReferenceBsdfOnlyEnvironment& environment, std::uint32_t maximum_depth);
+                const ReferenceBsdfOnlyEnvironment& environment,
+                const PathDepthLimits& depth_limits);
 
 static_assert(sizeof(BsdfOnlyPathTermination) == sizeof(std::uint8_t));
 static_assert(std::is_standard_layout_v<BsdfOnlyTriangleSurface>);

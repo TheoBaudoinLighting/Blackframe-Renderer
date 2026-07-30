@@ -188,9 +188,17 @@ estimate_cornell(const std::vector<SurfaceFor<Scalar>>& surfaces,
             }
             const auto traced =
                 trace_bsdf_only(*ray, *state, stream, std::span<const SurfaceFor<Scalar>>{surfaces},
-                                environment, 3);
+                                environment, PathDepthLimits{.diffuse = 3});
             if (!traced.has_value()) {
                 return std::unexpected(traced.error());
+            }
+            const auto& counters = traced->state.depth_counters();
+            if (counters.diffuse != traced->state.depth() || counters.glossy != 0 ||
+                counters.specular != 0 || counters.transmission != 0 || counters.volume != 0) {
+                return std::unexpected(core::Error{
+                    .code = core::StatusCode::invalid_argument,
+                    .message = "Cornell BSDF-only depth counters are inconsistent.",
+                });
             }
 
             const auto& radiance = traced->state.accumulated_radiance();
