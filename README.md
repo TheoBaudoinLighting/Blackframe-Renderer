@@ -19,6 +19,9 @@ silently selecting another path.
   hit records expose the relevant roots, UVs, normals, or barycentrics.
 - **Surface data:** a separate validated `SurfaceInteraction` contract stores position, geometric
   and shading normals, UVs, derivatives, identifiers, and time.
+- **Transport state:** validated float and double `PathState` values own spectral throughput,
+  accumulated radiance, depth, refraction scaling, wavelengths, delta history, and medium identity,
+  with a versioned bit-exact diagnostic dump.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, and common disk/sphere/hemisphere mappings. No global mutable RNG is used.

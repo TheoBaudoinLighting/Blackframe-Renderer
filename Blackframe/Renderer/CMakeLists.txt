@@ -27,6 +27,8 @@ add_library(
         Include/Blackframe/Renderer/NumericConversion.hpp
         Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/OwenScrambling.hpp
+        Include/Blackframe/Renderer/PathState.hpp
+        Include/Blackframe/Renderer/PathStateDiagnostics.hpp
         Include/Blackframe/Renderer/PinholeCamera.hpp
         Include/Blackframe/Renderer/PixelJitter.hpp
         Include/Blackframe/Renderer/Plane.hpp
@@ -54,6 +56,7 @@ add_library(
         Source/Cie1931Sensor.cpp
         Source/NumericConversion.cpp
         Source/OwenScrambling.cpp
+        Source/PathStateDiagnostics.cpp
         Source/RayDiagnostics.cpp
         Source/RenderConfiguration.cpp
         Source/RenderConfigurationLimits.hpp
