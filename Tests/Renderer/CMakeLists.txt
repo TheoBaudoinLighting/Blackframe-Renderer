@@ -25,6 +25,7 @@ add_executable(
     RenderSessionStateTest.cpp
     SampleDimensionMapTest.cpp
     SampleStreamTest.cpp
+    SobolSamplingTest.cpp
     SphereTest.cpp
     SpectrumTest.cpp
     StratifiedSamplingTest.cpp

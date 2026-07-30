@@ -33,6 +33,7 @@ add_library(
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/SampleDimensionMap.hpp
         Include/Blackframe/Renderer/SampleStream.hpp
+        Include/Blackframe/Renderer/SobolSampling.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Sphere.hpp
         Include/Blackframe/Renderer/StratifiedSampling.hpp
@@ -49,6 +50,8 @@ add_library(
         Source/RenderConfigurationSchema.cpp
         Source/RenderSessionState.cpp
         Source/SampleDimensionMap.cpp
+        Source/SobolDirectionNumbers.inc
+        Source/SobolSampling.cpp
 )
 add_library(Blackframe::Renderer ALIAS BlackframeRenderer)
 blackframe_set_target_role(BlackframeRenderer core)
