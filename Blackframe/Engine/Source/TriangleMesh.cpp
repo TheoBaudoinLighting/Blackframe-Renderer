@@ -1,6 +1,13 @@
 #include <Blackframe/Engine/TriangleMesh.hpp>
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <map>
+#include <new>
+#include <stdexcept>
 #include <utility>
 
 namespace blackframe::engine {
@@ -29,6 +36,23 @@ namespace {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z) &&
            std::isfinite(squared_length) &&
            std::abs(squared_length - renderer::TransportScalar{1}) <= tolerance;
+}
+
+using AlignedVertexBits = std::array<std::uint32_t, 8>;
+
+[[nodiscard]] AlignedVertexBits
+aligned_vertex_bits(const renderer::Point3 position, const renderer::Normal3 normal,
+                    const renderer::Point2 texture_coordinate) noexcept {
+    return {
+        std::bit_cast<std::uint32_t>(position.x),
+        std::bit_cast<std::uint32_t>(position.y),
+        std::bit_cast<std::uint32_t>(position.z),
+        std::bit_cast<std::uint32_t>(normal.x),
+        std::bit_cast<std::uint32_t>(normal.y),
+        std::bit_cast<std::uint32_t>(normal.z),
+        std::bit_cast<std::uint32_t>(texture_coordinate.x),
+        std::bit_cast<std::uint32_t>(texture_coordinate.y),
+    };
 }
 
 } // namespace
@@ -116,6 +140,99 @@ std::span<const renderer::Point2> TriangleMesh::texture_coordinates() const noex
 
 std::span<const TriangleVertexIndices> TriangleMesh::triangles() const noexcept {
     return triangles_;
+}
+
+core::Result<TriangleMesh> TriangleMesh::compacted() const {
+    try {
+        auto compact_index_by_vertex = std::map<AlignedVertexBits, std::uint32_t>{};
+        auto source_vertex_by_compact_index = std::vector<std::uint32_t>{};
+        auto maximum_referenced_vertices = positions_.size();
+        constexpr auto corners_per_triangle = std::size_t{3};
+        if (triangles_.size() <= std::numeric_limits<std::size_t>::max() / corners_per_triangle) {
+            maximum_referenced_vertices =
+                std::min(maximum_referenced_vertices, triangles_.size() * corners_per_triangle);
+        }
+        source_vertex_by_compact_index.reserve(maximum_referenced_vertices);
+        auto compact_triangles = std::vector<TriangleVertexIndices>(triangles_.size());
+
+        for (auto triangle_index = std::size_t{}; triangle_index < triangles_.size();
+             ++triangle_index) {
+            const auto& source_triangle = triangles_[triangle_index];
+            auto& compact_triangle = compact_triangles[triangle_index];
+            for (auto corner = std::size_t{}; corner < source_triangle.vertices.size(); ++corner) {
+                const auto source_index = source_triangle.vertices[corner];
+                const auto key =
+                    aligned_vertex_bits(positions_[source_index], normals_[source_index],
+                                        texture_coordinates_[source_index]);
+                const auto existing = compact_index_by_vertex.find(key);
+                if (existing != compact_index_by_vertex.end()) {
+                    compact_triangle.vertices[corner] = existing->second;
+                    continue;
+                }
+
+                if (source_vertex_by_compact_index.size() >=
+                    std::numeric_limits<std::uint32_t>::max()) {
+                    return std::unexpected(
+                        mesh_error(core::StatusCode::resource_exhausted,
+                                   "Compacted triangle mesh exceeds the 32-bit index domain."));
+                }
+                const auto compact_index =
+                    static_cast<std::uint32_t>(source_vertex_by_compact_index.size());
+                compact_index_by_vertex.emplace(key, compact_index);
+                source_vertex_by_compact_index.push_back(source_index);
+                compact_triangle.vertices[corner] = compact_index;
+            }
+        }
+
+        auto compact_positions =
+            std::vector<renderer::Point3>(source_vertex_by_compact_index.size());
+        auto compact_normals =
+            std::vector<renderer::Normal3>(source_vertex_by_compact_index.size());
+        auto compact_texture_coordinates =
+            std::vector<renderer::Point2>(source_vertex_by_compact_index.size());
+        for (auto compact_index = std::size_t{};
+             compact_index < source_vertex_by_compact_index.size(); ++compact_index) {
+            const auto source_index = source_vertex_by_compact_index[compact_index];
+            compact_positions[compact_index] = positions_[source_index];
+            compact_normals[compact_index] = normals_[source_index];
+            compact_texture_coordinates[compact_index] = texture_coordinates_[source_index];
+        }
+
+        return TriangleMesh::create(std::move(compact_positions), std::move(compact_normals),
+                                    std::move(compact_texture_coordinates),
+                                    std::move(compact_triangles));
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(mesh_error(core::StatusCode::resource_exhausted,
+                                          "Triangle mesh compaction exhausted host memory."));
+    } catch (const std::length_error&) {
+        return std::unexpected(
+            mesh_error(core::StatusCode::resource_exhausted,
+                       "Triangle mesh compaction exceeded host container limits."));
+    }
+}
+
+TriangleMeshMemoryReport TriangleMesh::memory_report() const noexcept {
+    constexpr auto position_bytes = std::uint64_t{sizeof(renderer::Point3)};
+    constexpr auto normal_bytes = std::uint64_t{sizeof(renderer::Normal3)};
+    constexpr auto texture_coordinate_bytes = std::uint64_t{sizeof(renderer::Point2)};
+    constexpr auto index_bytes = std::uint64_t{sizeof(TriangleVertexIndices)};
+    constexpr auto attributes_per_corner = position_bytes + normal_bytes + texture_coordinate_bytes;
+
+    const auto vertex_count = static_cast<std::uint64_t>(positions_.size());
+    const auto triangle_count = static_cast<std::uint64_t>(triangles_.size());
+    const auto report_position_bytes = vertex_count * position_bytes;
+    const auto report_normal_bytes = vertex_count * normal_bytes;
+    const auto report_texture_coordinate_bytes = vertex_count * texture_coordinate_bytes;
+    const auto report_index_bytes = triangle_count * index_bytes;
+    return TriangleMeshMemoryReport{
+        .position_bytes = report_position_bytes,
+        .normal_bytes = report_normal_bytes,
+        .texture_coordinate_bytes = report_texture_coordinate_bytes,
+        .index_bytes = report_index_bytes,
+        .payload_bytes = report_position_bytes + report_normal_bytes +
+                         report_texture_coordinate_bytes + report_index_bytes,
+        .expanded_triangle_bytes = triangle_count * 3U * attributes_per_corner,
+    };
 }
 
 core::Result<renderer::Triangle>

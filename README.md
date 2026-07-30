@@ -28,6 +28,10 @@ silently selecting another path.
   from explicit absolute paths. Positions, unit normals, UVs, and 32-bit indices are validated;
   independent OBJ index domains are canonicalized at seams. Missing attributes, polygons, invalid
   indices, degenerate triangles, unsupported PLY encodings, and malformed records fail explicitly.
+  A deterministic compaction pass removes unreferenced and bit-identical aligned vertices while
+  preserving distinct seams. Its byte accounting derives from the four contiguous POD buffers that
+  a CPU renderer or future CUDA upload consumes, with an expanded-corner comparison and no allocator
+  or container-capacity estimate.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar

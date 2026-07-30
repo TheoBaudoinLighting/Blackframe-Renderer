@@ -6,6 +6,7 @@
 #include <Blackframe/Renderer/SurfaceInteraction.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -276,6 +277,60 @@ void expect_same_film(const renderer::Film& left, const renderer::Film& right) {
     }
 }
 
+void expect_same_transport_bits(const renderer::TransportScalar left,
+                                const renderer::TransportScalar right) {
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(left), std::bit_cast<std::uint32_t>(right));
+}
+
+void expect_same_resolved_mesh_content(const TriangleMesh& source, const TriangleMesh& compacted) {
+    ASSERT_EQ(source.triangles().size(), compacted.triangles().size());
+    for (auto triangle_index = std::size_t{}; triangle_index < source.triangles().size();
+         ++triangle_index) {
+        for (auto corner = std::size_t{}; corner < 3; ++corner) {
+            const auto source_vertex = source.triangles()[triangle_index].vertices[corner];
+            const auto compact_vertex = compacted.triangles()[triangle_index].vertices[corner];
+            const auto source_position = source.positions()[source_vertex];
+            const auto compact_position = compacted.positions()[compact_vertex];
+            expect_same_transport_bits(source_position.x, compact_position.x);
+            expect_same_transport_bits(source_position.y, compact_position.y);
+            expect_same_transport_bits(source_position.z, compact_position.z);
+
+            const auto source_normal = source.normals()[source_vertex];
+            const auto compact_normal = compacted.normals()[compact_vertex];
+            expect_same_transport_bits(source_normal.x, compact_normal.x);
+            expect_same_transport_bits(source_normal.y, compact_normal.y);
+            expect_same_transport_bits(source_normal.z, compact_normal.z);
+
+            const auto source_uv = source.texture_coordinates()[source_vertex];
+            const auto compact_uv = compacted.texture_coordinates()[compact_vertex];
+            expect_same_transport_bits(source_uv.x, compact_uv.x);
+            expect_same_transport_bits(source_uv.y, compact_uv.y);
+        }
+    }
+}
+
+void expect_same_mesh_buffers(const TriangleMesh& left, const TriangleMesh& right) {
+    ASSERT_EQ(left.positions().size(), right.positions().size());
+    ASSERT_EQ(left.normals().size(), right.normals().size());
+    ASSERT_EQ(left.texture_coordinates().size(), right.texture_coordinates().size());
+    ASSERT_EQ(left.triangles().size(), right.triangles().size());
+    for (auto vertex = std::size_t{}; vertex < left.positions().size(); ++vertex) {
+        expect_same_transport_bits(left.positions()[vertex].x, right.positions()[vertex].x);
+        expect_same_transport_bits(left.positions()[vertex].y, right.positions()[vertex].y);
+        expect_same_transport_bits(left.positions()[vertex].z, right.positions()[vertex].z);
+        expect_same_transport_bits(left.normals()[vertex].x, right.normals()[vertex].x);
+        expect_same_transport_bits(left.normals()[vertex].y, right.normals()[vertex].y);
+        expect_same_transport_bits(left.normals()[vertex].z, right.normals()[vertex].z);
+        expect_same_transport_bits(left.texture_coordinates()[vertex].x,
+                                   right.texture_coordinates()[vertex].x);
+        expect_same_transport_bits(left.texture_coordinates()[vertex].y,
+                                   right.texture_coordinates()[vertex].y);
+    }
+    for (auto triangle = std::size_t{}; triangle < left.triangles().size(); ++triangle) {
+        EXPECT_EQ(left.triangles()[triangle], right.triangles()[triangle]);
+    }
+}
+
 [[nodiscard]] std::uint64_t quantized_film_checksum(const renderer::Film& film) {
     auto checksum = std::uint64_t{14695981039346656037ULL};
     const auto append = [&checksum](const std::uint16_t value) {
@@ -388,6 +443,128 @@ TEST(TriangleMeshImportTest, RendersReferenceObjAndPlyWithIdenticalExpectedAttri
     EXPECT_LT(upper_left_normal.red, 0.5F);
     EXPECT_LT(upper_left_normal.green, 0.5F);
     EXPECT_GT(upper_left_normal.blue, 0.9F);
+}
+
+TEST(TriangleMeshImportTest, CompactsReferenceMeshesWithoutChangingAnyRenderedContent) {
+    const auto obj = load_obj_triangle_mesh(fixture_path("reference-mesh.obj"));
+    const auto ply = load_ply_triangle_mesh(fixture_path("reference-mesh.ply"));
+    ASSERT_TRUE(obj.has_value()) << obj.error().message;
+    ASSERT_TRUE(ply.has_value()) << ply.error().message;
+
+    const auto compact_obj = obj->compacted();
+    const auto compact_ply = ply->compacted();
+    ASSERT_TRUE(compact_obj.has_value()) << compact_obj.error().message;
+    ASSERT_TRUE(compact_ply.has_value()) << compact_ply.error().message;
+    ASSERT_EQ(compact_obj->positions().size(), std::size_t{5});
+    ASSERT_EQ(compact_obj->normals().size(), std::size_t{5});
+    ASSERT_EQ(compact_obj->texture_coordinates().size(), std::size_t{5});
+    ASSERT_EQ(compact_obj->triangles().size(), std::size_t{2});
+    EXPECT_EQ(compact_obj->triangles()[0], (TriangleVertexIndices{.vertices = {0, 1, 2}}));
+    EXPECT_EQ(compact_obj->triangles()[1], (TriangleVertexIndices{.vertices = {0, 3, 4}}));
+    EXPECT_EQ(compact_ply->triangles()[0], compact_obj->triangles()[0]);
+    EXPECT_EQ(compact_ply->triangles()[1], compact_obj->triangles()[1]);
+    expect_same_resolved_mesh_content(*obj, *compact_obj);
+    expect_same_resolved_mesh_content(*ply, *compact_ply);
+
+    expect_same_mesh_buffers(*compact_obj, *compact_ply);
+    EXPECT_EQ(compact_obj->positions()[2], compact_obj->positions()[3]);
+    EXPECT_NE(compact_obj->normals()[2], compact_obj->normals()[3]);
+    EXPECT_NE(compact_obj->texture_coordinates()[2], compact_obj->texture_coordinates()[3]);
+
+    const auto source_render = render_reference_mesh(*obj);
+    const auto compact_obj_render = render_reference_mesh(*compact_obj);
+    const auto compact_ply_render = render_reference_mesh(*compact_ply);
+    ASSERT_TRUE(source_render.has_value()) << source_render.error().message;
+    ASSERT_TRUE(compact_obj_render.has_value()) << compact_obj_render.error().message;
+    ASSERT_TRUE(compact_ply_render.has_value()) << compact_ply_render.error().message;
+    EXPECT_EQ(compact_obj_render->hit_count, source_render->hit_count);
+    EXPECT_EQ(compact_ply_render->hit_count, source_render->hit_count);
+    expect_same_film(source_render->normal, compact_obj_render->normal);
+    expect_same_film(source_render->normal, compact_ply_render->normal);
+    expect_same_film(source_render->uv, compact_obj_render->uv);
+    expect_same_film(source_render->uv, compact_ply_render->uv);
+    EXPECT_EQ(quantized_film_checksum(compact_obj_render->normal), ReferenceNormalChecksum);
+    EXPECT_EQ(quantized_film_checksum(compact_obj_render->uv), ReferenceUvChecksum);
+}
+
+TEST(TriangleMeshImportTest, ReportsExactTransferPayloadBeforeAndAfterCompaction) {
+    const auto source = load_obj_triangle_mesh(fixture_path("reference-mesh.obj"));
+    ASSERT_TRUE(source.has_value()) << source.error().message;
+    const auto compacted = source->compacted();
+    ASSERT_TRUE(compacted.has_value()) << compacted.error().message;
+
+    constexpr auto position_size = std::uint64_t{sizeof(renderer::Point3)};
+    constexpr auto normal_size = std::uint64_t{sizeof(renderer::Normal3)};
+    constexpr auto uv_size = std::uint64_t{sizeof(renderer::Point2)};
+    constexpr auto index_size = std::uint64_t{sizeof(TriangleVertexIndices)};
+    constexpr auto expanded_bytes = std::uint64_t{2 * 3} * (position_size + normal_size + uv_size);
+    const auto source_report = source->memory_report();
+    const auto compact_report = compacted->memory_report();
+
+    EXPECT_EQ(source_report, (TriangleMeshMemoryReport{
+                                 .position_bytes = 6 * position_size,
+                                 .normal_bytes = 6 * normal_size,
+                                 .texture_coordinate_bytes = 6 * uv_size,
+                                 .index_bytes = 2 * index_size,
+                                 .payload_bytes = 216,
+                                 .expanded_triangle_bytes = expanded_bytes,
+                             }));
+    EXPECT_EQ(compact_report, (TriangleMeshMemoryReport{
+                                  .position_bytes = 5 * position_size,
+                                  .normal_bytes = 5 * normal_size,
+                                  .texture_coordinate_bytes = 5 * uv_size,
+                                  .index_bytes = 2 * index_size,
+                                  .payload_bytes = 184,
+                                  .expanded_triangle_bytes = expanded_bytes,
+                              }));
+    EXPECT_EQ(source_report.payload_bytes - compact_report.payload_bytes, std::uint64_t{32});
+    EXPECT_LT(compact_report.payload_bytes, source_report.payload_bytes);
+    EXPECT_LT(compact_report.payload_bytes, compact_report.expanded_triangle_bytes);
+    EXPECT_EQ(compact_report.payload_bytes * 27U, source_report.payload_bytes * 23U);
+    EXPECT_EQ(compact_report.payload_bytes,
+              compact_report.position_bytes + compact_report.normal_bytes +
+                  compact_report.texture_coordinate_bytes + compact_report.index_bytes);
+}
+
+TEST(TriangleMeshImportTest, PreservesBitDistinctSeamsAndDropsUnreferencedVertices) {
+    const auto source = TriangleMesh::create(
+        {
+            renderer::Point3{.x = 0.0F, .y = 0.0F, .z = -2.0F},
+            renderer::Point3{.x = 1.0F, .y = 0.0F, .z = -2.0F},
+            renderer::Point3{.x = 0.0F, .y = 1.0F, .z = -2.0F},
+            renderer::Point3{.x = 0.0F, .y = 0.0F, .z = -2.0F},
+            renderer::Point3{.x = -1.0F, .y = 0.0F, .z = -2.0F},
+            renderer::Point3{.x = 8.0F, .y = 8.0F, .z = -2.0F},
+        },
+        std::vector<renderer::Normal3>(6, renderer::Normal3{.z = 1.0F}),
+        {
+            renderer::Point2{.x = 0.0F, .y = 0.0F},
+            renderer::Point2{.x = 1.0F, .y = 0.0F},
+            renderer::Point2{.x = 0.0F, .y = 1.0F},
+            renderer::Point2{.x = -0.0F, .y = 0.0F},
+            renderer::Point2{.x = -1.0F, .y = 0.0F},
+            renderer::Point2{.x = 0.5F, .y = 0.5F},
+        },
+        {
+            TriangleVertexIndices{.vertices = {0, 1, 2}},
+            TriangleVertexIndices{.vertices = {3, 2, 4}},
+        });
+    ASSERT_TRUE(source.has_value()) << source.error().message;
+    const auto compacted = source->compacted();
+    ASSERT_TRUE(compacted.has_value()) << compacted.error().message;
+
+    ASSERT_EQ(compacted->positions().size(), std::size_t{5});
+    EXPECT_EQ(compacted->triangles()[0], (TriangleVertexIndices{.vertices = {0, 1, 2}}));
+    EXPECT_EQ(compacted->triangles()[1], (TriangleVertexIndices{.vertices = {3, 2, 4}}));
+    EXPECT_FALSE(std::signbit(compacted->texture_coordinates()[0].x));
+    EXPECT_TRUE(std::signbit(compacted->texture_coordinates()[3].x));
+    expect_same_resolved_mesh_content(*source, *compacted);
+
+    const auto compacted_twice = compacted->compacted();
+    ASSERT_TRUE(compacted_twice.has_value()) << compacted_twice.error().message;
+    EXPECT_EQ(compacted_twice->memory_report(), compacted->memory_report());
+    expect_same_mesh_buffers(*compacted, *compacted_twice);
+    expect_same_resolved_mesh_content(*compacted, *compacted_twice);
 }
 
 TEST(TriangleMeshImportTest, RejectsImplicitPathsMissingFilesAndUnknownTriangles) {
