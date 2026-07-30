@@ -23,8 +23,9 @@ silently selecting another path.
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, and common disk/sphere/hemisphere mappings. No global mutable RNG is used.
 - **Spectral and color foundations:** four-lane 360-830 nm wavelength packets with marginal PDFs,
-  black, constant, and tabulated spectra, `SampledSpectrum<4>`, the CIE 1931 2-degree observer to
-  relative XYZ, and signed scene-linear RGB.
+  black, constant, and tabulated spectra, `SampledSpectrum<4>`, energy-conserving spectral
+  Lambertian reflection, the CIE 1931 2-degree observer to relative XYZ, and signed scene-linear
+  RGB.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.

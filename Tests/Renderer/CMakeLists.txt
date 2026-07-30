@@ -13,6 +13,7 @@ add_executable(
     GeometryTypesTest.cpp
     HdrMetricsTest.cpp
     IndependentSamplerTest.cpp
+    LambertianReflectionTest.cpp
     LinearMetricsTest.cpp
     LocalFrameTest.cpp
     LocalPcg32Test.cpp
