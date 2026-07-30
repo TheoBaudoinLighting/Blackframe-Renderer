@@ -1,5 +1,6 @@
 add_executable(
     BlackframeRendererTests
+    BasicSpectraTest.cpp
     BoundsTest.cpp
     CapabilityRegistryTest.cpp
     Cie1931SensorTest.cpp

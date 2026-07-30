@@ -1,6 +1,7 @@
 add_library(
     BlackframeRenderer
     STATIC
+        Include/Blackframe/Renderer/BasicSpectra.hpp
         Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/Cie1931Sensor.hpp
