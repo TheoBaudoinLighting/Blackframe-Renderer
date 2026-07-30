@@ -21,6 +21,11 @@ struct ProbabilityDensity {
     ProbabilityMeasure measure{ProbabilityMeasure::discrete};
 };
 
+struct ReferenceProbabilityDensity {
+    ReferenceScalar value{};
+    ProbabilityMeasure measure{ProbabilityMeasure::discrete};
+};
+
 enum class ScatteringLobe : std::uint32_t {
     none = 0,
     diffuse = 1U << 0U,
@@ -44,6 +49,14 @@ struct WavelengthSample {
     TransportScalar nanometers{};
     ProbabilityDensity probability{
         .value = 0.0F,
+        .measure = ProbabilityMeasure::wavelength,
+    };
+};
+
+struct ReferenceWavelengthSample {
+    ReferenceScalar nanometers{};
+    ReferenceProbabilityDensity probability{
+        .value = 0.0,
         .measure = ProbabilityMeasure::wavelength,
     };
 };

@@ -34,6 +34,7 @@ add_executable(
     SurfaceInteractionTest.cpp
     TransformsTest.cpp
     TriangleTest.cpp
+    WavelengthSamplingTest.cpp
 )
 blackframe_set_target_role(BlackframeRendererTests test)
 

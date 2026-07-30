@@ -44,6 +44,7 @@ add_library(
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Include/Blackframe/Renderer/Triangle.hpp
+        Include/Blackframe/Renderer/WavelengthSampling.hpp
         Source/CapabilityRegistry.cpp
         Source/NumericConversion.cpp
         Source/OwenScrambling.cpp
