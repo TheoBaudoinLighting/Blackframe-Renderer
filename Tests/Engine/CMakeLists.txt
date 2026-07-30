@@ -30,3 +30,25 @@ gtest_discover_tests(
     PROPERTIES
         LABELS "smoke;regression;nightly;cpu"
 )
+
+add_executable(
+    BlackframeSceneTests
+    FrameSceneTest.cpp
+)
+blackframe_set_target_role(BlackframeSceneTests test)
+
+target_link_libraries(
+    BlackframeSceneTests
+    PRIVATE
+        Blackframe::Engine
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeSceneTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cpu"
+)

@@ -2,7 +2,9 @@ add_library(
     BlackframeEngine
     STATIC
         Include/Blackframe/Engine/Engine.hpp
+        Include/Blackframe/Engine/FrameScene.hpp
         Source/Engine.cpp
+        Source/FrameScene.cpp
 )
 add_library(Blackframe::Engine ALIAS BlackframeEngine)
 blackframe_set_target_role(BlackframeEngine core)

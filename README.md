@@ -19,6 +19,10 @@ silently selecting another path.
   hit records expose the relevant roots, UVs, normals, or barycentrics.
 - **Surface data:** a separate validated `SurfaceInteraction` contract stores position, geometric
   and shading normals, UVs, derivatives, identifiers, and time.
+- **Internal scene:** the Engine exposes an immutable frame snapshot storing a closed object,
+  geometry, material, and instance graph under explicit stable 32-bit identifiers. Construction
+  canonicalizes storage and rejects duplicate IDs or dangling references; lookup failures are
+  explicit.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar

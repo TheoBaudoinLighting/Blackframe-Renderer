@@ -29,6 +29,7 @@ set(
     BlackframeCornellReference64Tests
     BlackframeCornellReference256Tests
     BlackframeRendererTests
+    BlackframeSceneTests
     BlackframeXpuTests
 )
 if(BLACKFRAME_ENABLE_EMBREE)

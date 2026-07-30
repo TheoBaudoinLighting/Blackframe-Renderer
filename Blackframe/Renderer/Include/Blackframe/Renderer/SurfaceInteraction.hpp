@@ -2,46 +2,13 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
+#include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <limits>
 #include <type_traits>
 
 namespace blackframe::renderer {
-
-struct InstanceId final {
-    std::uint32_t value{};
-
-    [[nodiscard]] constexpr bool operator==(const InstanceId&) const noexcept = default;
-};
-
-struct GeometryId final {
-    std::uint32_t value{};
-
-    [[nodiscard]] constexpr bool operator==(const GeometryId&) const noexcept = default;
-};
-
-struct PrimitiveId final {
-    std::uint32_t value{};
-
-    [[nodiscard]] constexpr bool operator==(const PrimitiveId&) const noexcept = default;
-};
-
-struct MaterialId final {
-    std::uint32_t value{};
-
-    [[nodiscard]] constexpr bool operator==(const MaterialId&) const noexcept = default;
-};
-
-struct SurfaceIdentifiers final {
-    InstanceId instance{};
-    GeometryId geometry{};
-    PrimitiveId primitive{};
-    MaterialId material{};
-
-    [[nodiscard]] constexpr bool operator==(const SurfaceIdentifiers&) const noexcept = default;
-};
 
 namespace surface_interaction_detail {
 
@@ -213,18 +180,6 @@ template <GeometryScalar Scalar> class SurfaceInteractionT final {
 using SurfaceInteraction = SurfaceInteractionT<TransportScalar>;
 using ReferenceSurfaceInteraction = SurfaceInteractionT<ReferenceScalar>;
 
-static_assert(!std::is_same_v<InstanceId, GeometryId>);
-static_assert(!std::is_same_v<InstanceId, PrimitiveId>);
-static_assert(!std::is_same_v<InstanceId, MaterialId>);
-static_assert(!std::is_same_v<GeometryId, PrimitiveId>);
-static_assert(!std::is_same_v<GeometryId, MaterialId>);
-static_assert(!std::is_same_v<PrimitiveId, MaterialId>);
-static_assert(sizeof(InstanceId) == sizeof(std::uint32_t));
-static_assert(sizeof(GeometryId) == sizeof(std::uint32_t));
-static_assert(sizeof(PrimitiveId) == sizeof(std::uint32_t));
-static_assert(sizeof(MaterialId) == sizeof(std::uint32_t));
-static_assert(std::is_standard_layout_v<SurfaceIdentifiers>);
-static_assert(std::is_trivially_copyable_v<SurfaceIdentifiers>);
 static_assert(std::is_standard_layout_v<SurfaceInteraction>);
 static_assert(std::is_trivially_copyable_v<SurfaceInteraction>);
 static_assert(std::is_standard_layout_v<ReferenceSurfaceInteraction>);
