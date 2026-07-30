@@ -7,6 +7,7 @@ add_executable(
     DebugIntegratorGoldenTest.cpp
     DebugIntegratorsTest.cpp
     DisplayPsnrTest.cpp
+    EmissionTest.cpp
     ExrWriterTest.cpp
     FilmTest.cpp
     FilmTileTest.cpp
