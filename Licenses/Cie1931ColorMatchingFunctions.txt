@@ -1,0 +1,22 @@
+CIE 1931 colour-matching functions, 2 degree observer
+
+The source CSV was adapted to C++ initializers in
+Blackframe/Renderer/Source/Cie1931ColorMatchingFunctions.inc. The explicit
+wavelength column was replaced by the row index, where index zero represents
+360 nm and each following index advances by 1 nm. The 471 XYZ numeric triplets
+are otherwise unmodified.
+
+CIE 2019, Colour-matching functions of CIE 1931 standard colorimetric observer,
+International Commission on Illumination (CIE), Vienna, AT.
+
+Dataset DOI:
+https://doi.org/10.25039/CIE.DS.xvudnb9b
+
+Dataset SHA-256:
+fa663e3535a7e0763a745993a1f0a192eb0275ac46ad2d1befd7626841e713c1
+
+License:
+Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+https://creativecommons.org/licenses/by-sa/4.0/
+
+The adapted C++ data file is distributed under the same CC BY-SA 4.0 license.

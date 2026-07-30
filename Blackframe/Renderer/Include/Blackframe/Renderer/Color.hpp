@@ -54,8 +54,9 @@ template <typename Color> [[nodiscard]] core::Result<Color> finite_result(const 
 
 } // namespace color_detail
 
-// CIE XYZ uses the 1931 2-degree observer and D65 white. Linear RGB uses the sRGB primaries
-// without an opto-electronic transfer function. Out-of-gamut values remain signed and unclamped.
+// CIE XYZ uses the 1931 2-degree observer. Linear RGB uses the D65-referred sRGB primaries without
+// an opto-electronic transfer function or chromatic adaptation. Out-of-gamut values remain signed
+// and unclamped.
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<XyzT<Scalar>> linear_rgb_to_xyz(const LinearRgbT<Scalar> rgb) {
     if (!color_detail::finite(rgb)) {

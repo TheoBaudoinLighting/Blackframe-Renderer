@@ -3,6 +3,7 @@ add_library(
     STATIC
         Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
+        Include/Blackframe/Renderer/Cie1931Sensor.hpp
         Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
         Include/Blackframe/Renderer/Disk.hpp
@@ -46,6 +47,8 @@ add_library(
         Include/Blackframe/Renderer/Triangle.hpp
         Include/Blackframe/Renderer/WavelengthSampling.hpp
         Source/CapabilityRegistry.cpp
+        Source/Cie1931ColorMatchingFunctions.inc
+        Source/Cie1931Sensor.cpp
         Source/NumericConversion.cpp
         Source/OwenScrambling.cpp
         Source/RayDiagnostics.cpp

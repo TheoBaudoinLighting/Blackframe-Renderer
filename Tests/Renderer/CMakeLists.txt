@@ -2,6 +2,7 @@ add_executable(
     BlackframeRendererTests
     BoundsTest.cpp
     CapabilityRegistryTest.cpp
+    Cie1931SensorTest.cpp
     DebugIntegratorGoldenTest.cpp
     DebugIntegratorsTest.cpp
     DisplayPsnrTest.cpp
