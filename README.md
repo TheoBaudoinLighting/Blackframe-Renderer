@@ -20,9 +20,10 @@ silently selecting another path.
 - **Surface data:** a separate validated `SurfaceInteraction` contract stores position, geometric
   and shading normals, UVs, derivatives, identifiers, and time.
 - **Internal scene:** the Engine exposes an immutable frame snapshot storing a closed object,
-  geometry, material, and instance graph under explicit stable 32-bit identifiers. Construction
-  canonicalizes storage and rejects duplicate IDs or dangling references; lookup failures are
-  explicit.
+  geometry, material, and nested-instance graph under explicit stable 32-bit identifiers.
+  Instances carry validated local affine matrices and optional parents; world transforms are
+  resolved deterministically when the snapshot closes. Duplicate IDs, dangling references, cycles,
+  invalid compositions, and lookup failures are explicit errors.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar
