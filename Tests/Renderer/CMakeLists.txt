@@ -15,6 +15,7 @@ add_executable(
     LocalFrameTest.cpp
     LocalPcg32Test.cpp
     NumericPrecisionTest.cpp
+    OwenScramblingTest.cpp
     PinholeCameraTest.cpp
     PixelJitterTest.cpp
     PlanarPrimitivesTest.cpp
@@ -96,6 +97,12 @@ if(TARGET Blackframe::Png)
         PngWriterTest.WritesFixedDisplayTransformForSyntheticCrop
         checksum-preview.png
         3ff3ba54ed3d83a806b7e51583bb64ff106a6e51c09d589ad6115f56a8bcf168
+    )
+    blackframe_add_png_checksum_test(
+        Blackframe.OwenScramblingVisualizer
+        OwenScramblingTest.WritesStableVisualizer
+        checksum-owen-scrambling-visualizer.png
+        7f92475259a487f9f49e94706b4a44cb5198d6c60806ebd6827672659547c7b2
     )
     blackframe_add_png_checksum_test(
         Blackframe.DebugGolden.Normal
