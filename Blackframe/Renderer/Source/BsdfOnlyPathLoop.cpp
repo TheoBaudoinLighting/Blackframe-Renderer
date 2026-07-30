@@ -239,7 +239,12 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
                      const SampleStreamT<Scalar>& sample_stream,
                      const std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces,
                      const BsdfOnlyEnvironmentT<Scalar>& environment,
-                     const PathDepthLimits& depth_limits) {
+                     const PathDepthLimits& depth_limits,
+                     const RussianRoulettePolicyT<Scalar>& roulette_policy) {
+    const auto roulette_policy_status = validate_russian_roulette_policy(roulette_policy);
+    if (!roulette_policy_status.has_value()) {
+        return std::unexpected(roulette_policy_status.error());
+    }
     if (initial_ray.current_medium() != initial_state.current_medium()) {
         return std::unexpected(path_loop_error(
             "The BSDF-only ray and path state must carry the same current medium."));
@@ -417,18 +422,39 @@ trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& 
         if (zero_spectrum(beta)) {
             return finish(BsdfOnlyPathTermination::zero_throughput, ScatteringLobe::none);
         }
+        if (roulette_policy.is_enabled() && depth >= roulette_policy.first_eligible_depth()) {
+            const auto roulette = evaluate_russian_roulette(
+                beta, eta_scale, depth, sample_stream.sample_1d(dimensions->russian_roulette),
+                roulette_policy);
+            if (!roulette.has_value()) {
+                return std::unexpected(roulette.error());
+            }
+            switch (roulette->outcome) {
+            case RussianRouletteOutcome::survived:
+                beta = roulette->throughput;
+                break;
+            case RussianRouletteOutcome::terminated:
+                beta = roulette->throughput;
+                return finish(BsdfOnlyPathTermination::russian_roulette, ScatteringLobe::none);
+            case RussianRouletteOutcome::not_evaluated:
+                return std::unexpected(
+                    path_loop_error("An eligible Russian roulette decision was not evaluated."));
+            default:
+                return std::unexpected(
+                    path_loop_error("Russian roulette returned an unsupported outcome."));
+            }
+        }
     }
 }
 
 } // namespace
 
-core::Result<BsdfOnlyPathResult>
-trace_bsdf_only(const Ray& initial_ray, const PathState& initial_state,
-                const SampleStream& sample_stream,
-                const std::span<const BsdfOnlyTriangleSurface> surfaces,
-                const BsdfOnlyEnvironment& environment, const PathDepthLimits& depth_limits) {
+core::Result<BsdfOnlyPathResult> trace_bsdf_only(
+    const Ray& initial_ray, const PathState& initial_state, const SampleStream& sample_stream,
+    const std::span<const BsdfOnlyTriangleSurface> surfaces, const BsdfOnlyEnvironment& environment,
+    const PathDepthLimits& depth_limits, const RussianRoulettePolicy& roulette_policy) {
     return trace_bsdf_only_impl(initial_ray, initial_state, sample_stream, surfaces, environment,
-                                depth_limits);
+                                depth_limits, roulette_policy);
 }
 
 core::Result<ReferenceBsdfOnlyPathResult>
@@ -436,9 +462,10 @@ trace_bsdf_only(const ReferenceRay& initial_ray, const ReferencePathState& initi
                 const ReferenceSampleStream& sample_stream,
                 const std::span<const ReferenceBsdfOnlyTriangleSurface> surfaces,
                 const ReferenceBsdfOnlyEnvironment& environment,
-                const PathDepthLimits& depth_limits) {
+                const PathDepthLimits& depth_limits,
+                const ReferenceRussianRoulettePolicy& roulette_policy) {
     return trace_bsdf_only_impl(initial_ray, initial_state, sample_stream, surfaces, environment,
-                                depth_limits);
+                                depth_limits, roulette_policy);
 }
 
 } // namespace blackframe::renderer

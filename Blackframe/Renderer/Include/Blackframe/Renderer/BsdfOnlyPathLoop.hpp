@@ -5,6 +5,7 @@
 #include <Blackframe/Renderer/LambertianReflection.hpp>
 #include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
+#include <Blackframe/Renderer/RussianRoulette.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
 #include <Blackframe/Renderer/Triangle.hpp>
 #include <cstdint>
@@ -85,6 +86,7 @@ enum class BsdfOnlyPathTermination : std::uint8_t {
     depth_limit,
     outside_bsdf_support,
     zero_throughput,
+    russian_roulette,
 };
 
 template <SpectrumScalar Scalar> struct BsdfOnlyPathResultT final {
@@ -99,23 +101,24 @@ using ReferenceBsdfOnlyPathResult = BsdfOnlyPathResultT<ReferenceScalar>;
 
 // Traces Lambertian continuation rays through a linearly searched triangle span. Emission is
 // accumulated at every hit and the required constant environment is accumulated on a miss. There
-// is intentionally no next-event estimation, light sampling, MIS, Russian roulette, or fallback
-// backend. Its only scattering event is explicitly diffuse reflection. Surface emission remains
-// visible when the diffuse limit is reached. Category counters are bound to PathState, so resumed
-// paths cannot be reclassified. Secondary rays use [0, +infinity] while preserving time, mask, and
-// medium.
-[[nodiscard]] core::Result<BsdfOnlyPathResult>
-trace_bsdf_only(const Ray& initial_ray, const PathState& initial_state,
-                const SampleStream& sample_stream,
-                std::span<const BsdfOnlyTriangleSurface> surfaces,
-                const BsdfOnlyEnvironment& environment, const PathDepthLimits& depth_limits);
+// is intentionally no next-event estimation, light sampling, MIS, or fallback backend. Its only
+// scattering event is explicitly diffuse reflection. Surface emission remains visible when the
+// diffuse limit is reached. Category counters are bound to PathState, so resumed paths cannot be
+// reclassified. Russian roulette is explicitly enabled or disabled and uses the reserved
+// per-bounce dimension after an accepted continuation. Secondary rays use [0, +infinity] while
+// preserving time, mask, and medium.
+[[nodiscard]] core::Result<BsdfOnlyPathResult> trace_bsdf_only(
+    const Ray& initial_ray, const PathState& initial_state, const SampleStream& sample_stream,
+    std::span<const BsdfOnlyTriangleSurface> surfaces, const BsdfOnlyEnvironment& environment,
+    const PathDepthLimits& depth_limits, const RussianRoulettePolicy& roulette_policy);
 
 [[nodiscard]] core::Result<ReferenceBsdfOnlyPathResult>
 trace_bsdf_only(const ReferenceRay& initial_ray, const ReferencePathState& initial_state,
                 const ReferenceSampleStream& sample_stream,
                 std::span<const ReferenceBsdfOnlyTriangleSurface> surfaces,
                 const ReferenceBsdfOnlyEnvironment& environment,
-                const PathDepthLimits& depth_limits);
+                const PathDepthLimits& depth_limits,
+                const ReferenceRussianRoulettePolicy& roulette_policy);
 
 static_assert(sizeof(BsdfOnlyPathTermination) == sizeof(std::uint8_t));
 static_assert(std::is_standard_layout_v<BsdfOnlyTriangleSurface>);

@@ -186,9 +186,9 @@ estimate_cornell(const std::vector<SurfaceFor<Scalar>>& surfaces,
             if (!state.has_value()) {
                 return std::unexpected(state.error());
             }
-            const auto traced =
-                trace_bsdf_only(*ray, *state, stream, std::span<const SurfaceFor<Scalar>>{surfaces},
-                                environment, PathDepthLimits{.diffuse = 3});
+            const auto traced = trace_bsdf_only(
+                *ray, *state, stream, std::span<const SurfaceFor<Scalar>>{surfaces}, environment,
+                PathDepthLimits{.diffuse = 3}, RussianRoulettePolicyT<Scalar>::disabled());
             if (!traced.has_value()) {
                 return std::unexpected(traced.error());
             }
@@ -378,6 +378,86 @@ TEST(BsdfOnlyCornellConvergenceTest, ConvergesAcrossSeedsWithoutNee) {
         transport_estimates[index] = *estimate;
     }
     EXPECT_LT(relative_rmse(to_reference(mean_estimates(transport_estimates)), reference), 0.15);
+}
+
+template <SpectrumScalar Scalar> void expect_russian_roulette_preserves_the_seed_mean() {
+    constexpr auto sample_count = std::uint64_t{16'384};
+    const auto wavelengths = fixed_wavelengths<Scalar>();
+    const auto reflectance = constant_spectrum(Scalar{0.25});
+    const auto black = SpectrumFor<Scalar>{};
+    const auto white = constant_spectrum(Scalar{1});
+    const auto surface =
+        make_surface(Point3T<Scalar>{.x = Scalar{-10}, .y = Scalar{-10}},
+                     Point3T<Scalar>{.x = Scalar{10}, .y = Scalar{-10}},
+                     Point3T<Scalar>{.y = Scalar{10}}, reflectance, black, wavelengths);
+    const auto constant_environment = ConstantEnvironmentT<Scalar>::create(white);
+    const auto ray = make_probe_ray(Vector3T<Scalar>{.z = Scalar{-1}});
+    const auto state = PathStateT<Scalar>::create_initial(wavelengths, VacuumMedium);
+    const auto policy =
+        RussianRoulettePolicyT<Scalar>::create_enabled(1, Scalar{0.125}, Scalar{0.75});
+    ASSERT_TRUE(surface.has_value());
+    ASSERT_TRUE(constant_environment.has_value());
+    ASSERT_TRUE(ray.has_value());
+    ASSERT_TRUE(state.has_value());
+    ASSERT_TRUE(policy.has_value());
+    const auto environment = BsdfOnlyEnvironmentT<Scalar>{*constant_environment, wavelengths};
+
+    auto disabled_sum = std::array<ReferenceScalar, TransportSpectrumSampleCount>{};
+    auto roulette_sum = std::array<ReferenceScalar, TransportSpectrumSampleCount>{};
+    auto survived = std::uint64_t{0};
+    auto terminated = std::uint64_t{0};
+    for (auto seed_index = std::uint64_t{0}; seed_index < sample_count; ++seed_index) {
+        const auto seed = 0x9E3779B97F4A7C15ULL + seed_index * 0xD1B54A32D192ED03ULL;
+        const auto stream = IndependentSamplerT<Scalar>{seed}.make_stream(0, 0, 0);
+        const auto without_roulette = trace_bsdf_only(
+            *ray, *state, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1}, environment,
+            PathDepthLimits{.diffuse = 1}, RussianRoulettePolicyT<Scalar>::disabled());
+        const auto with_roulette =
+            trace_bsdf_only(*ray, *state, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+                            environment, PathDepthLimits{.diffuse = 1}, *policy);
+        ASSERT_TRUE(without_roulette.has_value());
+        ASSERT_TRUE(with_roulette.has_value());
+        ASSERT_EQ(without_roulette->termination, BsdfOnlyPathTermination::escaped_environment);
+        ASSERT_EQ(without_roulette->state.depth_counters(), (PathDepthCounters{.diffuse = 1}));
+        ASSERT_EQ(with_roulette->state.depth_counters(), (PathDepthCounters{.diffuse = 1}));
+
+        if (with_roulette->termination == BsdfOnlyPathTermination::russian_roulette) {
+            ++terminated;
+            EXPECT_EQ(with_roulette->state.beta(), reflectance);
+        } else {
+            ASSERT_EQ(with_roulette->termination, BsdfOnlyPathTermination::escaped_environment);
+            ++survived;
+            EXPECT_EQ(with_roulette->state.beta(), white);
+        }
+        for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
+            disabled_sum[lane] +=
+                static_cast<ReferenceScalar>(without_roulette->state.accumulated_radiance()[lane]);
+            roulette_sum[lane] +=
+                static_cast<ReferenceScalar>(with_roulette->state.accumulated_radiance()[lane]);
+        }
+    }
+
+    EXPECT_GT(survived, 0U);
+    EXPECT_GT(terminated, 0U);
+    EXPECT_EQ(survived + terminated, sample_count);
+    constexpr auto expected_survival_probability = ReferenceScalar{0.25};
+    const auto standard_error = std::sqrt(expected_survival_probability *
+                                          (ReferenceScalar{1} - expected_survival_probability) /
+                                          static_cast<ReferenceScalar>(sample_count));
+    const auto tolerance =
+        ReferenceScalar{6} * standard_error +
+        ReferenceScalar{64} * static_cast<ReferenceScalar>(std::numeric_limits<Scalar>::epsilon());
+    for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
+        const auto disabled_mean = disabled_sum[lane] / static_cast<ReferenceScalar>(sample_count);
+        const auto roulette_mean = roulette_sum[lane] / static_cast<ReferenceScalar>(sample_count);
+        EXPECT_EQ(disabled_mean, expected_survival_probability);
+        EXPECT_NEAR(roulette_mean, disabled_mean, tolerance);
+    }
+}
+
+TEST(BsdfOnlyCornellConvergenceTest, RussianRoulettePreservesTheMeanAcrossSeeds) {
+    expect_russian_roulette_preserves_the_seed_mean<TransportScalar>();
+    expect_russian_roulette_preserves_the_seed_mean<ReferenceScalar>();
 }
 
 } // namespace

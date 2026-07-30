@@ -42,6 +42,11 @@ template <SpectrumScalar Scalar>
 }
 
 template <SpectrumScalar Scalar>
+[[nodiscard]] constexpr RussianRoulettePolicyT<Scalar> disabled_roulette() noexcept {
+    return RussianRoulettePolicyT<Scalar>::disabled();
+}
+
+template <SpectrumScalar Scalar>
 [[nodiscard]] bool is_zero_spectrum(const SpectrumFor<Scalar>& value) {
     return std::ranges::all_of(value.values, [](const Scalar lane) { return lane == Scalar{0}; });
 }
@@ -117,10 +122,10 @@ template <SpectrumScalar Scalar> void expect_lambertian_environment_estimator_is
 
     const auto first =
         trace_bsdf_only(*ray, *initial, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                        *environment, diffuse_limits(1));
+                        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     const auto replay =
         trace_bsdf_only(*ray, *initial, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                        *environment, diffuse_limits(1));
+                        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_TRUE(first.has_value()) << (first.has_value() ? "" : first.error().message);
     ASSERT_TRUE(replay.has_value());
 
@@ -164,15 +169,18 @@ template <SpectrumScalar Scalar> void expect_explicit_termination_semantics() {
     const auto wavelengths = sample_visible_wavelengths(stream);
     const auto environment = make_environment(environment_radiance, wavelengths);
     const auto state = PathStateT<Scalar>::create_initial(wavelengths, VacuumMedium);
+    const auto roulette =
+        RussianRoulettePolicyT<Scalar>::create_enabled(1, Scalar{0.5}, Scalar{0.5});
     ASSERT_TRUE(environment.has_value());
     ASSERT_TRUE(state.has_value());
+    ASSERT_TRUE(roulette.has_value());
 
     const auto miss_ray =
         make_ray(Point3T<Scalar>{.z = Scalar{1}}, Vector3T<Scalar>{.z = Scalar{1}});
     ASSERT_TRUE(miss_ray.has_value());
     const auto miss =
         trace_bsdf_only(*miss_ray, *state, stream, std::span<const SurfaceFor<Scalar>>{},
-                        *environment, diffuse_limits(0));
+                        *environment, diffuse_limits(0), disabled_roulette<Scalar>());
     ASSERT_TRUE(miss.has_value());
     EXPECT_EQ(miss->state.accumulated_radiance(), environment_radiance);
     EXPECT_EQ(miss->state.depth(), 0U);
@@ -189,7 +197,7 @@ template <SpectrumScalar Scalar> void expect_explicit_termination_semantics() {
     ASSERT_TRUE(front_ray.has_value());
     const auto cutoff =
         trace_bsdf_only(*front_ray, *state, stream, std::span<const SurfaceFor<Scalar>>{&*front, 1},
-                        *environment, diffuse_limits(0));
+                        *environment, diffuse_limits(0), disabled_roulette<Scalar>());
     ASSERT_TRUE(cutoff.has_value());
     EXPECT_EQ(cutoff->state.accumulated_radiance(), white);
     EXPECT_EQ(cutoff->state.depth(), 0U);
@@ -203,7 +211,7 @@ template <SpectrumScalar Scalar> void expect_explicit_termination_semantics() {
     ASSERT_TRUE(absorber.has_value());
     const auto absorbed = trace_bsdf_only(*front_ray, *state, stream,
                                           std::span<const SurfaceFor<Scalar>>{&*absorber, 1},
-                                          *environment, diffuse_limits(2));
+                                          *environment, diffuse_limits(2), *roulette);
     ASSERT_TRUE(absorbed.has_value());
     EXPECT_EQ(absorbed->state.beta(), black);
     EXPECT_EQ(absorbed->state.accumulated_radiance(), black);
@@ -223,7 +231,7 @@ template <SpectrumScalar Scalar> void expect_explicit_termination_semantics() {
     ASSERT_TRUE(back.has_value());
     const auto occluded =
         trace_bsdf_only(*front_ray, *state, stream, std::span<const SurfaceFor<Scalar>>{&*back, 1},
-                        *environment, diffuse_limits(1));
+                        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_TRUE(occluded.has_value());
     EXPECT_EQ(occluded->state.accumulated_radiance(), black);
     EXPECT_EQ(occluded->state.depth(), 0U);
@@ -263,25 +271,25 @@ template <SpectrumScalar Scalar> void expect_exact_diffuse_budget_resume() {
 
     const auto first =
         trace_bsdf_only(*ray, *initial, stream, std::span<const SurfaceFor<Scalar>>{&*diffuse, 1},
-                        *environment, limits);
+                        *environment, limits, disabled_roulette<Scalar>());
     ASSERT_TRUE(first.has_value()) << (first.has_value() ? "" : first.error().message);
     EXPECT_EQ(first->state.depth(), 1U);
     EXPECT_EQ(first->state.depth_counters(), (PathDepthCounters{.diffuse = 1}));
     EXPECT_EQ(first->state.beta(), reflectance);
     EXPECT_EQ(first->termination, BsdfOnlyPathTermination::escaped_environment);
 
-    const auto second =
-        trace_bsdf_only(*ray, first->state, stream,
-                        std::span<const SurfaceFor<Scalar>>{&*diffuse, 1}, *environment, limits);
+    const auto second = trace_bsdf_only(*ray, first->state, stream,
+                                        std::span<const SurfaceFor<Scalar>>{&*diffuse, 1},
+                                        *environment, limits, disabled_roulette<Scalar>());
     ASSERT_TRUE(second.has_value()) << (second.has_value() ? "" : second.error().message);
     EXPECT_EQ(second->state.depth(), 2U);
     EXPECT_EQ(second->state.depth_counters(), (PathDepthCounters{.diffuse = 2}));
     EXPECT_EQ(second->state.beta(), constant_spectrum(Scalar{0.25}));
     EXPECT_EQ(second->termination, BsdfOnlyPathTermination::escaped_environment);
 
-    const auto cutoff =
-        trace_bsdf_only(*ray, second->state, stream,
-                        std::span<const SurfaceFor<Scalar>>{&*emitter, 1}, *environment, limits);
+    const auto cutoff = trace_bsdf_only(*ray, second->state, stream,
+                                        std::span<const SurfaceFor<Scalar>>{&*emitter, 1},
+                                        *environment, limits, disabled_roulette<Scalar>());
     ASSERT_TRUE(cutoff.has_value()) << (cutoff.has_value() ? "" : cutoff.error().message);
     EXPECT_EQ(cutoff->state.depth(), 2U);
     EXPECT_EQ(cutoff->state.depth_counters(), second->state.depth_counters());
@@ -292,9 +300,9 @@ template <SpectrumScalar Scalar> void expect_exact_diffuse_budget_resume() {
     EXPECT_EQ(cutoff->termination, BsdfOnlyPathTermination::depth_limit);
     EXPECT_EQ(cutoff->blocked_depth_limits, ScatteringLobe::diffuse);
 
-    const auto lowered = trace_bsdf_only(*ray, first->state, stream,
-                                         std::span<const SurfaceFor<Scalar>>{&*emitter, 1},
-                                         *environment, diffuse_limits(0));
+    const auto lowered = trace_bsdf_only(
+        *ray, first->state, stream, std::span<const SurfaceFor<Scalar>>{&*emitter, 1}, *environment,
+        diffuse_limits(0), disabled_roulette<Scalar>());
     ASSERT_FALSE(lowered.has_value());
     EXPECT_EQ(lowered.error().code, core::StatusCode::invalid_argument);
 
@@ -309,7 +317,7 @@ template <SpectrumScalar Scalar> void expect_exact_diffuse_budget_resume() {
     };
     const auto mixed = trace_bsdf_only(*ray, *mixed_state, stream,
                                        std::span<const SurfaceFor<Scalar>>{&*diffuse, 1},
-                                       *environment, mixed_limits);
+                                       *environment, mixed_limits, disabled_roulette<Scalar>());
     ASSERT_TRUE(mixed.has_value()) << (mixed.has_value() ? "" : mixed.error().message);
     EXPECT_EQ(mixed->state.depth(), 2U);
     EXPECT_EQ(mixed->state.depth_counters(), (PathDepthCounters{.diffuse = 1, .glossy = 1}));
@@ -318,6 +326,87 @@ template <SpectrumScalar Scalar> void expect_exact_diffuse_budget_resume() {
 TEST(BsdfOnlyPathLoopTest, ContinuesExactBoundDepthCountersWithoutReclassification) {
     expect_exact_diffuse_budget_resume<TransportScalar>();
     expect_exact_diffuse_budget_resume<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_russian_roulette_uses_its_reserved_dimension() {
+    constexpr auto seed = std::uint64_t{0xA4093822299F31D0ULL};
+    const auto sampler = IndependentSamplerT<Scalar>{seed};
+    const auto wavelength_stream = sampler.make_stream(3, 5, 0);
+    const auto surviving_stream = sampler.make_stream(3, 5, 10);
+    const auto terminating_stream = sampler.make_stream(3, 5, 45);
+    const auto dimensions = sample_dimensions_for_bounce(0);
+    ASSERT_TRUE(dimensions.has_value());
+    EXPECT_LT(surviving_stream.sample_1d(dimensions->russian_roulette), Scalar{0.5});
+    EXPECT_GT(surviving_stream.sample_1d(dimensions->bsdf_u), Scalar{0.5});
+    EXPECT_GE(terminating_stream.sample_1d(dimensions->russian_roulette), Scalar{0.5});
+    EXPECT_LT(terminating_stream.sample_1d(dimensions->bsdf_u), Scalar{0.5});
+
+    const auto wavelengths = sample_visible_wavelengths(wavelength_stream);
+    const auto reflectance = constant_spectrum(Scalar{0.5});
+    const auto surface_radiance = constant_spectrum(Scalar{0.25});
+    const auto environment_radiance = constant_spectrum(Scalar{1});
+    const auto surface =
+        make_surface(Point3T<Scalar>{.x = Scalar{-2}, .y = Scalar{-2}},
+                     Point3T<Scalar>{.x = Scalar{2}, .y = Scalar{-2}},
+                     Point3T<Scalar>{.y = Scalar{2}}, reflectance, surface_radiance, wavelengths);
+    const auto environment = make_environment(environment_radiance, wavelengths);
+    const auto state = PathStateT<Scalar>::create_initial(wavelengths, VacuumMedium);
+    const auto ray = make_ray(Point3T<Scalar>{.z = Scalar{1}}, Vector3T<Scalar>{.z = Scalar{-1}});
+    const auto policy = RussianRoulettePolicyT<Scalar>::create_enabled(1, Scalar{0.5}, Scalar{0.5});
+    ASSERT_TRUE(surface.has_value());
+    ASSERT_TRUE(environment.has_value());
+    ASSERT_TRUE(state.has_value());
+    ASSERT_TRUE(ray.has_value());
+    ASSERT_TRUE(policy.has_value());
+
+    const auto survived = trace_bsdf_only(*ray, *state, surviving_stream,
+                                          std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+                                          *environment, diffuse_limits(1), *policy);
+    ASSERT_TRUE(survived.has_value()) << (survived.has_value() ? "" : survived.error().message);
+    EXPECT_EQ(survived->termination, BsdfOnlyPathTermination::escaped_environment);
+    EXPECT_EQ(survived->state.depth(), 1U);
+    EXPECT_EQ(survived->state.depth_counters(), (PathDepthCounters{.diffuse = 1}));
+    EXPECT_EQ(survived->state.beta(), constant_spectrum(Scalar{1}));
+    EXPECT_EQ(survived->state.accumulated_radiance(), constant_spectrum(Scalar{1.25}));
+    EXPECT_EQ(survived->blocked_depth_limits, ScatteringLobe::none);
+
+    const auto terminated = trace_bsdf_only(*ray, *state, terminating_stream,
+                                            std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+                                            *environment, diffuse_limits(1), *policy);
+    ASSERT_TRUE(terminated.has_value())
+        << (terminated.has_value() ? "" : terminated.error().message);
+    EXPECT_EQ(terminated->termination, BsdfOnlyPathTermination::russian_roulette);
+    EXPECT_EQ(terminated->state.depth(), 1U);
+    EXPECT_EQ(terminated->state.depth_counters(), (PathDepthCounters{.diffuse = 1}));
+    EXPECT_EQ(terminated->state.beta(), reflectance);
+    EXPECT_EQ(terminated->state.accumulated_radiance(), surface_radiance);
+    EXPECT_EQ(terminated->blocked_depth_limits, ScatteringLobe::none);
+
+    const auto delayed_policy =
+        RussianRoulettePolicyT<Scalar>::create_enabled(2, Scalar{0.5}, Scalar{0.5});
+    ASSERT_TRUE(delayed_policy.has_value());
+    const auto delayed = trace_bsdf_only(*ray, *state, terminating_stream,
+                                         std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+                                         *environment, diffuse_limits(1), *delayed_policy);
+    ASSERT_TRUE(delayed.has_value());
+    EXPECT_EQ(delayed->termination, BsdfOnlyPathTermination::escaped_environment);
+    EXPECT_EQ(delayed->state.beta(), reflectance);
+    EXPECT_EQ(delayed->state.accumulated_radiance(), constant_spectrum(Scalar{0.75}));
+
+    const auto limited = trace_bsdf_only(*ray, *state, terminating_stream,
+                                         std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+                                         *environment, diffuse_limits(0), *policy);
+    ASSERT_TRUE(limited.has_value());
+    EXPECT_EQ(limited->termination, BsdfOnlyPathTermination::depth_limit);
+    EXPECT_EQ(limited->state.depth(), 0U);
+    EXPECT_EQ(limited->state.depth_counters(), PathDepthCounters{});
+    EXPECT_EQ(limited->state.accumulated_radiance(), surface_radiance);
+    EXPECT_EQ(limited->blocked_depth_limits, ScatteringLobe::diffuse);
+}
+
+TEST(BsdfOnlyPathLoopTest, RussianRouletteUsesReservedDimensionAfterAcceptedBounce) {
+    expect_russian_roulette_uses_its_reserved_dimension<TransportScalar>();
+    expect_russian_roulette_uses_its_reserved_dimension<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_invalid_paths_fail_explicitly() {
@@ -338,18 +427,18 @@ template <SpectrumScalar Scalar> void expect_invalid_paths_fail_explicitly() {
     ASSERT_TRUE(state.has_value());
     ASSERT_TRUE(wrong_medium_ray.has_value());
 
-    const auto wrong_medium = trace_bsdf_only(*wrong_medium_ray, *state, stream,
-                                              std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                                              *environment, diffuse_limits(1));
+    const auto wrong_medium = trace_bsdf_only(
+        *wrong_medium_ray, *state, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_FALSE(wrong_medium.has_value());
     EXPECT_EQ(wrong_medium.error().code, core::StatusCode::invalid_argument);
 
     const auto coplanar_ray = make_ray(Point3T<Scalar>{}, Vector3T<Scalar>{.x = Scalar{1}},
                                        Scalar{0}, AllRayVisibility, MediumId{.value = 1});
     ASSERT_TRUE(coplanar_ray.has_value());
-    const auto coplanar = trace_bsdf_only(*coplanar_ray, *state, stream,
-                                          std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                                          *environment, diffuse_limits(1));
+    const auto coplanar = trace_bsdf_only(
+        *coplanar_ray, *state, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_FALSE(coplanar.has_value());
     EXPECT_EQ(coplanar.error().code, core::StatusCode::invalid_argument);
 
@@ -363,9 +452,9 @@ template <SpectrumScalar Scalar> void expect_invalid_paths_fail_explicitly() {
                  AllRayVisibility, MediumId{.value = 1});
     ASSERT_TRUE(negative_state.has_value());
     ASSERT_TRUE(valid_ray.has_value());
-    const auto negative = trace_bsdf_only(*valid_ray, *negative_state, stream,
-                                          std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                                          *environment, diffuse_limits(1));
+    const auto negative = trace_bsdf_only(
+        *valid_ray, *negative_state, stream, std::span<const SurfaceFor<Scalar>>{&*surface, 1},
+        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_FALSE(negative.has_value());
     EXPECT_EQ(negative.error().code, core::StatusCode::invalid_argument);
 
@@ -375,17 +464,19 @@ template <SpectrumScalar Scalar> void expect_invalid_paths_fail_explicitly() {
         PathStateT<Scalar>::create_initial(mismatched_wavelengths, MediumId{.value = 1});
     ASSERT_TRUE(mismatched_state.has_value());
     ASSERT_NE(mismatched_wavelengths, wavelengths);
-    const auto mismatch = trace_bsdf_only(*valid_ray, *mismatched_state, mismatched_stream,
-                                          std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                                          *environment, diffuse_limits(1));
+    const auto mismatch =
+        trace_bsdf_only(*valid_ray, *mismatched_state, mismatched_stream,
+                        std::span<const SurfaceFor<Scalar>>{&*surface, 1}, *environment,
+                        diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_FALSE(mismatch.has_value());
     EXPECT_EQ(mismatch.error().code, core::StatusCode::invalid_argument);
 
     const auto mismatched_environment = make_environment(black, mismatched_wavelengths);
     ASSERT_TRUE(mismatched_environment.has_value());
-    const auto surface_mismatch = trace_bsdf_only(*valid_ray, *mismatched_state, mismatched_stream,
-                                                  std::span<const SurfaceFor<Scalar>>{&*surface, 1},
-                                                  *mismatched_environment, diffuse_limits(1));
+    const auto surface_mismatch =
+        trace_bsdf_only(*valid_ray, *mismatched_state, mismatched_stream,
+                        std::span<const SurfaceFor<Scalar>>{&*surface, 1}, *mismatched_environment,
+                        diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_FALSE(surface_mismatch.has_value());
     EXPECT_EQ(surface_mismatch.error().code, core::StatusCode::invalid_argument);
 
@@ -399,9 +490,9 @@ template <SpectrumScalar Scalar> void expect_invalid_paths_fail_explicitly() {
                                                        PathDeltaFlags::none, MediumId{.value = 1});
     ASSERT_TRUE(half_surface.has_value());
     ASSERT_TRUE(tiny_state.has_value());
-    const auto underflow = trace_bsdf_only(*valid_ray, *tiny_state, stream,
-                                           std::span<const SurfaceFor<Scalar>>{&*half_surface, 1},
-                                           *environment, diffuse_limits(1));
+    const auto underflow = trace_bsdf_only(
+        *valid_ray, *tiny_state, stream, std::span<const SurfaceFor<Scalar>>{&*half_surface, 1},
+        *environment, diffuse_limits(1), disabled_roulette<Scalar>());
     ASSERT_FALSE(underflow.has_value());
     EXPECT_EQ(underflow.error().code, core::StatusCode::invalid_argument);
 }
@@ -480,8 +571,8 @@ TEST(BsdfOnlyPathLoopTest, DerivedHitErrorDoesNotSkipNearbyGeometry) {
     ASSERT_TRUE(ray.has_value());
     const auto surfaces = std::array{*base, *nearby_first, *nearby_second};
 
-    const auto traced =
-        trace_bsdf_only(*ray, *state, stream, surfaces, *environment, diffuse_limits(1));
+    const auto traced = trace_bsdf_only(*ray, *state, stream, surfaces, *environment,
+                                        diffuse_limits(1), RussianRoulettePolicy::disabled());
     ASSERT_TRUE(traced.has_value());
     EXPECT_EQ(traced->state.accumulated_radiance(), white);
     EXPECT_EQ(traced->state.depth(), 1U);
@@ -585,7 +676,8 @@ estimate_cornell(const std::span<const ReferenceBsdfOnlyTriangleSurface> surface
                 return std::unexpected(state.error());
             }
             const auto traced =
-                trace_bsdf_only(*ray, *state, stream, surfaces, *environment, diffuse_limits(3));
+                trace_bsdf_only(*ray, *state, stream, surfaces, *environment, diffuse_limits(3),
+                                disabled_roulette<ReferenceScalar>());
             if (!traced.has_value()) {
                 return std::unexpected(traced.error());
             }

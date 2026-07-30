@@ -40,6 +40,7 @@ add_library(
         Include/Blackframe/Renderer/RayOriginOffset.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
+        Include/Blackframe/Renderer/RussianRoulette.hpp
         Include/Blackframe/Renderer/SampleDimensionMap.hpp
         Include/Blackframe/Renderer/SampleStream.hpp
         Include/Blackframe/Renderer/SamplingMappings.hpp
@@ -66,6 +67,7 @@ add_library(
         Source/RenderConfigurationLimits.hpp
         Source/RenderConfigurationSchema.cpp
         Source/RenderSessionState.cpp
+        Source/RussianRoulette.cpp
         Source/SampleDimensionMap.cpp
         Source/SobolDirectionNumbers.inc
         Source/SobolSampling.cpp

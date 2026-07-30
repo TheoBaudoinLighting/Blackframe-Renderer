@@ -31,6 +31,7 @@ add_executable(
     RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
+    RussianRouletteTest.cpp
     SampleDimensionMapTest.cpp
     SampleStreamTest.cpp
     SamplingMappingsTest.cpp
