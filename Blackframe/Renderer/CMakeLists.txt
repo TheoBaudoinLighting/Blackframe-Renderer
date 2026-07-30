@@ -3,6 +3,7 @@ add_library(
     STATIC
         Include/Blackframe/Renderer/BasicSpectra.hpp
         Include/Blackframe/Renderer/Bounds.hpp
+        Include/Blackframe/Renderer/BsdfOnlyPathLoop.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/Cie1931Sensor.hpp
         Include/Blackframe/Renderer/Color.hpp
@@ -51,6 +52,7 @@ add_library(
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Include/Blackframe/Renderer/Triangle.hpp
         Include/Blackframe/Renderer/WavelengthSampling.hpp
+        Source/BsdfOnlyPathLoop.cpp
         Source/CapabilityRegistry.cpp
         Source/Cie1931ColorMatchingFunctions.inc
         Source/Cie1931Sensor.cpp

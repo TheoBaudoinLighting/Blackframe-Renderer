@@ -21,7 +21,10 @@ silently selecting another path.
   and shading normals, UVs, derivatives, identifiers, and time.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, depth, refraction scaling, wavelengths, delta history, and medium identity,
-  with a versioned bit-exact diagnostic dump.
+  with a versioned bit-exact diagnostic dump. A bounded scalar BSDF-only loop linearly traces
+  explicit wavelength-resolved diffuse triangle surfaces, accumulates every encountered emitter or
+  environment, and spawns continuation rays from derived position-error bounds without NEE, MIS, or
+  a hidden backend.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, and common disk/sphere/hemisphere mappings. No global mutable RNG is used.
@@ -42,11 +45,12 @@ silently selecting another path.
 
 ## Current boundary
 
-Blackframe does not yet provide a production path-tracing integrator, a scene loader, a material or
-lighting system, a production acceleration pipeline, or a CUDA wavefront renderer. The headless
-executable currently supports local engine control and device discovery; it does not yet accept a
-scene and render an image from the command line. A consumable CMake install/export package is also
-not available yet.
+Blackframe does not yet provide a production path-tracing integrator, a scene loader, a general
+material or lighting system, a production acceleration pipeline, or a CUDA wavefront renderer. The
+current BSDF-only loop is a narrow deterministic scalar oracle over resolved Lambertian triangles,
+not a production backend. The headless executable currently supports local engine control and
+device discovery; it does not yet accept a scene and render an image from the command line. A
+consumable CMake install/export package is also not available yet.
 
 ## Building
 

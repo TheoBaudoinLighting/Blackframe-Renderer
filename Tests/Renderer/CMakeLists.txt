@@ -2,6 +2,7 @@ add_executable(
     BlackframeRendererTests
     BasicSpectraTest.cpp
     BoundsTest.cpp
+    BsdfOnlyPathLoopTest.cpp
     CapabilityRegistryTest.cpp
     Cie1931SensorTest.cpp
     DebugIntegratorGoldenTest.cpp
@@ -78,6 +79,28 @@ gtest_discover_tests(
     DISCOVERY_TIMEOUT 30
     PROPERTIES
         LABELS "unit;cpu"
+)
+
+add_executable(
+    BlackframeRendererRegressionTests
+    BsdfOnlyCornellConvergenceTest.cpp
+)
+blackframe_set_target_role(BlackframeRendererRegressionTests test)
+
+target_link_libraries(
+    BlackframeRendererRegressionTests
+    PRIVATE
+        Blackframe::Renderer
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeRendererRegressionTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "regression;cpu"
 )
 
 function(blackframe_add_png_checksum_test test_name gtest_filter output_filename expected_sha256)
