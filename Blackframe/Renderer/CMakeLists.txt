@@ -35,6 +35,7 @@ add_library(
         Include/Blackframe/Renderer/SampleStream.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Sphere.hpp
+        Include/Blackframe/Renderer/StratifiedSampling.hpp
         Include/Blackframe/Renderer/SurfaceInteraction.hpp
         Include/Blackframe/Renderer/Transforms.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp

@@ -27,6 +27,7 @@ add_executable(
     SampleStreamTest.cpp
     SphereTest.cpp
     SpectrumTest.cpp
+    StratifiedSamplingTest.cpp
     SurfaceInteractionTest.cpp
     TransformsTest.cpp
     TriangleTest.cpp
