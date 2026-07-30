@@ -1,0 +1,21 @@
+# Blackframe indexed transport-mesh fixture.
+o reference-mesh
+s off
+v -1 -1 -2
+v 1 -1 -2
+v 1 1 -2
+v -1 1 -2
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 0
+vt 0 1
+vt 1 1
+vn 0 0 1
+vn 0.6 0 0.8
+vn 0 0.6 0.8
+vn 0 0 1
+vn -0.6 0 0.8
+vn 0 -0.6 0.8
+f 1/1/1 2/2/2 3/3/3
+f -4/-3/-3 -2/-2/-2 -1/-1/-1

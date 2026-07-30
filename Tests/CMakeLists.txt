@@ -25,6 +25,7 @@ set(
     BlackframeExtensionTests
     BlackframeHostLanguageTests
     BlackframeIpcTests
+    BlackframeMeshImportTests
     BlackframeRenderTests
     BlackframeCornellReference64Tests
     BlackframeCornellReference256Tests

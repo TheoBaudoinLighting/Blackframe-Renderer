@@ -24,6 +24,10 @@ silently selecting another path.
   Instances carry validated local affine matrices and optional parents; world transforms are
   resolved deterministically when the snapshot closes. Duplicate IDs, dangling references, cycles,
   invalid compositions, and lookup failures are explicit errors.
+- **Triangle meshes:** the Engine imports strictly triangulated OBJ text and PLY ASCII 1.0 assets
+  from explicit absolute paths. Positions, unit normals, UVs, and 32-bit indices are validated;
+  independent OBJ index domains are canonicalized at seams. Missing attributes, polygons, invalid
+  indices, degenerate triangles, unsupported PLY encodings, and malformed records fail explicitly.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar

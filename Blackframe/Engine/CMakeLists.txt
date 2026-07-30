@@ -3,8 +3,12 @@ add_library(
     STATIC
         Include/Blackframe/Engine/Engine.hpp
         Include/Blackframe/Engine/FrameScene.hpp
+        Include/Blackframe/Engine/TriangleMesh.hpp
+        Include/Blackframe/Engine/TriangleMeshImport.hpp
         Source/Engine.cpp
         Source/FrameScene.cpp
+        Source/TriangleMesh.cpp
+        Source/TriangleMeshImport.cpp
 )
 add_library(Blackframe::Engine ALIAS BlackframeEngine)
 blackframe_set_target_role(BlackframeEngine core)
