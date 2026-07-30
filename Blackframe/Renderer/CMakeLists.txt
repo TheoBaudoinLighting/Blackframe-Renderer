@@ -34,6 +34,7 @@ add_library(
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/SampleDimensionMap.hpp
         Include/Blackframe/Renderer/SampleStream.hpp
+        Include/Blackframe/Renderer/SamplingMappings.hpp
         Include/Blackframe/Renderer/SobolSampling.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Sphere.hpp
