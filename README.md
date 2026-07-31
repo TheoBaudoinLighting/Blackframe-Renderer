@@ -73,6 +73,8 @@ silently selecting another path.
   Continuous and delta probabilities retain distinct solid-angle and discrete measures. Explicit
   area-to-solid-angle and solid-angle-to-area PDF conversions use the geometric-normal Jacobian and
   reject singular or unrepresentable configurations without clamping or measure substitution.
+  Packet-bound ideal point, directional, and spot lights provide strict inverse-square, cone
+  falloff, and scene-bounds power conventions.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
@@ -96,8 +98,8 @@ Blackframe does not yet provide a production path-tracing integrator, a scene lo
 material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
 renderer. The current BSDF-only transport remains a narrow deterministic Lambertian integrator,
 whether driven by its closed scalar fixture or by a frame scene and Embree; it is not a production
-wavefront backend. The light contract does not yet provide concrete direct-light models, light
-selection, NEE, or MIS. Acceleration updates currently cover explicit full rebuilds and
+wavefront backend. The punctual light models are not yet connected to scene light selection,
+visibility rays, NEE, or MIS. Acceleration updates currently cover explicit full rebuilds and
 frame-to-frame transform refits between immutable snapshots only. The headless executable currently
 supports local engine control and device discovery; it does not yet accept a scene and render an
 image from the command line. A consumable CMake install/export package is also not available yet.

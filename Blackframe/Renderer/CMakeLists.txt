@@ -36,6 +36,7 @@ add_library(
         Include/Blackframe/Renderer/PinholeCamera.hpp
         Include/Blackframe/Renderer/PixelJitter.hpp
         Include/Blackframe/Renderer/Plane.hpp
+        Include/Blackframe/Renderer/PunctualLights.hpp
         Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/Ray.hpp
         Include/Blackframe/Renderer/RayDiagnostics.hpp
