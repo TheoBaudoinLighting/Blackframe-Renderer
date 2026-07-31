@@ -46,6 +46,13 @@ static_assert(std::is_trivially_copyable_v<TriangleMeshMemoryReport>);
 // missing attributes or assuming that source index domains are identical.
 class TriangleMesh final {
   public:
+    // Closed frame scenes may share a mesh with its creator. Construction stays
+    // available for value returns, but assignment cannot replace shared buffers.
+    TriangleMesh(const TriangleMesh&) = default;
+    TriangleMesh(TriangleMesh&&) noexcept = default;
+    TriangleMesh& operator=(const TriangleMesh&) = delete;
+    TriangleMesh& operator=(TriangleMesh&&) = delete;
+
     [[nodiscard]] static core::Result<TriangleMesh>
     create(std::vector<renderer::Point3> positions, std::vector<renderer::Normal3> normals,
            std::vector<renderer::Point2> texture_coordinates,

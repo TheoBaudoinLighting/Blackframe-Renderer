@@ -121,7 +121,7 @@ require_target_edge(BlackframeTests BlackframeSceneTests order)
 require_target_edge(BlackframeAccelBackendTests BlackframeSceneGeometry link)
 require_target_edge(BlackframeEngine BlackframeSceneGeometry link)
 require_target_edge(BlackframeSceneGeometry BlackframeRenderer link)
-require_target_edge(BlackframeSceneTests BlackframeEngine link)
+require_target_edge(BlackframeSceneTests BlackframeSceneGeometry link)
 require_target_role(BlackframeRenderTests test)
 require_target_edge(BlackframeTests BlackframeRenderTests order)
 

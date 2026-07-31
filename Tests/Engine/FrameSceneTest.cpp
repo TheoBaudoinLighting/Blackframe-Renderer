@@ -10,8 +10,10 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace blackframe::engine {
 namespace {
@@ -45,7 +47,28 @@ namespace {
     return matrix;
 }
 
+[[nodiscard]] std::shared_ptr<const TriangleMesh> make_scene_mesh() {
+    auto mesh = TriangleMesh::create(
+        std::vector{
+            renderer::Point3{},
+            renderer::Point3{.x = 1.0F},
+            renderer::Point3{.y = 1.0F},
+        },
+        std::vector(3, renderer::Normal3{.z = 1.0F}),
+        std::vector{
+            renderer::Point2{},
+            renderer::Point2{.x = 1.0F},
+            renderer::Point2{.y = 1.0F},
+        },
+        std::vector{TriangleVertexIndices{.vertices = {0U, 1U, 2U}}});
+    if (!mesh) {
+        throw std::runtime_error{mesh.error().message};
+    }
+    return std::make_shared<const TriangleMesh>(std::move(*mesh));
+}
+
 [[nodiscard]] FrameSceneDescription make_scene_description() {
+    const auto mesh = make_scene_mesh();
     return FrameSceneDescription{
         .objects =
             {
@@ -54,8 +77,8 @@ namespace {
             },
         .geometries =
             {
-                SceneGeometry{.id = {.value = 900}},
-                SceneGeometry{.id = {.value = 4}},
+                SceneGeometry{.id = {.value = 900}, .mesh = mesh},
+                SceneGeometry{.id = {.value = 4}, .mesh = mesh},
             },
         .materials =
             {
@@ -85,9 +108,10 @@ namespace {
 }
 
 [[nodiscard]] FrameSceneDescription make_three_level_scene_description() {
+    const auto mesh = make_scene_mesh();
     return FrameSceneDescription{
         .objects = {SceneObject{.id = {.value = 42}}},
-        .geometries = {SceneGeometry{.id = {.value = 84}}},
+        .geometries = {SceneGeometry{.id = {.value = 84}, .mesh = mesh}},
         .materials = {SceneMaterial{.id = {.value = 126}}},
         // Deliberately neither insertion- nor identifier-topological.
         .instances =
@@ -151,6 +175,9 @@ TEST(FrameSceneTest, KeepsEveryIdentifierDomainStrongAndSnapshotAccessReadOnly) 
                                std::span<const SceneObject>>);
     static_assert(std::same_as<decltype(std::declval<const FrameScene&>().geometries()),
                                std::span<const SceneGeometry>>);
+    static_assert(std::same_as<decltype(SceneGeometry::mesh), std::shared_ptr<const TriangleMesh>>);
+    static_assert(!std::is_copy_assignable_v<TriangleMesh>);
+    static_assert(!std::is_move_assignable_v<TriangleMesh>);
     static_assert(std::same_as<decltype(std::declval<const FrameScene&>().materials()),
                                std::span<const SceneMaterial>>);
     static_assert(std::same_as<decltype(std::declval<const FrameScene&>().instances()),
@@ -205,7 +232,8 @@ TEST(FrameSceneTest, OwnsCanonicalStorageAndResolvesEveryStableIdentifier) {
     ASSERT_TRUE(local_transform.has_value()) << local_transform.error().message;
     ASSERT_TRUE(world_transform.has_value()) << world_transform.error().message;
     EXPECT_EQ(object->get(), (SceneObject{.id = {.value = 91}}));
-    EXPECT_EQ(geometry->get(), (SceneGeometry{.id = {.value = 900}}));
+    EXPECT_EQ(geometry->get().id, (renderer::GeometryId{.value = 900}));
+    EXPECT_NE(geometry->get().mesh, nullptr);
     EXPECT_EQ(material->get(), (SceneMaterial{.id = {.value = 55}}));
     EXPECT_EQ(instance->get(), (SceneInstance{
                                    .id = {.value = 800},
@@ -307,6 +335,7 @@ TEST(FrameSceneTest, ComposesThreeNestedInstanceLevelsIntoExpectedWorldTransform
 
 TEST(FrameSceneTest, AcceptsEveryUint32ValueWithoutCrossDomainSentinels) {
     const auto maximum = std::numeric_limits<std::uint32_t>::max();
+    const auto mesh = make_scene_mesh();
     auto description = FrameSceneDescription{
         .objects =
             {
@@ -315,8 +344,8 @@ TEST(FrameSceneTest, AcceptsEveryUint32ValueWithoutCrossDomainSentinels) {
             },
         .geometries =
             {
-                SceneGeometry{.id = {.value = 0}},
-                SceneGeometry{.id = {.value = maximum}},
+                SceneGeometry{.id = {.value = 0}, .mesh = mesh},
+                SceneGeometry{.id = {.value = maximum}, .mesh = mesh},
             },
         .materials =
             {
@@ -455,6 +484,12 @@ TEST(FrameSceneTest, RejectsDuplicateIdentifiersInEveryDomain) {
 TEST(FrameSceneTest, RejectsEveryDanglingInstanceReferenceWithoutRepair) {
     {
         auto description = make_scene_description();
+        description.geometries.front().mesh.reset();
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto description = make_scene_description();
         description.instances.front().object = renderer::ObjectId{.value = 1234};
         expect_error_code(FrameScene::create(std::move(description)),
                           core::StatusCode::invalid_argument);
@@ -499,13 +534,18 @@ TEST(FrameSceneTest, ReportsUnknownLookupsInsteadOfReturningAnotherRecord) {
 
 TEST(FrameSceneTest, ReleasesOwnedGraphAtTheEndOfTheLastSnapshotLifetime) {
     std::weak_ptr<const FrameScene> observer;
+    std::weak_ptr<const TriangleMesh> mesh_observer;
     {
-        const auto scene_result = FrameScene::create(make_scene_description());
+        auto description = make_scene_description();
+        mesh_observer = description.geometries.front().mesh;
+        const auto scene_result = FrameScene::create(std::move(description));
         ASSERT_TRUE(scene_result.has_value()) << scene_result.error().message;
         observer = *scene_result;
         EXPECT_FALSE(observer.expired());
+        EXPECT_FALSE(mesh_observer.expired());
     }
     EXPECT_TRUE(observer.expired());
+    EXPECT_TRUE(mesh_observer.expired());
 }
 
 } // namespace

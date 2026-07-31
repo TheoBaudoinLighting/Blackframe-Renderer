@@ -1,14 +1,15 @@
 #pragma once
 
 #include <Blackframe/Core/Status.hpp>
-#include <Blackframe/Engine/TriangleMesh.hpp>
+#include <Blackframe/Engine/FrameScene.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <Blackframe/Renderer/Triangle.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <span>
+#include <vector>
 
 namespace blackframe::engine {
 
@@ -17,10 +18,13 @@ enum class AccelBackendKind : std::uint8_t {
     embree,
 };
 
-// Describes one immutable triangle mesh that is already expressed in world
-// space. The backend retains the mesh for its complete lifetime.
-struct AccelGeometry final {
+// Canonical backend-neutral instance data prepared from one immutable frame
+// scene. The mesh remains in object space and object_to_world is the fully
+// resolved hierarchy transform.
+struct AccelInstance final {
     std::shared_ptr<const TriangleMesh> mesh;
+    renderer::AffineTransform object_to_world;
+    renderer::ObjectId object{};
     renderer::InstanceId instance{};
     renderer::GeometryId geometry{};
     renderer::MaterialId material{};
@@ -28,6 +32,7 @@ struct AccelGeometry final {
 };
 
 struct AccelHit final {
+    renderer::ObjectId object;
     renderer::TriangleHit triangle;
     renderer::SurfaceIdentifiers identifiers;
 
@@ -35,10 +40,11 @@ struct AccelHit final {
 };
 
 // Scene ray queries are separate from the renderer's five central transport
-// interfaces. Ray time must be normalized to [0, 1]. A coplanar triangle does
-// not define a surface crossing and is skipped; every other numerical or
-// backend failure remains an explicit error. A miss is represented by an
-// empty optional or false.
+// interfaces. A backend retains the immutable scene snapshot passed to its
+// factory. Ray time must be normalized to [0, 1]. A coplanar triangle does not
+// define a surface crossing and is skipped; every other numerical or backend
+// failure remains an explicit error. A miss is represented by an empty
+// optional or false.
 class AccelBackend {
   public:
     virtual ~AccelBackend() noexcept = default;
@@ -56,18 +62,26 @@ class AccelBackend {
     [[nodiscard]] virtual core::Result<bool> occluded(const renderer::Ray& ray) const = 0;
 
   protected:
-    AccelBackend() noexcept = default;
+    explicit AccelBackend(FrameSceneHandle scene) noexcept;
 
-    [[nodiscard]] static core::Status
-    validate_geometry_input(std::span<const AccelGeometry> geometries);
+    [[nodiscard]] static core::Result<std::vector<AccelInstance>>
+    prepare_instances(const FrameSceneHandle& scene);
 
     [[nodiscard]] static core::Status validate_ray(const renderer::Ray& ray);
+
+    [[nodiscard]] static core::Result<renderer::Ray>
+    object_space_ray(const renderer::Ray& world_ray, const AccelInstance& instance);
+
+    [[nodiscard]] static core::Result<renderer::Triangle>
+    world_space_triangle(const AccelInstance& instance, std::size_t triangle_index);
+
+  private:
+    FrameSceneHandle scene_;
 };
 
-using AccelBackendFactory =
-    core::Result<std::unique_ptr<AccelBackend>> (*)(std::span<const AccelGeometry> geometries);
+using AccelBackendFactory = core::Result<std::unique_ptr<AccelBackend>> (*)(FrameSceneHandle scene);
 
 [[nodiscard]] core::Result<std::unique_ptr<AccelBackend>>
-create_analytic_accel_backend(std::span<const AccelGeometry> geometries);
+create_analytic_accel_backend(FrameSceneHandle scene);
 
 } // namespace blackframe::engine

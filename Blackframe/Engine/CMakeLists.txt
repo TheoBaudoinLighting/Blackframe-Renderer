@@ -2,8 +2,10 @@ add_library(
     BlackframeSceneGeometry
     STATIC
         Include/Blackframe/Engine/AccelBackend.hpp
+        Include/Blackframe/Engine/FrameScene.hpp
         Include/Blackframe/Engine/TriangleMesh.hpp
         Source/AccelBackend.cpp
+        Source/FrameScene.cpp
         Source/TriangleMesh.cpp
 )
 add_library(Blackframe::SceneGeometry ALIAS BlackframeSceneGeometry)
@@ -36,10 +38,8 @@ add_library(
     BlackframeEngine
     STATIC
         Include/Blackframe/Engine/Engine.hpp
-        Include/Blackframe/Engine/FrameScene.hpp
         Include/Blackframe/Engine/TriangleMeshImport.hpp
         Source/Engine.cpp
-        Source/FrameScene.cpp
         Source/TriangleMeshImport.cpp
 )
 add_library(Blackframe::Engine ALIAS BlackframeEngine)

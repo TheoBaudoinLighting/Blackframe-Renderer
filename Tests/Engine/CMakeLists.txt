@@ -40,8 +40,8 @@ blackframe_set_target_role(BlackframeSceneTests test)
 target_link_libraries(
     BlackframeSceneTests
     PRIVATE
-        Blackframe::Engine
         Blackframe::ProjectOptions
+        Blackframe::SceneGeometry
         GTest::gtest_main
 )
 

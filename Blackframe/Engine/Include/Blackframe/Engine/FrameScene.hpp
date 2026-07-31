@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Blackframe/Core/Status.hpp>
+#include <Blackframe/Engine/TriangleMesh.hpp>
+#include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <Blackframe/Renderer/Transforms.hpp>
 #include <functional>
@@ -20,8 +22,9 @@ struct SceneObject final {
 
 struct SceneGeometry final {
     renderer::GeometryId id{};
+    std::shared_ptr<const TriangleMesh> mesh;
 
-    [[nodiscard]] constexpr bool operator==(const SceneGeometry&) const noexcept = default;
+    [[nodiscard]] bool operator==(const SceneGeometry&) const noexcept = default;
 };
 
 struct SceneMaterial final {
@@ -42,6 +45,7 @@ struct SceneInstance final {
     renderer::GeometryId geometry{};
     renderer::MaterialId material{};
     renderer::Matrix4 local_to_parent{};
+    renderer::RayMask visibility_mask{renderer::AllRayVisibility};
 
     [[nodiscard]] constexpr bool operator==(const SceneInstance&) const noexcept = default;
 };

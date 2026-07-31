@@ -21,9 +21,10 @@ silently selecting another path.
   and shading normals, UVs, derivatives, identifiers, and time.
 - **Internal scene:** the Engine exposes an immutable frame snapshot storing a closed object,
   geometry, material, and nested-instance graph under explicit stable 32-bit identifiers.
-  Instances carry validated local affine matrices and optional parents; world transforms are
-  resolved deterministically when the snapshot closes. Duplicate IDs, dangling references, cycles,
-  invalid compositions, and lookup failures are explicit errors.
+  Geometries retain immutable compact triangle meshes; instances carry validated local affine
+  matrices, visibility masks, and optional parents. World transforms are resolved deterministically
+  when the snapshot closes. Missing meshes, duplicate IDs, dangling references, cycles, invalid
+  compositions, and lookup failures are explicit errors.
 - **Triangle meshes:** the Engine imports strictly triangulated OBJ text and PLY ASCII 1.0 assets
   from explicit absolute paths. Positions, unit normals, UVs, and 32-bit indices are validated;
   independent OBJ index domains are canonicalized at seams. Missing attributes, polygons, invalid
@@ -33,10 +34,13 @@ silently selecting another path.
   a CPU renderer or future CUDA upload consumes, with an expanded-corner comparison and no allocator
   or container-capacity estimate.
 - **Acceleration queries:** one Engine-owned `AccelBackend` contract exposes closest-hit and
-  occlusion queries over immutable world-space triangle meshes, stable surface identifiers, and
-  visibility masks. The deterministic analytic oracle and the pinned Embree implementation are
-  selected through distinct factories returning that same interface; backend failures and
-  unsupported Embree requirements are reported without analytic substitution.
+  occlusion queries over immutable frame scenes, stable object/surface identifiers, and visibility
+  masks. The deterministic analytic oracle transforms rays into object space. The pinned Embree
+  implementation shares one triangle BLAS per geometry and registers each logical instance in a
+  compact TLAS using its resolved world transform; logical parent chains are flattened only after
+  deterministic hierarchy resolution. Both implementations are selected through distinct factories
+  returning the same interface, and backend failures or unsupported Embree requirements are reported
+  without analytic substitution.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar
@@ -72,14 +76,14 @@ silently selecting another path.
 ## Current boundary
 
 Blackframe does not yet provide a production path-tracing integrator, a scene loader, a general
-material or lighting system, a scene-integrated acceleration pipeline, or a CUDA wavefront
+material or lighting system, a production acceleration build/update pipeline, or a CUDA wavefront
 renderer. The current BSDF-only loop is a narrow deterministic scalar oracle over resolved
-Lambertian triangles, not a production backend. The acceleration contract currently consumes
-explicit world-space meshes; it does not yet apply the internal scene graph or hierarchical
-instances. The headless executable currently supports local engine control and device discovery; it
-does not yet accept a scene and render an image from the command line. A consumable CMake
-install/export package is also not available yet. The CornellDiffuse JSON files are closed
-validation descriptors, not a general scene-interchange format or a hidden scene loader.
+Lambertian triangles, not a production backend. The acceleration contract builds immutable
+single-frame snapshots and does not yet support deformation or transform motion blur. The headless
+executable currently supports local engine control and device discovery; it does not yet accept a
+scene and render an image from the command line. A consumable CMake install/export package is also
+not available yet. The CornellDiffuse JSON files are closed validation descriptors, not a general
+scene-interchange format or a hidden scene loader.
 
 ## Building
 

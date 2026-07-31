@@ -19,25 +19,19 @@ namespace {
 class AnalyticAccelBackend final : public AccelBackend {
   public:
     [[nodiscard]] static core::Result<std::unique_ptr<AccelBackend>>
-    create(const std::span<const AccelGeometry> geometries) {
-        const auto validation = validate_geometry_input(geometries);
-        if (!validation) {
-            return std::unexpected(validation.error());
+    create(FrameSceneHandle scene) {
+        auto instances = prepare_instances(scene);
+        if (!instances) {
+            return std::unexpected(std::move(instances.error()));
         }
 
         try {
-            auto retained_geometries =
-                std::vector<AccelGeometry>{geometries.begin(), geometries.end()};
             return std::unique_ptr<AccelBackend>{
-                new AnalyticAccelBackend{std::move(retained_geometries)}};
+                new AnalyticAccelBackend{std::move(scene), std::move(*instances)}};
         } catch (const std::bad_alloc&) {
             return std::unexpected(
                 accel_error(core::StatusCode::resource_exhausted,
                             "Analytic acceleration construction exhausted host memory."));
-        } catch (const std::length_error&) {
-            return std::unexpected(
-                accel_error(core::StatusCode::resource_exhausted,
-                            "Analytic acceleration exceeded host container limits."));
         }
     }
 
@@ -53,18 +47,22 @@ class AnalyticAccelBackend final : public AccelBackend {
         }
 
         auto closest = std::optional<AccelHit>{};
-        for (const auto& geometry : geometries_) {
-            if ((ray.mask() & geometry.visibility_mask) == 0U) {
+        for (const auto& instance : instances_) {
+            if ((ray.mask() & instance.visibility_mask) == 0U) {
                 continue;
             }
 
+            auto local_ray = object_space_ray(ray, instance);
+            if (!local_ray) {
+                return std::unexpected(std::move(local_ray.error()));
+            }
             for (auto triangle_index = std::size_t{};
-                 triangle_index < geometry.mesh->triangles().size(); ++triangle_index) {
-                auto triangle = geometry.mesh->geometric_triangle(triangle_index);
+                 triangle_index < instance.mesh->triangles().size(); ++triangle_index) {
+                auto triangle = instance.mesh->geometric_triangle(triangle_index);
                 if (!triangle) {
-                    return std::unexpected(triangle.error());
+                    return std::unexpected(std::move(triangle.error()));
                 }
-                auto candidate = triangle->intersect_classified(ray);
+                auto candidate = triangle->intersect_classified(*local_ray);
                 if (!candidate) {
                     if (candidate.error().kind ==
                         renderer::TriangleIntersectionErrorKind::coplanar_ambiguity) {
@@ -80,17 +78,33 @@ class AnalyticAccelBackend final : public AccelBackend {
                     continue;
                 }
 
+                auto world_triangle = world_space_triangle(instance, triangle_index);
+                if (!world_triangle) {
+                    return std::unexpected(std::move(world_triangle.error()));
+                }
+                auto position = ray.at(candidate->value().parameter);
+                if (!position) {
+                    return std::unexpected(std::move(position.error()));
+                }
+
                 closest = AccelHit{
-                    .triangle = candidate->value(),
+                    .object = instance.object,
+                    .triangle =
+                        {
+                            .parameter = candidate->value().parameter,
+                            .position = *position,
+                            .geometric_normal = world_triangle->geometric_normal(),
+                            .barycentrics = candidate->value().barycentrics,
+                        },
                     .identifiers =
                         {
-                            .instance = geometry.instance,
-                            .geometry = geometry.geometry,
+                            .instance = instance.instance,
+                            .geometry = instance.geometry,
                             .primitive =
                                 renderer::PrimitiveId{
                                     .value = static_cast<std::uint32_t>(triangle_index),
                                 },
-                            .material = geometry.material,
+                            .material = instance.material,
                         },
                 };
             }
@@ -104,18 +118,22 @@ class AnalyticAccelBackend final : public AccelBackend {
             return std::unexpected(validation.error());
         }
 
-        for (const auto& geometry : geometries_) {
-            if ((ray.mask() & geometry.visibility_mask) == 0U) {
+        for (const auto& instance : instances_) {
+            if ((ray.mask() & instance.visibility_mask) == 0U) {
                 continue;
             }
 
+            auto local_ray = object_space_ray(ray, instance);
+            if (!local_ray) {
+                return std::unexpected(std::move(local_ray.error()));
+            }
             for (auto triangle_index = std::size_t{};
-                 triangle_index < geometry.mesh->triangles().size(); ++triangle_index) {
-                auto triangle = geometry.mesh->geometric_triangle(triangle_index);
+                 triangle_index < instance.mesh->triangles().size(); ++triangle_index) {
+                auto triangle = instance.mesh->geometric_triangle(triangle_index);
                 if (!triangle) {
-                    return std::unexpected(triangle.error());
+                    return std::unexpected(std::move(triangle.error()));
                 }
-                auto candidate = triangle->intersect_classified(ray);
+                auto candidate = triangle->intersect_classified(*local_ray);
                 if (!candidate) {
                     if (candidate.error().kind ==
                         renderer::TriangleIntersectionErrorKind::coplanar_ambiguity) {
@@ -132,36 +150,72 @@ class AnalyticAccelBackend final : public AccelBackend {
     }
 
   private:
-    explicit AnalyticAccelBackend(std::vector<AccelGeometry>&& geometries) noexcept
-        : geometries_{std::move(geometries)} {}
+    AnalyticAccelBackend(FrameSceneHandle&& scene, std::vector<AccelInstance>&& instances) noexcept
+        : AccelBackend{std::move(scene)}, instances_{std::move(instances)} {}
 
-    std::vector<AccelGeometry> geometries_;
+    std::vector<AccelInstance> instances_;
 };
 
 } // namespace
 
-core::Status
-AccelBackend::validate_geometry_input(const std::span<const AccelGeometry> geometries) {
-    for (auto geometry_index = std::size_t{}; geometry_index < geometries.size();
-         ++geometry_index) {
-        const auto& geometry = geometries[geometry_index];
-        if (!geometry.mesh) {
-            return std::unexpected(
-                accel_error(core::StatusCode::invalid_argument,
-                            "Acceleration geometry requires an immutable triangle mesh."));
-        }
+AccelBackend::AccelBackend(FrameSceneHandle scene) noexcept : scene_{std::move(scene)} {}
 
-        for (auto previous_index = std::size_t{}; previous_index < geometry_index;
-             ++previous_index) {
-            const auto& previous = geometries[previous_index];
-            if (geometry.instance == previous.instance && geometry.geometry == previous.geometry) {
-                return std::unexpected(accel_error(
-                    core::StatusCode::invalid_argument,
-                    "Acceleration geometry identities must be unique within a backend."));
-            }
-        }
+core::Result<std::vector<AccelInstance>>
+AccelBackend::prepare_instances(const FrameSceneHandle& scene) {
+    if (!scene) {
+        return std::unexpected(
+            accel_error(core::StatusCode::invalid_argument,
+                        "Acceleration construction requires an immutable frame scene."));
     }
-    return {};
+
+    try {
+        auto instances = std::vector<AccelInstance>{};
+        instances.reserve(scene->instances().size());
+        for (const auto& source : scene->instances()) {
+            auto geometry = scene->geometry(source.geometry);
+            if (!geometry) {
+                return std::unexpected(std::move(geometry.error()));
+            }
+            auto world_transform = scene->world_transform(source.id);
+            if (!world_transform) {
+                return std::unexpected(std::move(world_transform.error()));
+            }
+            if (!geometry->get().mesh) {
+                return std::unexpected(
+                    accel_error(core::StatusCode::internal_error,
+                                "A validated frame scene lost an instance triangle mesh."));
+            }
+
+            auto instance = AccelInstance{
+                .mesh = geometry->get().mesh,
+                .object_to_world = world_transform->get(),
+                .object = source.object,
+                .instance = source.id,
+                .geometry = source.geometry,
+                .material = source.material,
+                .visibility_mask = source.visibility_mask,
+            };
+            for (auto triangle_index = std::size_t{};
+                 triangle_index < instance.mesh->triangles().size(); ++triangle_index) {
+                if (!world_space_triangle(instance, triangle_index)) {
+                    return std::unexpected(accel_error(
+                        core::StatusCode::invalid_argument,
+                        "A frame scene instance produces an unrepresentable world-space "
+                        "triangle."));
+                }
+            }
+            instances.push_back(std::move(instance));
+        }
+        return instances;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            accel_error(core::StatusCode::resource_exhausted,
+                        "Acceleration instance preparation exhausted host memory."));
+    } catch (const std::length_error&) {
+        return std::unexpected(
+            accel_error(core::StatusCode::resource_exhausted,
+                        "Acceleration instance preparation exceeded host container limits."));
+    }
 }
 
 core::Status AccelBackend::validate_ray(const renderer::Ray& ray) {
@@ -173,9 +227,29 @@ core::Status AccelBackend::validate_ray(const renderer::Ray& ray) {
     return {};
 }
 
-core::Result<std::unique_ptr<AccelBackend>>
-create_analytic_accel_backend(const std::span<const AccelGeometry> geometries) {
-    return AnalyticAccelBackend::create(geometries);
+core::Result<renderer::Ray> AccelBackend::object_space_ray(const renderer::Ray& world_ray,
+                                                           const AccelInstance& instance) {
+    return renderer::Ray::create(instance.object_to_world.apply_inverse(world_ray.origin()),
+                                 instance.object_to_world.apply_inverse(world_ray.direction()),
+                                 world_ray.t_min(), world_ray.t_max(), world_ray.time(),
+                                 world_ray.mask(), world_ray.current_medium());
+}
+
+core::Result<renderer::Triangle>
+AccelBackend::world_space_triangle(const AccelInstance& instance,
+                                   const std::size_t triangle_index) {
+    auto triangle = instance.mesh->geometric_triangle(triangle_index);
+    if (!triangle) {
+        return std::unexpected(std::move(triangle.error()));
+    }
+    const auto& vertices = triangle->vertices();
+    return renderer::Triangle::create(instance.object_to_world.apply(vertices[0]),
+                                      instance.object_to_world.apply(vertices[1]),
+                                      instance.object_to_world.apply(vertices[2]));
+}
+
+core::Result<std::unique_ptr<AccelBackend>> create_analytic_accel_backend(FrameSceneHandle scene) {
+    return AnalyticAccelBackend::create(std::move(scene));
 }
 
 } // namespace blackframe::engine

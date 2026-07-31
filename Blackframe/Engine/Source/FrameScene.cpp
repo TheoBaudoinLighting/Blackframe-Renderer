@@ -222,6 +222,14 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
             return std::unexpected(std::move(status.error()));
         }
 
+        for (const auto& geometry : description.geometries) {
+            if (!geometry.mesh) {
+                return std::unexpected(
+                    scene_error(core::StatusCode::invalid_argument,
+                                "A frame scene geometry requires an immutable triangle mesh."));
+            }
+        }
+
         for (const auto& instance : description.instances) {
             if (!contains_identifier(description.objects, instance.object)) {
                 return std::unexpected(

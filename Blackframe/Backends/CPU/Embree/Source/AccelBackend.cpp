@@ -2,6 +2,7 @@
 #include <Blackframe/Renderer/CapabilityRegistry.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -98,11 +99,6 @@ using GeometryHandle = std::unique_ptr<std::remove_pointer_t<RTCGeometry>, Geome
     };
 }
 
-struct EmbreeGeometry final {
-    AccelGeometry descriptor;
-    unsigned int embree_geometry_id{};
-};
-
 [[nodiscard]] RTCRay embree_ray(const renderer::Ray& ray) noexcept {
     auto result = RTCRay{};
     result.org_x = ray.origin().x;
@@ -126,18 +122,40 @@ void initialize_hit(RTCHit& hit) noexcept {
     std::fill(std::begin(hit.instID), std::end(hit.instID), RTC_INVALID_GEOMETRY_ID);
 }
 
+[[nodiscard]] std::array<float, 12>
+embree_transform(const renderer::AffineTransform& transform) noexcept {
+    const auto& matrix = transform.matrix();
+    return {
+        matrix(0, 0), matrix(0, 1), matrix(0, 2), matrix(0, 3), matrix(1, 0), matrix(1, 1),
+        matrix(1, 2), matrix(1, 3), matrix(2, 0), matrix(2, 1), matrix(2, 2), matrix(2, 3),
+    };
+}
+
+struct EmbreeMesh final {
+    renderer::GeometryId geometry{};
+    std::shared_ptr<const TriangleMesh> mesh;
+    SceneHandle scene;
+    unsigned int embree_geometry_id{};
+};
+
+struct EmbreeInstanceMapping final {
+    std::size_t instance_index{};
+    std::size_t mesh_index{};
+    unsigned int embree_instance_id{};
+};
+
 class EmbreeAccelBackend final : public AccelBackend {
   public:
     [[nodiscard]] static core::Result<std::unique_ptr<AccelBackend>>
-    create(const std::span<const AccelGeometry> geometries) {
+    create(FrameSceneHandle frame_scene) {
         const auto capability = renderer::require_backend_capability("cpu_embree");
         if (!capability) {
             return std::unexpected(capability.error());
         }
 
-        const auto validation = validate_geometry_input(geometries);
-        if (!validation) {
-            return std::unexpected(validation.error());
+        auto instances = prepare_instances(frame_scene);
+        if (!instances) {
+            return std::unexpected(std::move(instances.error()));
         }
 
         try {
@@ -191,27 +209,40 @@ class EmbreeAccelBackend final : public AccelBackend {
                     "two-sided triangle queries."));
             }
 
-            auto scene = SceneHandle{rtcNewScene(device.get())};
-            if (!scene) {
-                if (auto status = check_embree(device.get(), "creating the scene"); !status) {
+            auto meshes = std::vector<EmbreeMesh>{};
+            meshes.reserve(instances->size());
+            for (const auto& instance : *instances) {
+                const auto existing = std::ranges::find_if(meshes, [&instance](const auto& mesh) {
+                    return mesh.geometry == instance.geometry;
+                });
+                if (existing != meshes.end()) {
+                    if (existing->mesh.get() != instance.mesh.get()) {
+                        return std::unexpected(missing_embree_result(
+                            core::StatusCode::internal_error,
+                            "One frame geometry identifier resolved to multiple triangle meshes."));
+                    }
+                    continue;
+                }
+
+                auto mesh_scene = SceneHandle{rtcNewScene(device.get())};
+                if (!mesh_scene) {
+                    if (auto status = check_embree(device.get(), "creating a mesh scene");
+                        !status) {
+                        return std::unexpected(status.error());
+                    }
+                    return std::unexpected(missing_embree_result(
+                        core::StatusCode::platform_error,
+                        "Embree returned no mesh scene without reporting an error."));
+                }
+                if (auto status = check_embree(device.get(), "creating a mesh scene"); !status) {
                     return std::unexpected(status.error());
                 }
-                return std::unexpected(
-                    missing_embree_result(core::StatusCode::platform_error,
-                                          "Embree returned no scene without reporting an error."));
-            }
-            if (auto status = check_embree(device.get(), "creating the scene"); !status) {
-                return std::unexpected(status.error());
-            }
+                rtcSetSceneFlags(mesh_scene.get(), RTC_SCENE_FLAG_ROBUST);
+                if (auto status = check_embree(device.get(), "enabling robust mesh traversal");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
 
-            rtcSetSceneFlags(scene.get(), RTC_SCENE_FLAG_ROBUST);
-            if (auto status = check_embree(device.get(), "enabling robust traversal"); !status) {
-                return std::unexpected(status.error());
-            }
-
-            auto embree_geometries = std::vector<EmbreeGeometry>{};
-            embree_geometries.reserve(geometries.size());
-            for (const auto& descriptor : geometries) {
                 auto geometry =
                     GeometryHandle{rtcNewGeometry(device.get(), RTC_GEOMETRY_TYPE_TRIANGLE)};
                 if (!geometry) {
@@ -228,11 +259,11 @@ class EmbreeAccelBackend final : public AccelBackend {
                     return std::unexpected(status.error());
                 }
 
-                const auto positions = descriptor.mesh->positions();
+                const auto positions = instance.mesh->positions();
                 // The owned Embree buffer is required here: shared RTC_FORMAT_FLOAT3 buffers may
                 // read 16 bytes for their final item, while Blackframe Point3 is compact at
                 // 12 bytes. The owned index buffer below also keeps traversal storage independent
-                // from the caller while the mesh itself is retained for exact hit reconstruction.
+                // from the caller while the immutable frame scene retains the source mesh.
                 auto* const vertex_buffer = rtcSetNewGeometryBuffer(
                     geometry.get(), RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
                     sizeof(renderer::Point3), positions.size());
@@ -247,7 +278,7 @@ class EmbreeAccelBackend final : public AccelBackend {
                 }
                 std::memcpy(vertex_buffer, positions.data(), positions.size_bytes());
 
-                const auto indices = descriptor.mesh->triangles();
+                const auto indices = instance.mesh->triangles();
                 auto* const index_buffer = rtcSetNewGeometryBuffer(
                     geometry.get(), RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
                     sizeof(TriangleVertexIndices), indices.size());
@@ -262,19 +293,18 @@ class EmbreeAccelBackend final : public AccelBackend {
                 }
                 std::memcpy(index_buffer, indices.data(), indices.size_bytes());
 
-                rtcSetGeometryMask(geometry.get(), descriptor.visibility_mask);
-                if (auto status = check_embree(device.get(), "setting the geometry mask");
+                rtcSetGeometryMask(geometry.get(), renderer::AllRayVisibility);
+                if (auto status = check_embree(device.get(), "setting the triangle geometry mask");
                     !status) {
                     return std::unexpected(status.error());
                 }
-
                 rtcCommitGeometry(geometry.get());
                 if (auto status = check_embree(device.get(), "committing triangle geometry");
                     !status) {
                     return std::unexpected(status.error());
                 }
 
-                const auto embree_geometry_id = rtcAttachGeometry(scene.get(), geometry.get());
+                const auto embree_geometry_id = rtcAttachGeometry(mesh_scene.get(), geometry.get());
                 if (auto status = check_embree(device.get(), "attaching triangle geometry");
                     !status) {
                     return std::unexpected(status.error());
@@ -284,20 +314,116 @@ class EmbreeAccelBackend final : public AccelBackend {
                         core::StatusCode::platform_error,
                         "Embree returned no geometry identifier without reporting an error."));
                 }
+                rtcCommitScene(mesh_scene.get());
+                if (auto status = check_embree(device.get(), "committing a mesh scene"); !status) {
+                    return std::unexpected(status.error());
+                }
 
-                embree_geometries.push_back(EmbreeGeometry{
-                    .descriptor = descriptor,
+                meshes.push_back(EmbreeMesh{
+                    .geometry = instance.geometry,
+                    .mesh = instance.mesh,
+                    .scene = std::move(mesh_scene),
                     .embree_geometry_id = embree_geometry_id,
                 });
             }
 
-            rtcCommitScene(scene.get());
-            if (auto status = check_embree(device.get(), "committing the scene"); !status) {
+            auto top_scene = SceneHandle{rtcNewScene(device.get())};
+            if (!top_scene) {
+                if (auto status = check_embree(device.get(), "creating the top-level scene");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
+                return std::unexpected(missing_embree_result(
+                    core::StatusCode::platform_error,
+                    "Embree returned no top-level scene without reporting an error."));
+            }
+            if (auto status = check_embree(device.get(), "creating the top-level scene"); !status) {
+                return std::unexpected(status.error());
+            }
+            rtcSetSceneFlags(top_scene.get(), RTC_SCENE_FLAG_ROBUST);
+            if (auto status = check_embree(device.get(), "enabling robust instance traversal");
+                !status) {
+                return std::unexpected(status.error());
+            }
+
+            auto mappings = std::vector<EmbreeInstanceMapping>{};
+            mappings.reserve(instances->size());
+            for (auto instance_index = std::size_t{}; instance_index < instances->size();
+                 ++instance_index) {
+                const auto& instance = (*instances)[instance_index];
+                const auto mesh = std::ranges::find_if(meshes, [&instance](const auto& candidate) {
+                    return candidate.geometry == instance.geometry;
+                });
+                if (mesh == meshes.end()) {
+                    return std::unexpected(missing_embree_result(
+                        core::StatusCode::internal_error,
+                        "Embree instance construction lost a prepared mesh scene."));
+                }
+
+                auto geometry =
+                    GeometryHandle{rtcNewGeometry(device.get(), RTC_GEOMETRY_TYPE_INSTANCE)};
+                if (!geometry) {
+                    if (auto status = check_embree(device.get(), "creating instance geometry");
+                        !status) {
+                        return std::unexpected(status.error());
+                    }
+                    return std::unexpected(missing_embree_result(
+                        core::StatusCode::unavailable,
+                        "The selected Embree build does not support instance geometry."));
+                }
+                if (auto status = check_embree(device.get(), "creating instance geometry");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
+
+                rtcSetGeometryInstancedScene(geometry.get(), mesh->scene.get());
+                if (auto status = check_embree(device.get(), "assigning an instanced mesh scene");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
+                const auto transform = embree_transform(instance.object_to_world);
+                rtcSetGeometryTransform(geometry.get(), 0U, RTC_FORMAT_FLOAT3X4_ROW_MAJOR,
+                                        transform.data());
+                if (auto status = check_embree(device.get(), "setting an instance transform");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
+                rtcSetGeometryMask(geometry.get(), instance.visibility_mask);
+                if (auto status = check_embree(device.get(), "setting an instance mask"); !status) {
+                    return std::unexpected(status.error());
+                }
+                rtcCommitGeometry(geometry.get());
+                if (auto status = check_embree(device.get(), "committing instance geometry");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
+
+                const auto embree_instance_id = rtcAttachGeometry(top_scene.get(), geometry.get());
+                if (auto status = check_embree(device.get(), "attaching instance geometry");
+                    !status) {
+                    return std::unexpected(status.error());
+                }
+                if (embree_instance_id == RTC_INVALID_GEOMETRY_ID) {
+                    return std::unexpected(missing_embree_result(
+                        core::StatusCode::platform_error,
+                        "Embree returned no instance identifier without reporting an error."));
+                }
+                mappings.push_back(EmbreeInstanceMapping{
+                    .instance_index = instance_index,
+                    .mesh_index = static_cast<std::size_t>(mesh - meshes.begin()),
+                    .embree_instance_id = embree_instance_id,
+                });
+            }
+
+            rtcCommitScene(top_scene.get());
+            if (auto status = check_embree(device.get(), "committing the top-level scene");
+                !status) {
                 return std::unexpected(status.error());
             }
 
             return std::unique_ptr<AccelBackend>{new EmbreeAccelBackend{
-                std::move(embree_geometries), std::move(device), std::move(scene)}};
+                std::move(frame_scene), std::move(*instances), std::move(device), std::move(meshes),
+                std::move(mappings), std::move(top_scene)}};
         } catch (const std::bad_alloc&) {
             return std::unexpected(
                 missing_embree_result(core::StatusCode::resource_exhausted,
@@ -331,30 +457,62 @@ class EmbreeAccelBackend final : public AccelBackend {
         }
 
         if (ray_hit.hit.geomID == RTC_INVALID_GEOMETRY_ID) {
-            if (ray_hit.hit.primID != RTC_INVALID_GEOMETRY_ID || ray_hit.ray.tfar != ray.t_max()) {
+            const auto instance_ids_unchanged =
+                std::ranges::all_of(ray_hit.hit.instID, [](const auto instance_id) {
+                    return instance_id == RTC_INVALID_GEOMETRY_ID;
+                });
+            if (ray_hit.hit.primID != RTC_INVALID_GEOMETRY_ID || !instance_ids_unchanged ||
+                ray_hit.ray.tfar != ray.t_max()) {
                 return std::unexpected(missing_embree_result(
                     core::StatusCode::internal_error,
                     "Embree modified closest-hit output while reporting a miss."));
             }
             return std::optional<AccelHit>{};
         }
-        const auto geometry = std::find_if(
-            geometries_.begin(), geometries_.end(), [&ray_hit](const EmbreeGeometry& candidate) {
-                return candidate.embree_geometry_id == ray_hit.hit.geomID;
-            });
-        if (geometry == geometries_.end()) {
+
+        if (ray_hit.hit.instID[0] == RTC_INVALID_GEOMETRY_ID) {
             return std::unexpected(missing_embree_result(
                 core::StatusCode::internal_error,
-                "Embree returned an unknown geometry identifier for a closest hit."));
+                "Embree returned a direct hit in an instance-only top-level scene."));
         }
-        if (static_cast<std::size_t>(ray_hit.hit.primID) >=
-            geometry->descriptor.mesh->triangles().size()) {
+        for (auto level = std::size_t{1}; level < std::size(ray_hit.hit.instID); ++level) {
+            if (ray_hit.hit.instID[level] != RTC_INVALID_GEOMETRY_ID) {
+                return std::unexpected(missing_embree_result(
+                    core::StatusCode::internal_error,
+                    "Embree returned an unexpected nested instance identifier."));
+            }
+        }
+
+        const auto mapping =
+            std::ranges::find_if(mappings_, [&ray_hit](const EmbreeInstanceMapping& candidate) {
+                return candidate.embree_instance_id == ray_hit.hit.instID[0];
+            });
+        if (mapping == mappings_.end() || mapping->instance_index >= instances_.size() ||
+            mapping->mesh_index >= meshes_.size()) {
+            return std::unexpected(
+                missing_embree_result(core::StatusCode::internal_error,
+                                      "Embree returned an unknown top-level instance identifier."));
+        }
+        const auto& instance = instances_[mapping->instance_index];
+        const auto& mesh = meshes_[mapping->mesh_index];
+        if (mesh.geometry != instance.geometry || ray_hit.hit.geomID != mesh.embree_geometry_id) {
+            return std::unexpected(missing_embree_result(
+                core::StatusCode::internal_error,
+                "Embree returned a geometry identifier outside the hit instance mesh scene."));
+        }
+        if (static_cast<std::size_t>(ray_hit.hit.primID) >= instance.mesh->triangles().size()) {
             return std::unexpected(missing_embree_result(
                 core::StatusCode::internal_error,
                 "Embree returned an out-of-range primitive identifier for a closest hit."));
         }
+        const auto embree_normal_is_finite = std::isfinite(ray_hit.hit.Ng_x) &&
+                                             std::isfinite(ray_hit.hit.Ng_y) &&
+                                             std::isfinite(ray_hit.hit.Ng_z);
+        const auto embree_normal_is_nonzero =
+            ray_hit.hit.Ng_x != 0.0F || ray_hit.hit.Ng_y != 0.0F || ray_hit.hit.Ng_z != 0.0F;
         if (!std::isfinite(ray_hit.ray.tfar) || !ray.contains_parameter(ray_hit.ray.tfar) ||
-            !std::isfinite(ray_hit.hit.u) || !std::isfinite(ray_hit.hit.v)) {
+            !std::isfinite(ray_hit.hit.u) || !std::isfinite(ray_hit.hit.v) ||
+            !embree_normal_is_finite || !embree_normal_is_nonzero) {
             return std::unexpected(missing_embree_result(
                 core::StatusCode::internal_error,
                 "Embree returned non-finite or out-of-range closest-hit data."));
@@ -364,7 +522,7 @@ class EmbreeAccelBackend final : public AccelBackend {
         if (!position) {
             return std::unexpected(position.error());
         }
-        auto triangle = geometry->descriptor.mesh->geometric_triangle(ray_hit.hit.primID);
+        auto triangle = world_space_triangle(instance, ray_hit.hit.primID);
         if (!triangle) {
             return std::unexpected(triangle.error());
         }
@@ -376,6 +534,7 @@ class EmbreeAccelBackend final : public AccelBackend {
         }
 
         return std::optional<AccelHit>{AccelHit{
+            .object = instance.object,
             .triangle =
                 renderer::TriangleHit{
                     .parameter = ray_hit.ray.tfar,
@@ -390,10 +549,10 @@ class EmbreeAccelBackend final : public AccelBackend {
                 },
             .identifiers =
                 {
-                    .instance = geometry->descriptor.instance,
-                    .geometry = geometry->descriptor.geometry,
+                    .instance = instance.instance,
+                    .geometry = instance.geometry,
                     .primitive = renderer::PrimitiveId{.value = ray_hit.hit.primID},
-                    .material = geometry->descriptor.material,
+                    .material = instance.material,
                 },
         }};
     }
@@ -423,23 +582,27 @@ class EmbreeAccelBackend final : public AccelBackend {
     }
 
   private:
-    EmbreeAccelBackend(std::vector<EmbreeGeometry>&& geometries, DeviceHandle&& device,
-                       SceneHandle&& scene) noexcept
-        : geometries_{std::move(geometries)}, device_{std::move(device)}, scene_{std::move(scene)} {
-    }
+    EmbreeAccelBackend(FrameSceneHandle&& frame_scene, std::vector<AccelInstance>&& instances,
+                       DeviceHandle&& device, std::vector<EmbreeMesh>&& meshes,
+                       std::vector<EmbreeInstanceMapping>&& mappings, SceneHandle&& scene) noexcept
+        : AccelBackend{std::move(frame_scene)}, instances_{std::move(instances)},
+          device_{std::move(device)}, meshes_{std::move(meshes)}, mappings_{std::move(mappings)},
+          scene_{std::move(scene)} {}
 
-    // Declaration order retains descriptors until after Embree releases the
-    // scene and device, even though Embree owns copied traversal buffers.
-    std::vector<EmbreeGeometry> geometries_;
+    // Declaration order releases the TLAS before its BLAS scenes and releases
+    // every Embree scene before the shared device. The base snapshot outlives
+    // all derived members.
+    std::vector<AccelInstance> instances_;
     DeviceHandle device_;
+    std::vector<EmbreeMesh> meshes_;
+    std::vector<EmbreeInstanceMapping> mappings_;
     SceneHandle scene_;
 };
 
 } // namespace
 
-core::Result<std::unique_ptr<AccelBackend>>
-create_embree_accel_backend(const std::span<const AccelGeometry> geometries) {
-    return EmbreeAccelBackend::create(geometries);
+core::Result<std::unique_ptr<AccelBackend>> create_embree_accel_backend(FrameSceneHandle scene) {
+    return EmbreeAccelBackend::create(std::move(scene));
 }
 
 } // namespace blackframe::engine
