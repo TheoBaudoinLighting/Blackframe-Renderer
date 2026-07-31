@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Blackframe/Renderer/Detail/PacketLightSpectrum.hpp>
 #include <Blackframe/Renderer/Light.hpp>
 #include <algorithm>
 #include <array>
@@ -19,23 +20,6 @@ namespace punctual_light_detail {
         .code = core::StatusCode::invalid_argument,
         .message = message,
     };
-}
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Status
-validate_wavelength_packet(const SampledWavelengthsT<Scalar>& wavelengths) {
-    for (const auto& sample : wavelengths.samples) {
-        if (!std::isfinite(sample.nanometers) ||
-            sample.nanometers < Scalar{VisibleWavelengthMinimumNanometers} ||
-            sample.nanometers > Scalar{VisibleWavelengthMaximumNanometers} ||
-            sample.probability.measure != ProbabilityMeasure::wavelength ||
-            !std::isfinite(sample.probability.value) || !(sample.probability.value > Scalar{0})) {
-            return std::unexpected(invalid_punctual_light(
-                "Punctual lights require finite visible wavelengths with positive wavelength "
-                "densities."));
-        }
-    }
-    return {};
 }
 
 template <SpectrumScalar Scalar>
@@ -63,59 +47,7 @@ template <SpectrumScalar Scalar>
     return {};
 }
 
-template <SpectrumScalar Scalar> class PacketSpectrumT final {
-  public:
-    [[nodiscard]] static core::Result<PacketSpectrumT>
-    create(const SampledWavelengthsT<Scalar>& wavelengths, const LightSpectrumT<Scalar>& values) {
-        const auto wavelength_status = validate_wavelength_packet(wavelengths);
-        if (!wavelength_status) {
-            return std::unexpected(wavelength_status.error());
-        }
-        if (!light_detail::finite_non_negative(values)) {
-            return std::unexpected(invalid_punctual_light(
-                "Punctual light spectra require finite non-negative lanes."));
-        }
-
-        auto nanometers = std::array<Scalar, TransportSpectrumSampleCount>{};
-        for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
-            nanometers[lane] = wavelengths[lane].nanometers;
-        }
-        return PacketSpectrumT{nanometers, values};
-    }
-
-    [[nodiscard]] core::Result<LightSpectrumT<Scalar>>
-    evaluate(const SampledWavelengthsT<Scalar>& wavelengths) const {
-        const auto wavelength_status = validate_wavelength_packet(wavelengths);
-        if (!wavelength_status) {
-            return std::unexpected(wavelength_status.error());
-        }
-        for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
-            if (wavelengths[lane].nanometers != nanometers_[lane]) {
-                return std::unexpected(invalid_punctual_light(
-                    "A packet-bound punctual light cannot be evaluated at different "
-                    "wavelengths."));
-            }
-        }
-        return values_;
-    }
-
-    [[nodiscard]] constexpr bool is_black() const noexcept {
-        for (const auto value : values_.values) {
-            if (value != Scalar{0}) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-  private:
-    constexpr PacketSpectrumT(const std::array<Scalar, TransportSpectrumSampleCount> nanometers,
-                              const LightSpectrumT<Scalar> values) noexcept
-        : nanometers_{nanometers}, values_{values} {}
-
-    std::array<Scalar, TransportSpectrumSampleCount> nanometers_;
-    LightSpectrumT<Scalar> values_;
-};
+template <SpectrumScalar Scalar> using PacketSpectrumT = light_detail::PacketLightSpectrumT<Scalar>;
 
 template <SpectrumScalar Scalar>
 [[nodiscard]] constexpr LightSpectrumT<Scalar> black_spectrum() noexcept {

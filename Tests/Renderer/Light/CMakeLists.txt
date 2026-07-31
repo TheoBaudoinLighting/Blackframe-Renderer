@@ -1,5 +1,7 @@
 add_executable(
     BlackframeRendererLightTests
+    AreaLightImageTest.cpp
+    AreaLightsTest.cpp
     LightTest.cpp
     PunctualLightImageTest.cpp
     PunctualLightsTest.cpp
@@ -42,6 +44,22 @@ gtest_discover_tests(
 )
 
 if(TARGET Blackframe::Png)
+    add_test(
+        NAME Blackframe.AreaLightPdfSidednessAtlas
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeRendererLightTests>"
+            "-DGTEST_FILTER=AreaLightImageTest.WritesStablePdfAndSidednessAtlas"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-area-light-pdf-sides.png"
+            "-DEXPECTED_SHA256=744d033adce3da1b10e29326b1e6675964f9a7313aa71aedf60bf62d85b90d98"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../PngChecksumTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.AreaLightPdfSidednessAtlas
+        PROPERTIES
+            LABELS "regression;cpu"
+    )
+
     add_test(
         NAME Blackframe.PunctualLightResponseAtlas
         COMMAND

@@ -542,13 +542,15 @@ using ReferenceIncidentLightSample = IncidentLightSampleT<ReferenceScalar>;
 // component that will select heterogeneous lights.
 //
 // sample_li consumes a canonical sample in [0, 1)^2 and returns Li with a
-// conditional solid-angle density, or a discrete probability for a delta
-// light. A successful empty result is reserved for valid samples outside the
-// light's support or with zero contribution; an unavailable implementation
-// must return an explicit error. pdf_li consumes a world-space unit direction
-// and always returns a solid-angle density; a delta light reports exactly zero
-// in that measure.
-// Both operations receive the path's validated four-wavelength packet. le
+// conditional solid-angle density for its explicit endpoint, or a discrete
+// probability for a delta light. A successful empty result is reserved for
+// valid samples outside the light's support or with zero contribution; an
+// unavailable implementation must return an explicit error. pdf_li consumes a
+// world-space unit direction and always returns a solid-angle density for the
+// closest geometric surface along that direction; it may be zero when that
+// surface is outside the emitter's directional support. A delta light reports
+// exactly zero in solid-angle measure. Both operations receive the path's
+// validated four-wavelength packet. le
 // evaluates only radiance carried by an escaped ray; hit-surface emission
 // remains owned by OneSidedSurfaceEmission. Returned radiance is evaluated at
 // the packet wavelengths and is not divided by their wavelength PDFs. power

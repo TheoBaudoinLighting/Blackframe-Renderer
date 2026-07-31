@@ -1,6 +1,7 @@
 add_library(
     BlackframeRenderer
     STATIC
+        Include/Blackframe/Renderer/AreaLights.hpp
         Include/Blackframe/Renderer/BasicSpectra.hpp
         Include/Blackframe/Renderer/Bounds.hpp
         Include/Blackframe/Renderer/BsdfOnlyPathLoop.hpp
@@ -9,6 +10,7 @@ add_library(
         Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
         Include/Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp
+        Include/Blackframe/Renderer/Detail/PacketLightSpectrum.hpp
         Include/Blackframe/Renderer/Disk.hpp
         Include/Blackframe/Renderer/DisplayPsnr.hpp
         Include/Blackframe/Renderer/DisplayTransform.hpp
