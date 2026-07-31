@@ -25,6 +25,13 @@ TEST(AnalyticAccelBackendTest, ResolvesHierarchicalInstancesInWorldSpace) {
     test::expect_instanced_closest_hits(**backend, AccelBackendKind::analytic_reference);
 }
 
+TEST(AnalyticAccelBackendTest, EvaluatesAnyHitShadowsAndVisibilityMasks) {
+    auto backend = create_analytic_accel_backend(test::make_instanced_scene());
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+
+    test::expect_instanced_occlusion(**backend, AccelBackendKind::analytic_reference);
+}
+
 TEST(AnalyticAccelBackendTest, RejectsMissingScenesAndUnrepresentableInstances) {
     const auto missing = create_analytic_accel_backend({});
     ASSERT_FALSE(missing.has_value());

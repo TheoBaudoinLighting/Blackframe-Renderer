@@ -38,9 +38,10 @@ silently selecting another path.
   masks. The deterministic analytic oracle transforms rays into object space. The pinned Embree
   implementation shares one triangle BLAS per geometry and registers each logical instance in a
   compact TLAS using its resolved world transform; logical parent chains are flattened only after
-  deterministic hierarchy resolution. Both implementations are selected through distinct factories
-  returning the same interface, and backend failures or unsupported Embree requirements are reported
-  without analytic substitution.
+  deterministic hierarchy resolution. Shadow rays use direct Embree any-hit traversal over that
+  TLAS, with 32-bit ray and per-instance visibility masks. Both implementations are selected through
+  distinct factories returning the same interface, and backend failures or unsupported Embree
+  requirements are reported without analytic substitution.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar

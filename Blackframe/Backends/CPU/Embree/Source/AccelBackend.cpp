@@ -563,17 +563,19 @@ class EmbreeAccelBackend final : public AccelBackend {
             return std::unexpected(validation.error());
         }
 
-        auto query_ray = embree_ray(ray);
+        auto shadow_ray = embree_ray(ray);
         auto arguments = RTCOccludedArguments{};
         rtcInitOccludedArguments(&arguments);
-        rtcOccluded1(scene_.get(), &query_ray, &arguments);
-        if (auto status = check_embree(device_.get(), "tracing an occlusion query"); !status) {
+        // Keep shadows on Embree's opaque any-hit path: no closest-hit data is
+        // reconstructed and the first eligible crossing terminates traversal.
+        rtcOccluded1(scene_.get(), &shadow_ray, &arguments);
+        if (auto status = check_embree(device_.get(), "tracing an any-hit shadow query"); !status) {
             return std::unexpected(status.error());
         }
-        if (std::isinf(query_ray.tfar) && std::signbit(query_ray.tfar)) {
+        if (std::isinf(shadow_ray.tfar) && std::signbit(shadow_ray.tfar)) {
             return true;
         }
-        if (query_ray.tfar == ray.t_max()) {
+        if (shadow_ray.tfar == ray.t_max()) {
             return false;
         }
         return std::unexpected(

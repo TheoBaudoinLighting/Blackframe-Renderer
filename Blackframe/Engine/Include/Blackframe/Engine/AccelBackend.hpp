@@ -44,7 +44,10 @@ struct AccelHit final {
 // factory. Ray time must be normalized to [0, 1]. A coplanar triangle does not
 // define a surface crossing and is skipped; every other numerical or backend
 // failure remains an explicit error. A miss is represented by an empty
-// optional or false.
+// optional or false. An instance is eligible only when
+// (ray.mask() & visibility_mask) != 0, so a zero ray mask sees no instances.
+// occluded() is an opaque any-hit query that returns at the first crossing in
+// the closed [tMin, tMax] interval without reconstructing surface data.
 class AccelBackend {
   public:
     virtual ~AccelBackend() noexcept = default;

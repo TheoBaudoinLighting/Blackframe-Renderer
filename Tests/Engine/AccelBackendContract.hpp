@@ -19,6 +19,9 @@ namespace blackframe::engine::test {
 
 inline constexpr auto BackVisibility = renderer::RayMask{1U << 0U};
 inline constexpr auto FrontVisibility = renderer::RayMask{1U << 1U};
+inline constexpr auto NearShadowVisibility = renderer::RayMask{1U << 2U};
+inline constexpr auto FarShadowVisibility = renderer::RayMask{1U << 3U};
+inline constexpr auto HierarchyVisibility = renderer::RayMask{1U << 4U};
 
 [[nodiscard]] inline renderer::Matrix4 identity_transform_matrix() {
     return renderer::identity_matrix<renderer::TransportScalar>();
@@ -252,6 +255,7 @@ make_triangle_mesh_with_leading_miss(const float z) {
                                 .geometry = geometry_id,
                                 .material = {.value = 220U},
                                 .local_to_parent = scale,
+                                .visibility_mask = NearShadowVisibility,
                             },
                             SceneInstance{
                                 .id = {.value = 40U},
@@ -260,6 +264,7 @@ make_triangle_mesh_with_leading_miss(const float z) {
                                 .geometry = geometry_id,
                                 .material = {.value = 240U},
                                 .local_to_parent = far_transform,
+                                .visibility_mask = FarShadowVisibility,
                             },
                             SceneInstance{
                                 .id = {.value = 30U},
@@ -269,6 +274,7 @@ make_triangle_mesh_with_leading_miss(const float z) {
                                 .material = {.value = 230U},
                                 .local_to_parent =
                                     translation_matrix(renderer::Vector3{.x = 10.0F}),
+                                .visibility_mask = HierarchyVisibility,
                             },
                             SceneInstance{
                                 .id = {.value = 10U},
@@ -277,6 +283,7 @@ make_triangle_mesh_with_leading_miss(const float z) {
                                 .geometry = geometry_id,
                                 .material = {.value = 210U},
                                 .local_to_parent = rotation,
+                                .visibility_mask = HierarchyVisibility,
                             },
                         },
                 });
@@ -420,6 +427,95 @@ inline void expect_empty_backend(const AccelBackend& backend,
         make_ray(renderer::Point3{.x = 9.25F, .y = -0.5F, .z = -7.0F}, renderer::Vector3{.z = 2.0F},
                  5.0F),
     };
+}
+
+struct OcclusionExpectation final {
+    const char* name;
+    renderer::Ray ray;
+    bool expected;
+};
+
+[[nodiscard]] inline std::array<OcclusionExpectation, 10> instanced_scene_occlusion_expectations() {
+    const auto origin = renderer::Point3{.x = 9.25F, .y = -0.5F, .z = -7.0F};
+    const auto direction = renderer::Vector3{.z = 2.0F};
+    const auto infinity = std::numeric_limits<float>::infinity();
+    constexpr auto unrelated_visibility = renderer::RayMask{1U << 8U};
+
+    return {
+        OcclusionExpectation{
+            .name = "all visibility reaches the near blocker",
+            .ray = make_ray(origin, direction),
+            .expected = true,
+        },
+        OcclusionExpectation{
+            .name = "near visibility selects the near blocker",
+            .ray = make_ray(origin, direction, 0.0F, infinity, NearShadowVisibility),
+            .expected = true,
+        },
+        OcclusionExpectation{
+            .name = "far visibility skips near and reaches far",
+            .ray = make_ray(origin, direction, 0.0F, infinity, FarShadowVisibility),
+            .expected = true,
+        },
+        OcclusionExpectation{
+            .name = "combined visibility reaches an eligible blocker",
+            .ray = make_ray(origin, direction, 0.0F, infinity,
+                            NearShadowVisibility | FarShadowVisibility),
+            .expected = true,
+        },
+        OcclusionExpectation{
+            .name = "unrelated visibility sees no blocker",
+            .ray = make_ray(origin, direction, 0.0F, infinity, unrelated_visibility),
+            .expected = false,
+        },
+        OcclusionExpectation{
+            .name = "zero visibility sees no instance",
+            .ray = make_ray(origin, direction, 0.0F, infinity, renderer::RayMask{}),
+            .expected = false,
+        },
+        OcclusionExpectation{
+            .name = "finite segment includes the near blocker",
+            .ray = make_ray(origin, direction, 0.0F, 6.0F, NearShadowVisibility),
+            .expected = true,
+        },
+        OcclusionExpectation{
+            .name = "finite segment excludes the far blocker",
+            .ray = make_ray(origin, direction, 0.0F, 6.0F, FarShadowVisibility),
+            .expected = false,
+        },
+        OcclusionExpectation{
+            .name = "late segment excludes the near blocker",
+            .ray = make_ray(origin, direction, 5.0F, infinity, NearShadowVisibility),
+            .expected = false,
+        },
+        OcclusionExpectation{
+            .name = "late segment reaches the far blocker",
+            .ray = make_ray(origin, direction, 5.0F, infinity, FarShadowVisibility),
+            .expected = true,
+        },
+    };
+}
+
+inline void expect_instanced_occlusion(const AccelBackend& backend,
+                                       const AccelBackendKind expected_kind) {
+    EXPECT_EQ(backend.kind(), expected_kind);
+    for (const auto& expectation : instanced_scene_occlusion_expectations()) {
+        SCOPED_TRACE(expectation.name);
+        const auto result = backend.occluded(expectation.ray);
+        ASSERT_TRUE(result.has_value()) << result.error().message;
+        EXPECT_EQ(*result, expectation.expected);
+    }
+}
+
+inline void expect_occlusion_parity(const AccelBackend& analytic, const AccelBackend& embree) {
+    for (const auto& expectation : instanced_scene_occlusion_expectations()) {
+        SCOPED_TRACE(expectation.name);
+        const auto reference = analytic.occluded(expectation.ray);
+        const auto accelerated = embree.occluded(expectation.ray);
+        ASSERT_TRUE(reference.has_value()) << reference.error().message;
+        ASSERT_TRUE(accelerated.has_value()) << accelerated.error().message;
+        EXPECT_EQ(*accelerated, *reference);
+    }
 }
 
 inline void expect_instanced_closest_hits(const AccelBackend& backend,

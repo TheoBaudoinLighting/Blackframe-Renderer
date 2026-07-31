@@ -65,6 +65,18 @@ TEST(AccelBackendParityTest, MatchesAnalyticClosestHitsForHierarchicalInstances)
     test::expect_closest_hit_parity(**analytic, **embree);
 }
 
+TEST(AccelBackendParityTest, MatchesAnalyticAnyHitShadowsAndVisibilityMasks) {
+    const auto scene = test::make_instanced_scene();
+    auto analytic = create_analytic_accel_backend(scene);
+    ASSERT_TRUE(analytic.has_value()) << analytic.error().message;
+    auto embree = create_embree_accel_backend(scene);
+    ASSERT_TRUE(embree.has_value()) << embree.error().message;
+
+    test::expect_instanced_occlusion(**analytic, AccelBackendKind::analytic_reference);
+    test::expect_instanced_occlusion(**embree, AccelBackendKind::embree);
+    test::expect_occlusion_parity(**analytic, **embree);
+}
+
 TEST(EmbreeAccelBackendTest, RejectsMissingScenesAndUnrepresentableInstances) {
     const auto missing = create_embree_accel_backend({});
     ASSERT_FALSE(missing.has_value());
