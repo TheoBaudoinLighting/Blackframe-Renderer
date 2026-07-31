@@ -68,7 +68,15 @@ if(benchmark_count LESS 1)
     message(FATAL_ERROR "Benchmark JSON contains no measurements.")
 endif()
 
-set(required_benchmarks encode_ping decode_ping)
+set(
+    required_benchmarks
+    encode_ping
+    decode_ping
+    build_light_tree/16
+    sample_light_tree/16
+    query_light_tree_probability/16
+    sample_power_sampler/16
+)
 math(EXPR last_benchmark_index "${benchmark_count} - 1")
 foreach(benchmark_index RANGE 0 ${last_benchmark_index})
     string(JSON benchmark_type TYPE "${benchmark_json}" benchmarks ${benchmark_index})

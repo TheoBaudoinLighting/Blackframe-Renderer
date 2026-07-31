@@ -64,7 +64,8 @@ silently selecting another path.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power
-  light-selection distributions. No global mutable RNG is used.
+  light-selection distributions plus context-dependent Light Tree selection. No global mutable RNG
+  is used.
 - **Spectral and color foundations:** four-lane 360-830 nm wavelength packets with marginal PDFs,
   black, constant, and tabulated spectra, `SampledSpectrum<4>`, energy-conserving spectral
   Lambertian reflection, one-sided spectral surface emission, a constant spectral environment, the
@@ -81,8 +82,11 @@ silently selecting another path.
   report conservative finite support bounds. Packet-bound latitude-longitude environment maps
   support explicit quaternion rotation and a normalized two-dimensional importance distribution
   built from spectral packet radiance and exact texel solid angles. The light sampler selects stable
-  registry slots uniformly or by normalized four-lane spectral power, retaining an explicit
-  discrete probability separate from each selected light's conditional PDF.
+  registry slots uniformly, by normalized four-lane spectral power, or through an immutable
+  spatial Light Tree. The tree builds a deterministic median BVH over finite emitters, isolates
+  canonically unbounded lights, and normalizes a context-dependent power-and-distance heuristic
+  without changing registry slots. Its discrete probability remains separate from each selected
+  light's conditional PDF.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.

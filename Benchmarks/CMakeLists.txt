@@ -1,4 +1,5 @@
 add_subdirectory(IPC)
+add_subdirectory(Renderer)
 
 add_custom_target(BlackframeBenchmarks)
 add_dependencies(BlackframeBenchmarks BlackframeRenderBenchmarks)

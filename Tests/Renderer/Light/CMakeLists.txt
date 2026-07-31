@@ -6,6 +6,8 @@ add_executable(
     EnvironmentLightsTest.cpp
     LightSamplerImageTest.cpp
     LightSamplerTest.cpp
+    LightTreeImageTest.cpp
+    LightTreeTest.cpp
     LightTest.cpp
     PunctualLightImageTest.cpp
     PunctualLightsTest.cpp
@@ -116,6 +118,26 @@ if(TARGET Blackframe::Png)
     )
     set_tests_properties(
         Blackframe.LightSamplerSelectionAtlas
+        PROPERTIES
+            LABELS "regression;cpu"
+    )
+
+    set(
+        blackframe_light_tree_atlas_sha256
+        "34e7f57593259e738a90a8de0c2040b25d37051616e49eb7d528e7a669498982"
+    )
+    add_test(
+        NAME Blackframe.LightTreeDistributionAtlas
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeRendererLightTests>"
+            "-DGTEST_FILTER=LightTreeImageTest.WritesStableNormalizedDistributionAtlas"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-light-tree-distribution.png"
+            "-DEXPECTED_SHA256=${blackframe_light_tree_atlas_sha256}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../PngChecksumTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.LightTreeDistributionAtlas
         PROPERTIES
             LABELS "regression;cpu"
     )
