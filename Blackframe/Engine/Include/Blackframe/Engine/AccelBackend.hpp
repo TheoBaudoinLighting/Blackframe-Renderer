@@ -42,6 +42,9 @@ struct AccelInstance final {
     renderer::RayMask visibility_mask{renderer::AllRayVisibility};
 };
 
+// triangle.position is the exact value returned by the source ray's at()
+// operation at triangle.parameter. Surface reconstruction validates this
+// backend-neutral contract before using the remaining hit data.
 struct AccelHit final {
     renderer::ObjectId object;
     renderer::TriangleHit triangle;
@@ -83,6 +86,7 @@ class AccelBackend {
     [[nodiscard]] virtual core::Status refit(FrameSceneHandle scene) = 0;
 
     [[nodiscard]] virtual AccelBuildStatistics build_statistics() const noexcept;
+    [[nodiscard]] FrameSceneHandle frame_scene() const noexcept;
 
   protected:
     explicit AccelBackend(FrameSceneHandle scene) noexcept;

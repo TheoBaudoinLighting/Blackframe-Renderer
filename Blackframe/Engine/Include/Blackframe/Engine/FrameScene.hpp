@@ -4,7 +4,9 @@
 #include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
+#include <Blackframe/Renderer/Spectrum.hpp>
 #include <Blackframe/Renderer/Transforms.hpp>
+#include <Blackframe/Renderer/WavelengthSampling.hpp>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -27,10 +29,31 @@ struct SceneGeometry final {
     [[nodiscard]] bool operator==(const SceneGeometry&) const noexcept = default;
 };
 
+// The current scalar transport resolves its only supported surface closure
+// (Lambertian reflection plus one-sided emission) at one explicit wavelength
+// packet. Wavelength-resolved values stay in the immutable scene record;
+// construction validates them before a render can observe the snapshot.
+struct SceneSpectralMaterial final {
+    renderer::SampledWavelengths wavelengths{};
+    renderer::TransportSpectrum reflectance{};
+    renderer::TransportSpectrum emitted_radiance{};
+
+    [[nodiscard]] constexpr bool operator==(const SceneSpectralMaterial&) const noexcept = default;
+};
+
 struct SceneMaterial final {
     renderer::MaterialId id{};
+    std::optional<SceneSpectralMaterial> spectral{std::nullopt};
 
     [[nodiscard]] constexpr bool operator==(const SceneMaterial&) const noexcept = default;
+};
+
+struct SceneSpectralEnvironment final {
+    renderer::SampledWavelengths wavelengths{};
+    renderer::TransportSpectrum radiance{};
+
+    [[nodiscard]] constexpr bool
+    operator==(const SceneSpectralEnvironment&) const noexcept = default;
 };
 
 // Objects are logical identities. An instance owns the graph edges that bind
@@ -55,6 +78,7 @@ struct FrameSceneDescription final {
     std::vector<SceneGeometry> geometries;
     std::vector<SceneMaterial> materials;
     std::vector<SceneInstance> instances;
+    std::optional<SceneSpectralEnvironment> spectral_environment{std::nullopt};
 };
 
 class FrameScene;
@@ -80,6 +104,8 @@ class FrameScene final {
     [[nodiscard]] std::span<const SceneGeometry> geometries() const noexcept;
     [[nodiscard]] std::span<const SceneMaterial> materials() const noexcept;
     [[nodiscard]] std::span<const SceneInstance> instances() const noexcept;
+    [[nodiscard]] const std::optional<SceneSpectralEnvironment>&
+    spectral_environment() const noexcept;
 
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneObject>>
     object(renderer::ObjectId id) const;
@@ -103,6 +129,7 @@ class FrameScene final {
     std::vector<SceneGeometry> geometries_;
     std::vector<SceneMaterial> materials_;
     std::vector<SceneInstance> instances_;
+    std::optional<SceneSpectralEnvironment> spectral_environment_;
     std::vector<renderer::AffineTransform> local_transforms_;
     std::vector<renderer::AffineTransform> world_transforms_;
 };

@@ -192,6 +192,10 @@ AccelBuildStatistics AccelBackend::build_statistics() const noexcept {
     return build_statistics_;
 }
 
+FrameSceneHandle AccelBackend::frame_scene() const noexcept {
+    return scene_;
+}
+
 core::Result<std::vector<AccelInstance>>
 AccelBackend::prepare_instances(const FrameSceneHandle& scene) {
     if (!scene) {
@@ -274,10 +278,12 @@ core::Status AccelBackend::validate_refit_scene(const FrameSceneHandle& scene) c
             accel_error(core::StatusCode::incompatible,
                         "Acceleration refit cannot change geometry identifiers or meshes."));
     }
-    if (!std::ranges::equal(scene_->materials(), scene->materials())) {
+    if (!std::ranges::equal(scene_->materials(), scene->materials()) ||
+        scene_->spectral_environment() != scene->spectral_environment()) {
         return std::unexpected(
             accel_error(core::StatusCode::incompatible,
-                        "Acceleration refit cannot change the frame scene material identifiers."));
+                        "Acceleration refit cannot change frame scene material or environment "
+                        "records."));
     }
     if (!std::ranges::equal(scene_->instances(), scene->instances(),
                             [](const SceneInstance& left, const SceneInstance& right) {

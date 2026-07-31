@@ -1,4 +1,7 @@
 #include <Blackframe/Engine/FrameScene.hpp>
+#include <Blackframe/Renderer/Emission.hpp>
+#include <Blackframe/Renderer/LambertianReflection.hpp>
+#include <Blackframe/Renderer/PathState.hpp>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -77,6 +80,60 @@ struct ResolvedInstanceTransforms final {
     std::vector<renderer::AffineTransform> local;
     std::vector<renderer::AffineTransform> world;
 };
+
+[[nodiscard]] core::Status validate_spectral_transport(const FrameSceneDescription& description) {
+    if (!description.spectral_environment) {
+        const auto material_with_transport =
+            std::ranges::find_if(description.materials, [](const SceneMaterial& material) {
+                return material.spectral.has_value();
+            });
+        if (material_with_transport != description.materials.end()) {
+            return std::unexpected(scene_error(
+                core::StatusCode::invalid_argument,
+                "A frame scene cannot contain spectral materials without an explicit spectral "
+                "environment."));
+        }
+        return {};
+    }
+
+    const auto& environment = *description.spectral_environment;
+    const auto wavelength_state =
+        renderer::PathState::create_initial(environment.wavelengths, renderer::VacuumMedium);
+    if (!wavelength_state) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene spectral environment requires a valid wavelength packet."));
+    }
+    if (!renderer::ConstantEnvironment::create(environment.radiance)) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A frame scene spectral environment requires finite non-negative radiance."));
+    }
+
+    for (const auto& material : description.materials) {
+        if (!material.spectral) {
+            return std::unexpected(
+                scene_error(core::StatusCode::invalid_argument,
+                            "A renderable frame scene requires spectral data for every material."));
+        }
+        if (material.spectral->wavelengths != environment.wavelengths) {
+            return std::unexpected(scene_error(
+                core::StatusCode::invalid_argument,
+                "Frame scene materials and environment must use the same wavelength packet."));
+        }
+        if (!renderer::LambertianReflection::create(material.spectral->reflectance)) {
+            return std::unexpected(
+                scene_error(core::StatusCode::invalid_argument,
+                            "A frame scene material requires finite reflectance lanes in [0, 1]."));
+        }
+        if (!renderer::OneSidedSurfaceEmission::create(material.spectral->emitted_radiance)) {
+            return std::unexpected(scene_error(
+                core::StatusCode::invalid_argument,
+                "A frame scene material requires finite non-negative emitted radiance."));
+        }
+    }
+    return {};
+}
 
 [[nodiscard]] core::Result<ResolvedInstanceTransforms>
 resolve_instance_transforms(const std::vector<SceneInstance>& instances) {
@@ -253,6 +310,10 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
             }
         }
 
+        if (auto status = validate_spectral_transport(description); !status) {
+            return std::unexpected(std::move(status.error()));
+        }
+
         auto transforms = resolve_instance_transforms(description.instances);
         if (!transforms) {
             return std::unexpected(std::move(transforms.error()));
@@ -274,6 +335,7 @@ FrameScene::FrameScene(FrameSceneDescription&& description,
                        std::vector<renderer::AffineTransform>&& world_transforms) noexcept
     : objects_{std::move(description.objects)}, geometries_{std::move(description.geometries)},
       materials_{std::move(description.materials)}, instances_{std::move(description.instances)},
+      spectral_environment_{std::move(description.spectral_environment)},
       local_transforms_{std::move(local_transforms)},
       world_transforms_{std::move(world_transforms)} {}
 
@@ -291,6 +353,10 @@ std::span<const SceneMaterial> FrameScene::materials() const noexcept {
 
 std::span<const SceneInstance> FrameScene::instances() const noexcept {
     return instances_;
+}
+
+const std::optional<SceneSpectralEnvironment>& FrameScene::spectral_environment() const noexcept {
+    return spectral_environment_;
 }
 
 core::Result<std::reference_wrapper<const SceneObject>>

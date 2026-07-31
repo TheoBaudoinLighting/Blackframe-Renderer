@@ -8,6 +8,7 @@ add_library(
         Include/Blackframe/Renderer/Cie1931Sensor.hpp
         Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
+        Include/Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp
         Include/Blackframe/Renderer/Disk.hpp
         Include/Blackframe/Renderer/DisplayPsnr.hpp
         Include/Blackframe/Renderer/DisplayTransform.hpp

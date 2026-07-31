@@ -3,9 +3,13 @@ add_library(
     STATIC
         Include/Blackframe/Engine/AccelBackend.hpp
         Include/Blackframe/Engine/FrameScene.hpp
+        Include/Blackframe/Engine/SceneBsdfOnlyPathLoop.hpp
+        Include/Blackframe/Engine/SceneSurfaceInteraction.hpp
         Include/Blackframe/Engine/TriangleMesh.hpp
         Source/AccelBackend.cpp
         Source/FrameScene.cpp
+        Source/SceneBsdfOnlyPathLoop.cpp
+        Source/SceneSurfaceInteraction.cpp
         Source/TriangleMesh.cpp
 )
 add_library(Blackframe::SceneGeometry ALIAS BlackframeSceneGeometry)

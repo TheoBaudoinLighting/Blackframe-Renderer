@@ -1,450 +1,166 @@
 #include <Blackframe/Renderer/BsdfOnlyPathLoop.hpp>
-#include <Blackframe/Renderer/LocalFrame.hpp>
-#include <Blackframe/Renderer/RayOriginOffset.hpp>
-#include <Blackframe/Renderer/SampleDimensionMap.hpp>
+#include <Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <limits>
 #include <optional>
-#include <utility>
+#include <span>
 
 namespace blackframe::renderer {
 namespace {
 
-[[nodiscard]] core::Error path_loop_error(const char* const message) {
-    return core::Error{
-        .code = core::StatusCode::invalid_argument,
-        .message = message,
-    };
-}
+template <SpectrumScalar Scalar> struct LinearSurfaceHit final {
+    const BsdfOnlyTriangleSurfaceT<Scalar>* surface;
+    TriangleHitT<Scalar> triangle_hit;
+    Point3T<Scalar> reconstructed_position;
+    Vector3T<Scalar> absolute_error;
 
-template <SpectrumScalar Scalar>
-using PathSpectrum = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] bool finite_non_negative(const PathSpectrum<Scalar>& spectrum) noexcept {
-    for (const auto value : spectrum.values) {
-        if (!std::isfinite(value) || value < Scalar{0}) {
-            return false;
-        }
-    }
-    return true;
-}
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] bool zero_spectrum(const PathSpectrum<Scalar>& spectrum) noexcept {
-    for (const auto value : spectrum.values) {
-        if (value != Scalar{0}) {
-            return false;
-        }
-    }
-    return true;
-}
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<PathSpectrum<Scalar>> checked_product(const PathSpectrum<Scalar>& left,
-                                                                 const PathSpectrum<Scalar>& right,
-                                                                 const char* const error_message) {
-    auto result = PathSpectrum<Scalar>{};
-    for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
-        result[lane] = left[lane] * right[lane];
-        if (!std::isfinite(result[lane]) ||
-            (left[lane] != Scalar{0} && right[lane] != Scalar{0} && result[lane] == Scalar{0})) {
-            return std::unexpected(path_loop_error(error_message));
-        }
-    }
-    return result;
-}
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<PathSpectrum<Scalar>>
-accumulate_emission(const PathSpectrum<Scalar>& accumulated, const PathSpectrum<Scalar>& throughput,
-                    const PathSpectrum<Scalar>& emitted_radiance) {
-    const auto contribution =
-        checked_product(throughput, emitted_radiance,
-                        "BSDF-only emitted-radiance multiplication is not representable.");
-    if (!contribution.has_value()) {
-        return std::unexpected(contribution.error());
+    [[nodiscard]] constexpr const Normal3T<Scalar>& geometric_normal() const noexcept {
+        return triangle_hit.geometric_normal;
     }
 
-    auto result = PathSpectrum<Scalar>{};
-    for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
-        result[lane] = accumulated[lane] + (*contribution)[lane];
-        if (!std::isfinite(result[lane])) {
-            return std::unexpected(
-                path_loop_error("BSDF-only radiance accumulation is not representable."));
-        }
-    }
-    return result;
-}
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<Vector3T<Scalar>>
-robust_unit_direction(const Vector3T<Scalar> direction) {
-    if (!std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z)) {
-        return std::unexpected(path_loop_error("A BSDF-only path direction must remain finite."));
+    [[nodiscard]] constexpr const LambertianReflectionT<Scalar>& reflection() const noexcept {
+        return surface->reflection();
     }
 
-    const auto maximum_component =
-        std::max({std::abs(direction.x), std::abs(direction.y), std::abs(direction.z)});
-    if (maximum_component == Scalar{0}) {
-        return std::unexpected(path_loop_error("A BSDF-only path direction must remain non-zero."));
+    [[nodiscard]] constexpr const OneSidedSurfaceEmissionT<Scalar>& emission() const noexcept {
+        return surface->emission();
     }
 
-    const auto scaled = direction / maximum_component;
-    const auto magnitude = std::sqrt(length_squared(scaled));
-    const auto result = scaled / magnitude;
-    if (!std::isfinite(result.x) || !std::isfinite(result.y) || !std::isfinite(result.z)) {
-        return std::unexpected(
-            path_loop_error("BSDF-only path normalization is not representable."));
+    [[nodiscard]] constexpr const Point3T<Scalar>& position() const noexcept {
+        return reconstructed_position;
     }
-    return result;
-}
 
-template <SpectrumScalar Scalar> struct ResolvedTriangleHit final {
+    [[nodiscard]] constexpr const Vector3T<Scalar>& position_error() const noexcept {
+        return absolute_error;
+    }
+};
+
+template <SpectrumScalar Scalar> struct LinearHitCandidate final {
     const BsdfOnlyTriangleSurfaceT<Scalar>* surface;
     TriangleHitT<Scalar> hit;
 };
 
 template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<std::optional<ResolvedTriangleHit<Scalar>>>
-closest_hit(const RayT<Scalar>& ray,
-            const std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces) {
-    auto nearest = std::optional<ResolvedTriangleHit<Scalar>>{};
-    for (const auto& surface : surfaces) {
-        if ((ray.mask() & surface.visibility_mask()) == 0) {
-            continue;
-        }
-
-        const auto intersection = surface.triangle().intersect(ray);
-        if (!intersection.has_value()) {
-            return std::unexpected(intersection.error());
-        }
-        if (intersection->has_value() &&
-            (!nearest.has_value() || (**intersection).parameter < nearest->hit.parameter)) {
-            nearest = ResolvedTriangleHit<Scalar>{
-                .surface = &surface,
-                .hit = **intersection,
-            };
-        }
-    }
-    return nearest;
-}
-
-template <SpectrumScalar Scalar> struct TrianglePositionWithError final {
-    Point3T<Scalar> point;
-    Vector3T<Scalar> absolute_error;
-};
-
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<TrianglePositionWithError<Scalar>>
-triangle_position_with_error(const ResolvedTriangleHit<Scalar>& resolved) {
+[[nodiscard]] core::Result<std::pair<Point3T<Scalar>, Vector3T<Scalar>>>
+triangle_position_with_error(const LinearHitCandidate<Scalar>& resolved) {
     constexpr auto epsilon = std::numeric_limits<Scalar>::epsilon();
     constexpr auto gamma7 = (Scalar{7} * epsilon) / (Scalar{1} - Scalar{7} * epsilon);
-
     const auto& vertices = resolved.surface->triangle().vertices();
-    const auto barycentrics = std::array{
-        resolved.hit.barycentrics.vertex0,
-        resolved.hit.barycentrics.vertex1,
-        resolved.hit.barycentrics.vertex2,
-    };
-    const auto vertex_coordinates = std::array{
+    const auto barycentrics =
+        std::array{resolved.hit.barycentrics.vertex0, resolved.hit.barycentrics.vertex1,
+                   resolved.hit.barycentrics.vertex2};
+    const auto coordinates = std::array{
         std::array{vertices[0].x, vertices[0].y, vertices[0].z},
         std::array{vertices[1].x, vertices[1].y, vertices[1].z},
         std::array{vertices[2].x, vertices[2].y, vertices[2].z},
     };
+
     auto triangle_scale = Scalar{0};
-    for (auto axis = std::size_t{0}; axis < std::size_t{3}; ++axis) {
-        triangle_scale = std::max(
-            {triangle_scale, std::abs(vertex_coordinates[1][axis] - vertex_coordinates[0][axis]),
-             std::abs(vertex_coordinates[2][axis] - vertex_coordinates[0][axis])});
+    for (auto axis = std::size_t{0}; axis < 3U; ++axis) {
+        triangle_scale =
+            std::max({triangle_scale, std::abs(coordinates[1][axis] - coordinates[0][axis]),
+                      std::abs(coordinates[2][axis] - coordinates[0][axis])});
     }
     const auto representable_floor = epsilon * triangle_scale;
     if (!std::isfinite(triangle_scale) || !std::isfinite(representable_floor) ||
         !(representable_floor > Scalar{0})) {
-        return std::unexpected(
-            path_loop_error("The BSDF-only triangle position-error scale is not representable."));
+        return std::unexpected(bsdf_only_path_loop_detail::path_loop_error(
+            "The BSDF-only triangle position-error scale is not representable."));
     }
 
-    auto point_components = std::array<Scalar, 3>{};
-    auto error_components = std::array<Scalar, 3>{};
-    for (auto axis = std::size_t{0}; axis < point_components.size(); ++axis) {
-        const auto products = std::array{barycentrics[0] * vertex_coordinates[0][axis],
-                                         barycentrics[1] * vertex_coordinates[1][axis],
-                                         barycentrics[2] * vertex_coordinates[2][axis]};
-        point_components[axis] =
-            std::fma(barycentrics[0], vertex_coordinates[0][axis],
-                     std::fma(barycentrics[1], vertex_coordinates[1][axis], products[2]));
-
-        auto interpolation_magnitude = Scalar{0};
-        for (const auto product : products) {
-            interpolation_magnitude += std::abs(product);
-        }
-        // Exact zero coordinates still need a normal-range displacement for the watertight
-        // predicate. The floor comes from this triangle's edge scale and the active format.
-        error_components[axis] = std::max(gamma7 * interpolation_magnitude, representable_floor);
-        if (!std::isfinite(point_components[axis]) || !std::isfinite(interpolation_magnitude) ||
-            !std::isfinite(error_components[axis]) || error_components[axis] < Scalar{0}) {
-            return std::unexpected(path_loop_error(
+    auto point = std::array<Scalar, 3>{};
+    auto error = std::array<Scalar, 3>{};
+    for (auto axis = std::size_t{0}; axis < 3U; ++axis) {
+        const auto products = std::array{barycentrics[0] * coordinates[0][axis],
+                                         barycentrics[1] * coordinates[1][axis],
+                                         barycentrics[2] * coordinates[2][axis]};
+        point[axis] = std::fma(barycentrics[0], coordinates[0][axis],
+                               std::fma(barycentrics[1], coordinates[1][axis], products[2]));
+        const auto interpolation_magnitude =
+            std::abs(products[0]) + std::abs(products[1]) + std::abs(products[2]);
+        error[axis] = std::max(gamma7 * interpolation_magnitude, representable_floor);
+        if (!std::isfinite(point[axis]) || !std::isfinite(interpolation_magnitude) ||
+            !std::isfinite(error[axis]) || error[axis] < Scalar{0}) {
+            return std::unexpected(bsdf_only_path_loop_detail::path_loop_error(
                 "The BSDF-only triangle position reconstruction is not representable."));
         }
     }
 
-    return TrianglePositionWithError<Scalar>{
-        .point =
-            {
-                .x = point_components[0],
-                .y = point_components[1],
-                .z = point_components[2],
-            },
-        .absolute_error =
-            {
-                .x = error_components[0],
-                .y = error_components[1],
-                .z = error_components[2],
-            },
+    return std::pair{
+        Point3T<Scalar>{.x = point[0], .y = point[1], .z = point[2]},
+        Vector3T<Scalar>{.x = error[0], .y = error[1], .z = error[2]},
     };
 }
 
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<BsdfOnlyPathResultT<Scalar>>
-make_result(const PathSpectrum<Scalar>& beta, const PathSpectrum<Scalar>& radiance,
-            const std::uint32_t depth, const Scalar eta_scale,
-            const SampledWavelengthsT<Scalar>& wavelengths, const PathDeltaFlags delta_flags,
-            const MediumId current_medium, const PathDepthLimits& depth_limits,
-            const PathDepthCounters& depth_counters, const RayT<Scalar>& terminal_ray,
-            const BsdfOnlyPathTermination termination, const ScatteringLobe blocked_depth_limits) {
-    const auto depth_status = validate_path_depth_state(depth_limits, depth_counters, depth);
-    if (!depth_status.has_value()) {
-        return std::unexpected(depth_status.error());
-    }
-    const auto state = PathStateT<Scalar>::create(beta, radiance, depth_counters, eta_scale,
-                                                  wavelengths, delta_flags, current_medium);
-    if (!state.has_value()) {
-        return std::unexpected(state.error());
-    }
-    return BsdfOnlyPathResultT<Scalar>{
-        .state = *state,
-        .terminal_ray = terminal_ray,
-        .termination = termination,
-        .blocked_depth_limits = blocked_depth_limits,
-    };
-}
+template <SpectrumScalar Scalar> class LinearSurfaceQuery final {
+  public:
+    explicit LinearSurfaceQuery(const std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces)
+        : surfaces_{surfaces} {}
 
-template <SpectrumScalar Scalar>
-[[nodiscard]] core::Result<BsdfOnlyPathResultT<Scalar>>
-trace_bsdf_only_impl(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& initial_state,
-                     const SampleStreamT<Scalar>& sample_stream,
-                     const std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces,
-                     const BsdfOnlyEnvironmentT<Scalar>& environment,
-                     const PathDepthLimits& depth_limits,
-                     const RussianRoulettePolicyT<Scalar>& roulette_policy) {
-    const auto roulette_policy_status = validate_russian_roulette_policy(roulette_policy);
-    if (!roulette_policy_status.has_value()) {
-        return std::unexpected(roulette_policy_status.error());
-    }
-    if (initial_ray.current_medium() != initial_state.current_medium()) {
-        return std::unexpected(path_loop_error(
-            "The BSDF-only ray and path state must carry the same current medium."));
-    }
-    if (!finite_non_negative(initial_state.beta())) {
-        return std::unexpected(
-            path_loop_error("BSDF-only path throughput must be finite and non-negative."));
-    }
-    const auto initial_depth_status = validate_path_depth_state(
-        depth_limits, initial_state.depth_counters(), initial_state.depth());
-    if (!initial_depth_status.has_value()) {
-        return std::unexpected(initial_depth_status.error());
-    }
-    if (environment.wavelengths() != initial_state.wavelengths()) {
-        return std::unexpected(
-            path_loop_error("The BSDF-only environment was not resolved at the path wavelengths."));
-    }
-    for (const auto& surface : surfaces) {
-        if (surface.wavelengths() != initial_state.wavelengths()) {
-            return std::unexpected(
-                path_loop_error("A BSDF-only surface was not resolved at the path wavelengths."));
-        }
-    }
-
-    auto beta = initial_state.beta();
-    auto radiance = initial_state.accumulated_radiance();
-    auto depth = initial_state.depth();
-    auto depth_counters = initial_state.depth_counters();
-    const auto eta_scale = initial_state.eta_scale();
-    const auto wavelengths = initial_state.wavelengths();
-    auto delta_flags = initial_state.delta_flags();
-    const auto current_medium = initial_state.current_medium();
-    auto ray = initial_ray;
-
-    const auto finish = [&](const BsdfOnlyPathTermination termination,
-                            const ScatteringLobe blocked_depth_limits)
-        -> core::Result<BsdfOnlyPathResultT<Scalar>> {
-        return make_result(beta, radiance, depth, eta_scale, wavelengths, delta_flags,
-                           current_medium, depth_limits, depth_counters, ray, termination,
-                           blocked_depth_limits);
-    };
-
-    while (true) {
-        const auto resolved = closest_hit(ray, surfaces);
-        if (!resolved.has_value()) {
-            return std::unexpected(resolved.error());
-        }
-
-        if (!resolved->has_value()) {
-            const auto emitted = environment.environment().eval(ray.direction());
-            if (!emitted.has_value()) {
-                return std::unexpected(emitted.error());
+    [[nodiscard]] core::Status validate(const SampledWavelengthsT<Scalar>& wavelengths) const {
+        for (const auto& surface : surfaces_) {
+            if (surface.wavelengths() != wavelengths) {
+                return std::unexpected(bsdf_only_path_loop_detail::path_loop_error(
+                    "A BSDF-only surface was not resolved at the path wavelengths."));
             }
-            const auto accumulated = accumulate_emission(radiance, beta, *emitted);
-            if (!accumulated.has_value()) {
-                return std::unexpected(accumulated.error());
+        }
+        return {};
+    }
+
+    [[nodiscard]] core::Result<std::optional<LinearSurfaceHit<Scalar>>>
+    closest_hit(const RayT<Scalar>& ray) const {
+        auto nearest = std::optional<LinearHitCandidate<Scalar>>{};
+        for (const auto& surface : surfaces_) {
+            if ((ray.mask() & surface.visibility_mask()) == 0) {
+                continue;
             }
-            radiance = *accumulated;
-            return finish(BsdfOnlyPathTermination::escaped_environment, ScatteringLobe::none);
+            const auto intersection = surface.triangle().intersect(ray);
+            if (!intersection) {
+                return std::unexpected(intersection.error());
+            }
+            if (*intersection &&
+                (!nearest || (**intersection).parameter < nearest->hit.parameter)) {
+                nearest = LinearHitCandidate<Scalar>{
+                    .surface = &surface,
+                    .hit = **intersection,
+                };
+            }
+        }
+        if (!nearest) {
+            return std::optional<LinearSurfaceHit<Scalar>>{};
         }
 
-        const auto& surface_hit = **resolved;
-        const auto emitted = surface_hit.surface->emission().eval(surface_hit.hit.geometric_normal,
-                                                                  -ray.direction());
-        if (!emitted.has_value()) {
-            return std::unexpected(emitted.error());
-        }
-        const auto accumulated = accumulate_emission(radiance, beta, *emitted);
-        if (!accumulated.has_value()) {
-            return std::unexpected(accumulated.error());
-        }
-        radiance = *accumulated;
-
-        constexpr auto diffuse_reflection = ScatteringLobe::diffuse | ScatteringLobe::reflection;
-        const auto depth_event =
-            evaluate_path_depth_event(depth_limits, depth_counters, diffuse_reflection);
-        if (!depth_event.has_value()) {
-            return std::unexpected(depth_event.error());
-        }
-        if (!depth_event->accepted()) {
-            return finish(BsdfOnlyPathTermination::depth_limit, depth_event->blocked_limits);
-        }
-        if (zero_spectrum(beta)) {
-            return finish(BsdfOnlyPathTermination::zero_throughput, ScatteringLobe::none);
-        }
-
-        const auto frame = OrthonormalFrameT<Scalar>::from_normal(surface_hit.hit.geometric_normal);
-        if (!frame.has_value()) {
-            return std::unexpected(frame.error());
-        }
-        const auto outgoing_world = robust_unit_direction(-ray.direction());
-        if (!outgoing_world.has_value()) {
-            return std::unexpected(outgoing_world.error());
-        }
-        const auto outgoing_local = frame->to_local(*outgoing_world);
-
-        const auto dimensions = sample_dimensions_for_bounce(depth);
-        if (!dimensions.has_value()) {
-            return std::unexpected(dimensions.error());
-        }
-        const auto canonical_sample = Point2T<Scalar>{
-            .x = sample_stream.sample_1d(dimensions->bsdf_u),
-            .y = sample_stream.sample_1d(dimensions->bsdf_v),
-        };
-        const auto sampled =
-            surface_hit.surface->reflection().sample(outgoing_local, canonical_sample);
-        if (!sampled.has_value()) {
-            return std::unexpected(sampled.error());
-        }
-        if (!sampled->has_value()) {
-            return finish(BsdfOnlyPathTermination::outside_bsdf_support, ScatteringLobe::none);
-        }
-
-        const auto& bsdf_sample = **sampled;
-        if (!finite_non_negative(bsdf_sample.value) ||
-            bsdf_sample.probability.measure != ProbabilityMeasure::solid_angle ||
-            !std::isfinite(bsdf_sample.probability.value) ||
-            !(bsdf_sample.probability.value > Scalar{0}) ||
-            !(bsdf_sample.incoming_local.z > Scalar{0})) {
-            return std::unexpected(
-                path_loop_error("The Lambertian BSDF returned an invalid continuation sample."));
-        }
-
-        // For the cosine-sampled Lambertian closure, f * cos(theta) / pdf cancels exactly to rho.
-        // Applying that identity avoids a representable rho disappearing through rho / pi first.
-        const auto updated_beta =
-            checked_product(beta, surface_hit.surface->reflection().reflectance(),
-                            "BSDF-only Lambertian throughput is not representable.");
-        if (!updated_beta.has_value()) {
-            return std::unexpected(updated_beta.error());
-        }
-
-        const auto incoming_world =
-            robust_unit_direction(frame->to_world(bsdf_sample.incoming_local));
-        if (!incoming_world.has_value()) {
-            return std::unexpected(incoming_world.error());
-        }
-        if (!(dot(surface_hit.hit.geometric_normal, *incoming_world) > Scalar{0})) {
-            return std::unexpected(
-                path_loop_error("A Lambertian continuation left the geometric-normal support."));
-        }
-
-        const auto next_depth = path_depth_total(depth_event->counters);
-        if (!next_depth.has_value()) {
-            return std::unexpected(next_depth.error());
-        }
-        constexpr auto next_delta_flags = PathDeltaFlags::any_non_delta_bounces;
-
-        const auto position = triangle_position_with_error(surface_hit);
-        if (!position.has_value()) {
+        const auto position = triangle_position_with_error(*nearest);
+        if (!position) {
             return std::unexpected(position.error());
         }
-        const auto origin = offset_ray_origin(position->point, position->absolute_error,
-                                              surface_hit.hit.geometric_normal, *incoming_world);
-        if (!origin.has_value()) {
-            return std::unexpected(origin.error());
-        }
-        if (*origin == position->point) {
-            return std::unexpected(path_loop_error(
-                "The derived triangle error did not move the continuation-ray origin."));
-        }
-
-        const auto next_ray = RayT<Scalar>::create(*origin, *incoming_world, Scalar{0},
-                                                   std::numeric_limits<Scalar>::infinity(),
-                                                   ray.time(), ray.mask(), ray.current_medium());
-        if (!next_ray.has_value()) {
-            return std::unexpected(next_ray.error());
-        }
-
-        beta = *updated_beta;
-        depth = *next_depth;
-        depth_counters = depth_event->counters;
-        delta_flags = next_delta_flags;
-        ray = *next_ray;
-        if (zero_spectrum(beta)) {
-            return finish(BsdfOnlyPathTermination::zero_throughput, ScatteringLobe::none);
-        }
-        if (roulette_policy.is_enabled() && depth >= roulette_policy.first_eligible_depth()) {
-            const auto roulette = evaluate_russian_roulette(
-                beta, eta_scale, depth, sample_stream.sample_1d(dimensions->russian_roulette),
-                roulette_policy);
-            if (!roulette.has_value()) {
-                return std::unexpected(roulette.error());
-            }
-            switch (roulette->outcome) {
-            case RussianRouletteOutcome::survived:
-                beta = roulette->throughput;
-                break;
-            case RussianRouletteOutcome::terminated:
-                beta = roulette->throughput;
-                return finish(BsdfOnlyPathTermination::russian_roulette, ScatteringLobe::none);
-            case RussianRouletteOutcome::not_evaluated:
-                return std::unexpected(
-                    path_loop_error("An eligible Russian roulette decision was not evaluated."));
-            default:
-                return std::unexpected(
-                    path_loop_error("Russian roulette returned an unsupported outcome."));
-            }
-        }
+        return std::optional<LinearSurfaceHit<Scalar>>{LinearSurfaceHit<Scalar>{
+            .surface = nearest->surface,
+            .triangle_hit = nearest->hit,
+            .reconstructed_position = position->first,
+            .absolute_error = position->second,
+        }};
     }
+
+  private:
+    std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces_;
+};
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<BsdfOnlyPathResultT<Scalar>>
+trace_linear_bsdf_only(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& initial_state,
+                       const SampleStreamT<Scalar>& sample_stream,
+                       const std::span<const BsdfOnlyTriangleSurfaceT<Scalar>> surfaces,
+                       const BsdfOnlyEnvironmentT<Scalar>& environment,
+                       const PathDepthLimits& depth_limits,
+                       const RussianRoulettePolicyT<Scalar>& roulette_policy) {
+    auto query = LinearSurfaceQuery<Scalar>{surfaces};
+    return bsdf_only_path_loop_detail::trace_bsdf_only_with_query(initial_ray, initial_state,
+                                                                  sample_stream, query, environment,
+                                                                  depth_limits, roulette_policy);
 }
 
 } // namespace
@@ -453,8 +169,8 @@ core::Result<BsdfOnlyPathResult> trace_bsdf_only(
     const Ray& initial_ray, const PathState& initial_state, const SampleStream& sample_stream,
     const std::span<const BsdfOnlyTriangleSurface> surfaces, const BsdfOnlyEnvironment& environment,
     const PathDepthLimits& depth_limits, const RussianRoulettePolicy& roulette_policy) {
-    return trace_bsdf_only_impl(initial_ray, initial_state, sample_stream, surfaces, environment,
-                                depth_limits, roulette_policy);
+    return trace_linear_bsdf_only(initial_ray, initial_state, sample_stream, surfaces, environment,
+                                  depth_limits, roulette_policy);
 }
 
 core::Result<ReferenceBsdfOnlyPathResult>
@@ -464,8 +180,8 @@ trace_bsdf_only(const ReferenceRay& initial_ray, const ReferencePathState& initi
                 const ReferenceBsdfOnlyEnvironment& environment,
                 const PathDepthLimits& depth_limits,
                 const ReferenceRussianRoulettePolicy& roulette_policy) {
-    return trace_bsdf_only_impl(initial_ray, initial_state, sample_stream, surfaces, environment,
-                                depth_limits, roulette_policy);
+    return trace_linear_bsdf_only(initial_ray, initial_state, sample_stream, surfaces, environment,
+                                  depth_limits, roulette_policy);
 }
 
 } // namespace blackframe::renderer

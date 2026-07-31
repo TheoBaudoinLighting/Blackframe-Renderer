@@ -32,10 +32,16 @@ set(
     BlackframeCornellReference256Tests
     BlackframeRendererTests
     BlackframeSceneTests
+    BlackframeSceneTransportTests
     BlackframeXpuTests
 )
 if(BLACKFRAME_ENABLE_EMBREE)
-    list(APPEND blackframe_test_targets BlackframeEmbreeSmokeTests)
+    list(
+        APPEND
+        blackframe_test_targets
+        BlackframeEmbreeCornellRegressionTests
+        BlackframeEmbreeSmokeTests
+    )
 endif()
 if(BLACKFRAME_ENABLE_CUDA)
     list(APPEND blackframe_test_targets BlackframeCudaSmokeTests)

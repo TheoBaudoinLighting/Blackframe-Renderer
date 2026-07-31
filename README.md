@@ -23,8 +23,10 @@ silently selecting another path.
   geometry, material, and nested-instance graph under explicit stable 32-bit identifiers.
   Geometries retain immutable compact triangle meshes; instances carry validated local affine
   matrices, visibility masks, and optional parents. World transforms are resolved deterministically
-  when the snapshot closes. Missing meshes, duplicate IDs, dangling references, cycles, invalid
-  compositions, and lookup failures are explicit errors.
+  when the snapshot closes. A snapshot may remain geometry-only, or carry one explicit four-lane
+  environment plus wavelength-resolved Lambertian reflection and one-sided emission for every
+  material; partially populated spectral scenes are rejected. Missing meshes, duplicate IDs,
+  dangling references, cycles, invalid compositions, and lookup failures are explicit errors.
 - **Triangle meshes:** the Engine imports strictly triangulated OBJ text and PLY ASCII 1.0 assets
   from explicit absolute paths. Positions, unit normals, UVs, and 32-bit indices are validated;
   independent OBJ index domains are canonicalized at seams. Missing attributes, polygons, invalid
@@ -43,18 +45,22 @@ silently selecting another path.
   counters. Embree refits the dynamic TLAS while retaining its triangle BLAS data. Incompatible
   refits fail instead of rebuilding implicitly. Shadow rays use direct Embree any-hit traversal over
   that TLAS, with 32-bit ray and per-instance visibility masks. Both implementations are selected
-  through distinct factories returning the same interface, and backend failures or unsupported
-  Embree requirements are reported without analytic substitution.
+  through distinct factories returning the same interface and expose the exact committed snapshot
+  used by scene queries. Backend failures or unsupported Embree requirements are reported without
+  analytic substitution.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar
   BSDF-only loop linearly traces explicit wavelength-resolved diffuse triangle surfaces,
   accumulates every encountered emitter or environment, and spawns continuation rays from derived
-  position-error bounds without NEE, MIS, or a hidden backend. Explicit depth budgets count
-  diffuse, glossy, specular, transmission, and volume events separately; transmitted surface
-  events advance both their scattering family and transmission counters. The current Lambertian
-  loop consumes only diffuse-reflection depth and supports explicitly configured, compensated
-  Russian roulette from a selected completed depth.
+  position-error bounds. The same bounce kernel can instead resolve every hit from the immutable
+  frame scene through an explicitly supplied `AccelBackend`; positions, geometric and shading
+  normals, UV derivatives, stable IDs, spectral materials, and emissions are reconstructed before
+  continuation. Primary and secondary queries have no linear fallback on this path. Neither form
+  includes NEE or MIS. Explicit depth budgets count diffuse, glossy, specular, transmission, and
+  volume events separately; transmitted surface events advance both their scattering family and
+  transmission counters. The current Lambertian loop consumes only diffuse-reflection depth and
+  supports explicitly configured, compensated Russian roulette from a selected completed depth.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, and common disk/sphere/hemisphere mappings. No global mutable RNG is used.
@@ -70,7 +76,9 @@ silently selecting another path.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
-  convergence checks.
+  convergence checks. A separate 64x64 regression rebuilds the Cornell fixture as five immutable
+  frame-scene meshes and materials, traverses all path rays through the explicit Embree backend,
+  and compares MSE, RMSE, and display PSNR against the independent double scalar oracle.
 - **Host control:** bounded versioned local IPC, a C extension ABI, explicit absolute-path loading,
   XPU device discovery, a reference discovery plugin, and a headless `render` control executable.
 - **Backend integration:** explicit capability reporting and pre-dispatch checks, pinned Embree 4
@@ -81,13 +89,14 @@ silently selecting another path.
 
 Blackframe does not yet provide a production path-tracing integrator, a scene loader, a general
 material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
-renderer. The current BSDF-only loop is a narrow deterministic scalar oracle over resolved
-Lambertian triangles, not a production backend. Acceleration updates currently cover explicit full
-rebuilds and frame-to-frame transform refits between immutable snapshots only. The headless
-executable currently supports local engine control and device discovery; it does not yet accept a
-scene and render an image from the command line. A consumable CMake install/export package is also
-not available yet. The CornellDiffuse JSON files are closed validation descriptors, not a general
-scene-interchange format or a hidden scene loader.
+renderer. The current BSDF-only transport remains a narrow deterministic Lambertian integrator,
+whether driven by its closed scalar fixture or by a frame scene and Embree; it is not a production
+wavefront backend. Acceleration updates currently cover explicit full rebuilds and frame-to-frame
+transform refits between immutable snapshots only. The headless executable currently supports
+local engine control and device discovery; it does not yet accept a scene and render an image from
+the command line. A consumable CMake install/export package is also not available yet. The
+CornellDiffuse JSON files are closed validation descriptors, not a general scene-interchange format
+or a hidden scene loader.
 
 ## Building
 

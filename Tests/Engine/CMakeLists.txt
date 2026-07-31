@@ -54,6 +54,28 @@ gtest_discover_tests(
 )
 
 add_executable(
+    BlackframeSceneTransportTests
+    SceneSurfaceInteractionTest.cpp
+)
+blackframe_set_target_role(BlackframeSceneTransportTests test)
+
+target_link_libraries(
+    BlackframeSceneTransportTests
+    PRIVATE
+        Blackframe::ProjectOptions
+        Blackframe::SceneGeometry
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeSceneTransportTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cpu"
+)
+
+add_executable(
     BlackframeAccelBackendTests
     AccelBackendContract.hpp
     AccelBackendTest.cpp
