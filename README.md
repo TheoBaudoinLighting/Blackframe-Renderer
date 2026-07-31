@@ -68,6 +68,11 @@ silently selecting another path.
   black, constant, and tabulated spectra, `SampledSpectrum<4>`, energy-conserving spectral
   Lambertian reflection, one-sided spectral surface emission, a constant spectral environment, the
   CIE 1931 2-degree observer to relative XYZ, and signed scene-linear RGB.
+- **Light contract:** statically dispatched float and double light models expose incident-radiance
+  sampling, directional PDFs, escaped-ray radiance, spectral power, and conservative world bounds.
+  Continuous and delta probabilities retain distinct solid-angle and discrete measures. Explicit
+  area-to-solid-angle and solid-angle-to-area PDF conversions use the geometric-normal Jacobian and
+  reject singular or unrepresentable configurations without clamping or measure substitution.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
@@ -91,12 +96,13 @@ Blackframe does not yet provide a production path-tracing integrator, a scene lo
 material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
 renderer. The current BSDF-only transport remains a narrow deterministic Lambertian integrator,
 whether driven by its closed scalar fixture or by a frame scene and Embree; it is not a production
-wavefront backend. Acceleration updates currently cover explicit full rebuilds and frame-to-frame
-transform refits between immutable snapshots only. The headless executable currently supports
-local engine control and device discovery; it does not yet accept a scene and render an image from
-the command line. A consumable CMake install/export package is also not available yet. The
-CornellDiffuse JSON files are closed validation descriptors, not a general scene-interchange format
-or a hidden scene loader.
+wavefront backend. The light contract does not yet provide concrete direct-light models, light
+selection, NEE, or MIS. Acceleration updates currently cover explicit full rebuilds and
+frame-to-frame transform refits between immutable snapshots only. The headless executable currently
+supports local engine control and device discovery; it does not yet accept a scene and render an
+image from the command line. A consumable CMake install/export package is also not available yet.
+The CornellDiffuse JSON files are closed validation descriptors, not a general scene-interchange
+format or a hidden scene loader.
 
 ## Building
 

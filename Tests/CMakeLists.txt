@@ -4,6 +4,7 @@ add_subdirectory(Applications)
 add_subdirectory(Core)
 add_subdirectory(Build)
 add_subdirectory(Renderer)
+add_subdirectory(Renderer/Light)
 add_subdirectory(Extensions)
 add_subdirectory(XPU)
 add_subdirectory(IPC)
@@ -30,6 +31,7 @@ set(
     BlackframeRenderTests
     BlackframeCornellReference64Tests
     BlackframeCornellReference256Tests
+    BlackframeRendererLightTests
     BlackframeRendererTests
     BlackframeSceneTests
     BlackframeSceneTransportTests
