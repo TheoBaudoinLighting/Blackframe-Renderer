@@ -80,6 +80,26 @@ accumulate_emission(const PathSpectrum<Scalar>& accumulated, const PathSpectrum<
 }
 
 template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<PathSpectrum<Scalar>>
+accumulate_direct_lighting(const PathSpectrum<Scalar>& accumulated,
+                           const PathSpectrum<Scalar>& contribution) {
+    if (!finite_non_negative(contribution)) {
+        return std::unexpected(
+            path_loop_error("A direct-lighting contribution must be finite and non-negative."));
+    }
+
+    auto result = PathSpectrum<Scalar>{};
+    for (auto lane = std::size_t{0}; lane < TransportSpectrumSampleCount; ++lane) {
+        result[lane] = accumulated[lane] + contribution[lane];
+        if (!std::isfinite(result[lane])) {
+            return std::unexpected(
+                path_loop_error("Direct-lighting accumulation is not representable."));
+        }
+    }
+    return result;
+}
+
+template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<Vector3T<Scalar>>
 robust_unit_direction(const Vector3T<Scalar> direction) {
     if (!std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z)) {
@@ -129,13 +149,12 @@ make_result(const PathSpectrum<Scalar>& beta, const PathSpectrum<Scalar>& radian
 // query. It is deliberately not a runtime transport interface: Renderer uses a
 // linear triangle query, while SceneGeometry supplies AccelBackend-resolved
 // surfaces. Both execute this exact bounce, depth, sampling, and roulette code.
-template <SpectrumScalar Scalar, typename SurfaceQuery>
-[[nodiscard]] core::Result<BsdfOnlyPathResultT<Scalar>>
-trace_bsdf_only_with_query(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& initial_state,
-                           const SampleStreamT<Scalar>& sample_stream, SurfaceQuery& surface_query,
-                           const BsdfOnlyEnvironmentT<Scalar>& environment,
-                           const PathDepthLimits& depth_limits,
-                           const RussianRoulettePolicyT<Scalar>& roulette_policy) {
+template <SpectrumScalar Scalar, typename SurfaceQuery, typename DirectLightingPolicy>
+[[nodiscard]] core::Result<BsdfOnlyPathResultT<Scalar>> trace_lambertian_with_query(
+    const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& initial_state,
+    const SampleStreamT<Scalar>& sample_stream, SurfaceQuery& surface_query,
+    const BsdfOnlyEnvironmentT<Scalar>& environment, const PathDepthLimits& depth_limits,
+    const RussianRoulettePolicyT<Scalar>& roulette_policy, DirectLightingPolicy& direct_lighting) {
     const auto roulette_status = validate_russian_roulette_policy(roulette_policy);
     if (!roulette_status) {
         return std::unexpected(roulette_status.error());
@@ -236,6 +255,18 @@ trace_bsdf_only_with_query(const RayT<Scalar>& initial_ray, const PathStateT<Sca
         if (!dimensions) {
             return std::unexpected(dimensions.error());
         }
+        if constexpr (DirectLightingPolicy::enabled) {
+            const auto direct = direct_lighting.estimate(surface, beta, *frame, *outgoing_world,
+                                                         *dimensions, sample_stream, ray);
+            if (!direct) {
+                return std::unexpected(direct.error());
+            }
+            const auto accumulated_direct = accumulate_direct_lighting(radiance, *direct);
+            if (!accumulated_direct) {
+                return std::unexpected(accumulated_direct.error());
+            }
+            radiance = *accumulated_direct;
+        }
         const auto canonical_sample = Point2T<Scalar>{
             .x = sample_stream.sample_1d(dimensions->bsdf_u),
             .y = sample_stream.sample_1d(dimensions->bsdf_v),
@@ -329,6 +360,22 @@ trace_bsdf_only_with_query(const RayT<Scalar>& initial_ray, const PathStateT<Sca
             }
         }
     }
+}
+
+struct NoDirectLighting final {
+    static constexpr bool enabled = false;
+};
+
+template <SpectrumScalar Scalar, typename SurfaceQuery>
+[[nodiscard]] core::Result<BsdfOnlyPathResultT<Scalar>>
+trace_bsdf_only_with_query(const RayT<Scalar>& initial_ray, const PathStateT<Scalar>& initial_state,
+                           const SampleStreamT<Scalar>& sample_stream, SurfaceQuery& surface_query,
+                           const BsdfOnlyEnvironmentT<Scalar>& environment,
+                           const PathDepthLimits& depth_limits,
+                           const RussianRoulettePolicyT<Scalar>& roulette_policy) {
+    auto direct_lighting = NoDirectLighting{};
+    return trace_lambertian_with_query(initial_ray, initial_state, sample_stream, surface_query,
+                                       environment, depth_limits, roulette_policy, direct_lighting);
 }
 
 } // namespace blackframe::renderer::bsdf_only_path_loop_detail

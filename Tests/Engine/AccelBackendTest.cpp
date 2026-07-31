@@ -1,9 +1,11 @@
 #include "AccelBackendContract.hpp"
 
 #include <Blackframe/Engine/AccelBackend.hpp>
+#include <Blackframe/Renderer/WavelengthSampling.hpp>
 #include <gtest/gtest.h>
 #include <memory>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace blackframe::engine {
@@ -39,6 +41,49 @@ TEST(AnalyticAccelBackendTest, RefitsAnimatedTransformsWithoutAnImplicitRebuild)
 
     test::expect_refit_and_rebuild_lifecycle(**backend, scenes,
                                              AccelBackendKind::analytic_reference);
+}
+
+TEST(AnalyticAccelBackendTest, RejectsPunctualLightChangesDuringTransformOnlyRefit) {
+    const auto wavelengths = renderer::sample_uniform_visible_wavelengths(0.25F);
+    ASSERT_TRUE(wavelengths.has_value()) << wavelengths.error().message;
+    const auto make_scene = [&](const float intensity) {
+        auto description = FrameSceneDescription{};
+        description.punctual_lights = {
+            ScenePointLight{
+                .position = {.z = 2.0F},
+                .absolute_position_error = {},
+                .spectral_radiant_intensity =
+                    renderer::TransportSpectrum{
+                        .values = {intensity, intensity, intensity, intensity},
+                    },
+            },
+        };
+        description.spectral_environment = SceneSpectralEnvironment{
+            .wavelengths = *wavelengths,
+            .radiance = {},
+        };
+        return FrameScene::create(std::move(description));
+    };
+
+    const auto initial = make_scene(1.0F);
+    const auto changed = make_scene(2.0F);
+    ASSERT_TRUE(initial.has_value()) << initial.error().message;
+    ASSERT_TRUE(changed.has_value()) << changed.error().message;
+    auto backend = create_analytic_accel_backend(*initial);
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+
+    const auto rejected = (*backend)->refit(*changed);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, core::StatusCode::incompatible);
+    EXPECT_EQ((*backend)->frame_scene(), *initial);
+    EXPECT_EQ((*backend)->build_statistics(),
+              (AccelBuildStatistics{.commits = 1U, .rebuilds = 0U, .refits = 0U}));
+
+    const auto rebuilt = (*backend)->rebuild(*changed);
+    ASSERT_TRUE(rebuilt.has_value()) << rebuilt.error().message;
+    EXPECT_EQ((*backend)->frame_scene(), *changed);
+    EXPECT_EQ((*backend)->build_statistics(),
+              (AccelBuildStatistics{.commits = 2U, .rebuilds = 1U, .refits = 0U}));
 }
 
 TEST(AnalyticAccelBackendTest, RejectsMissingScenesAndUnrepresentableInstances) {

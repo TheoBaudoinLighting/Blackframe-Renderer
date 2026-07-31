@@ -2,6 +2,7 @@
 #include <Blackframe/Renderer/Emission.hpp>
 #include <Blackframe/Renderer/LambertianReflection.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
+#include <Blackframe/Renderer/PunctualLights.hpp>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace blackframe::engine {
@@ -45,6 +47,44 @@ template <typename Record, typename Identifier>
     const auto candidate = std::ranges::lower_bound(
         records, id.value, {}, [](const Record& record) { return record.id.value; });
     return candidate != records.end() && candidate->id == id;
+}
+
+[[nodiscard]] core::Status
+validate_punctual_light(const ScenePunctualLight& record,
+                        const renderer::SampledWavelengths& wavelengths) {
+    if (record.valueless_by_exception()) {
+        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
+                                           "A frame scene punctual-light slot has no value."));
+    }
+
+    return std::visit(
+        [&](const auto& light) -> core::Status {
+            using Light = std::remove_cvref_t<decltype(light)>;
+            if constexpr (std::is_same_v<Light, ScenePointLight>) {
+                auto validated =
+                    renderer::PointLight::create(light.position, light.absolute_position_error,
+                                                 wavelengths, light.spectral_radiant_intensity);
+                if (!validated) {
+                    return std::unexpected(std::move(validated.error()));
+                }
+            } else if constexpr (std::is_same_v<Light, SceneDirectionalLight>) {
+                auto validated = renderer::DirectionalLight::create(
+                    light.propagation_direction, wavelengths, light.spectral_irradiance);
+                if (!validated) {
+                    return std::unexpected(std::move(validated.error()));
+                }
+            } else if constexpr (std::is_same_v<Light, SceneSpotLight>) {
+                auto validated = renderer::SpotLight::create(
+                    light.position, light.absolute_position_error, light.emission_direction,
+                    light.inner_half_angle_radians, light.outer_half_angle_radians, wavelengths,
+                    light.on_axis_spectral_radiant_intensity);
+                if (!validated) {
+                    return std::unexpected(std::move(validated.error()));
+                }
+            }
+            return {};
+        },
+        record);
 }
 
 template <typename Record, typename Identifier>
@@ -82,7 +122,18 @@ struct ResolvedInstanceTransforms final {
 };
 
 [[nodiscard]] core::Status validate_spectral_transport(const FrameSceneDescription& description) {
+    if (description.punctual_lights.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(scene_error(
+            core::StatusCode::resource_exhausted,
+            "Frame scene punctual lights exceed the stable 32-bit registry-slot domain."));
+    }
     if (!description.spectral_environment) {
+        if (!description.punctual_lights.empty()) {
+            return std::unexpected(scene_error(
+                core::StatusCode::invalid_argument,
+                "A frame scene cannot contain punctual lights without an explicit spectral "
+                "environment."));
+        }
         const auto material_with_transport =
             std::ranges::find_if(description.materials, [](const SceneMaterial& material) {
                 return material.spectral.has_value();
@@ -108,6 +159,12 @@ struct ResolvedInstanceTransforms final {
         return std::unexpected(scene_error(
             core::StatusCode::invalid_argument,
             "A frame scene spectral environment requires finite non-negative radiance."));
+    }
+
+    for (const auto& light : description.punctual_lights) {
+        if (auto status = validate_punctual_light(light, environment.wavelengths); !status) {
+            return std::unexpected(std::move(status.error()));
+        }
     }
 
     for (const auto& material : description.materials) {
@@ -335,6 +392,7 @@ FrameScene::FrameScene(FrameSceneDescription&& description,
                        std::vector<renderer::AffineTransform>&& world_transforms) noexcept
     : objects_{std::move(description.objects)}, geometries_{std::move(description.geometries)},
       materials_{std::move(description.materials)}, instances_{std::move(description.instances)},
+      punctual_lights_{std::move(description.punctual_lights)},
       spectral_environment_{std::move(description.spectral_environment)},
       local_transforms_{std::move(local_transforms)},
       world_transforms_{std::move(world_transforms)} {}
@@ -353,6 +411,10 @@ std::span<const SceneMaterial> FrameScene::materials() const noexcept {
 
 std::span<const SceneInstance> FrameScene::instances() const noexcept {
     return instances_;
+}
+
+std::span<const ScenePunctualLight> FrameScene::punctual_lights() const noexcept {
+    return punctual_lights_;
 }
 
 const std::optional<SceneSpectralEnvironment>& FrameScene::spectral_environment() const noexcept {

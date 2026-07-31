@@ -55,6 +55,7 @@ gtest_discover_tests(
 
 add_executable(
     BlackframeSceneTransportTests
+    SceneNeePathLoopTest.cpp
     SceneSurfaceInteractionTest.cpp
     SceneVisibilityTest.cpp
 )

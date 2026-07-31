@@ -14,6 +14,7 @@ add_library(
         Include/Blackframe/Renderer/Disk.hpp
         Include/Blackframe/Renderer/DisplayPsnr.hpp
         Include/Blackframe/Renderer/DisplayTransform.hpp
+        Include/Blackframe/Renderer/DirectLighting.hpp
         Include/Blackframe/Renderer/Emission.hpp
         Include/Blackframe/Renderer/EnvironmentLights.hpp
         Include/Blackframe/Renderer/Film.hpp

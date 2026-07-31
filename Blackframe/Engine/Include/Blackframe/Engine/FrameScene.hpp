@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 namespace blackframe::engine {
@@ -56,6 +57,38 @@ struct SceneSpectralEnvironment final {
     operator==(const SceneSpectralEnvironment&) const noexcept = default;
 };
 
+// Punctual records remain plain comparable scene data. Their spectra are
+// interpreted only at the frame's single environment wavelength packet, and
+// FrameScene reconstructs the corresponding validated renderer model before
+// publishing the snapshot. Vector order is the stable light-registry slot.
+struct ScenePointLight final {
+    renderer::Point3 position;
+    renderer::Vector3 absolute_position_error;
+    renderer::TransportSpectrum spectral_radiant_intensity;
+
+    [[nodiscard]] constexpr bool operator==(const ScenePointLight&) const noexcept = default;
+};
+
+struct SceneDirectionalLight final {
+    renderer::Vector3 propagation_direction;
+    renderer::TransportSpectrum spectral_irradiance;
+
+    [[nodiscard]] constexpr bool operator==(const SceneDirectionalLight&) const noexcept = default;
+};
+
+struct SceneSpotLight final {
+    renderer::Point3 position;
+    renderer::Vector3 absolute_position_error;
+    renderer::Vector3 emission_direction;
+    renderer::TransportScalar inner_half_angle_radians;
+    renderer::TransportScalar outer_half_angle_radians;
+    renderer::TransportSpectrum on_axis_spectral_radiant_intensity;
+
+    [[nodiscard]] constexpr bool operator==(const SceneSpotLight&) const noexcept = default;
+};
+
+using ScenePunctualLight = std::variant<ScenePointLight, SceneDirectionalLight, SceneSpotLight>;
+
 // Objects are logical identities. An instance owns the graph edges that bind
 // one object identity to one geometry and one material. A local matrix maps
 // instance space into its parent's space; for a root it maps directly to
@@ -78,6 +111,7 @@ struct FrameSceneDescription final {
     std::vector<SceneGeometry> geometries;
     std::vector<SceneMaterial> materials;
     std::vector<SceneInstance> instances;
+    std::vector<ScenePunctualLight> punctual_lights{};
     std::optional<SceneSpectralEnvironment> spectral_environment{std::nullopt};
 };
 
@@ -104,6 +138,7 @@ class FrameScene final {
     [[nodiscard]] std::span<const SceneGeometry> geometries() const noexcept;
     [[nodiscard]] std::span<const SceneMaterial> materials() const noexcept;
     [[nodiscard]] std::span<const SceneInstance> instances() const noexcept;
+    [[nodiscard]] std::span<const ScenePunctualLight> punctual_lights() const noexcept;
     [[nodiscard]] const std::optional<SceneSpectralEnvironment>&
     spectral_environment() const noexcept;
 
@@ -129,6 +164,7 @@ class FrameScene final {
     std::vector<SceneGeometry> geometries_;
     std::vector<SceneMaterial> materials_;
     std::vector<SceneInstance> instances_;
+    std::vector<ScenePunctualLight> punctual_lights_;
     std::optional<SceneSpectralEnvironment> spectral_environment_;
     std::vector<renderer::AffineTransform> local_transforms_;
     std::vector<renderer::AffineTransform> world_transforms_;

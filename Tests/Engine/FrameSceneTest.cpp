@@ -67,6 +67,54 @@ namespace {
     return std::make_shared<const TriangleMesh>(std::move(*mesh));
 }
 
+[[nodiscard]] renderer::SampledWavelengths make_scene_wavelengths(const float sample = 0.25F) {
+    const auto wavelengths = renderer::sample_uniform_visible_wavelengths(sample);
+    if (!wavelengths) {
+        throw std::runtime_error{wavelengths.error().message};
+    }
+    return *wavelengths;
+}
+
+[[nodiscard]] renderer::TransportSpectrum scene_light_spectrum(const float scale = 1.0F) {
+    return renderer::TransportSpectrum{
+        .values = {scale, 2.0F * scale, 3.0F * scale, 4.0F * scale},
+    };
+}
+
+[[nodiscard]] ScenePointLight make_scene_point_light() {
+    return ScenePointLight{
+        .position = {.x = 1.0F, .y = 2.0F, .z = 3.0F},
+        .absolute_position_error = {.x = 0.01F, .y = 0.02F, .z = 0.03F},
+        .spectral_radiant_intensity = scene_light_spectrum(1.0F),
+    };
+}
+
+[[nodiscard]] SceneDirectionalLight make_scene_directional_light() {
+    return SceneDirectionalLight{
+        .propagation_direction = {.z = -1.0F},
+        .spectral_irradiance = scene_light_spectrum(2.0F),
+    };
+}
+
+[[nodiscard]] SceneSpotLight make_scene_spot_light() {
+    return SceneSpotLight{
+        .position = {.x = -2.0F, .y = 1.0F, .z = 4.0F},
+        .absolute_position_error = {.x = 0.03F, .y = 0.02F, .z = 0.01F},
+        .emission_direction = {.z = -1.0F},
+        .inner_half_angle_radians = 0.25F,
+        .outer_half_angle_radians = 0.5F,
+        .on_axis_spectral_radiant_intensity = scene_light_spectrum(3.0F),
+    };
+}
+
+[[nodiscard]] SceneSpectralEnvironment
+make_scene_environment(const renderer::SampledWavelengths wavelengths) {
+    return SceneSpectralEnvironment{
+        .wavelengths = wavelengths,
+        .radiance = renderer::TransportSpectrum{},
+    };
+}
+
 [[nodiscard]] FrameSceneDescription make_scene_description() {
     const auto mesh = make_scene_mesh();
     return FrameSceneDescription{
@@ -182,6 +230,13 @@ TEST(FrameSceneTest, KeepsEveryIdentifierDomainStrongAndSnapshotAccessReadOnly) 
                                std::span<const SceneMaterial>>);
     static_assert(std::same_as<decltype(std::declval<const FrameScene&>().instances()),
                                std::span<const SceneInstance>>);
+    static_assert(std::same_as<decltype(std::declval<const FrameScene&>().punctual_lights()),
+                               std::span<const ScenePunctualLight>>);
+    static_assert(std::variant_size_v<ScenePunctualLight> == 3U);
+    static_assert(std::same_as<std::variant_alternative_t<0, ScenePunctualLight>, ScenePointLight>);
+    static_assert(
+        std::same_as<std::variant_alternative_t<1, ScenePunctualLight>, SceneDirectionalLight>);
+    static_assert(std::same_as<std::variant_alternative_t<2, ScenePunctualLight>, SceneSpotLight>);
     static_assert(
         std::same_as<decltype(std::declval<const FrameScene&>().local_transform(
                          renderer::InstanceId{})),
@@ -193,6 +248,81 @@ TEST(FrameSceneTest, KeepsEveryIdentifierDomainStrongAndSnapshotAccessReadOnly) 
     static_assert(!std::default_initializable<FrameScene>);
     static_assert(!std::copyable<FrameScene>);
     static_assert(std::is_nothrow_destructible_v<FrameScene>);
+}
+
+TEST(FrameSceneTest, RetainsValidatedPunctualLightsInStableSlotOrder) {
+    const auto wavelengths = make_scene_wavelengths();
+    const auto point = make_scene_point_light();
+    const auto directional = make_scene_directional_light();
+    const auto spot = make_scene_spot_light();
+    auto description = FrameSceneDescription{};
+    description.punctual_lights = {ScenePunctualLight{spot}, ScenePunctualLight{point},
+                                   ScenePunctualLight{directional}};
+    description.spectral_environment = make_scene_environment(wavelengths);
+
+    const auto scene_result = FrameScene::create(description);
+    ASSERT_TRUE(scene_result.has_value()) << scene_result.error().message;
+    description.punctual_lights.clear();
+
+    const auto lights = (*scene_result)->punctual_lights();
+    ASSERT_EQ(lights.size(), 3U);
+    ASSERT_TRUE(std::holds_alternative<SceneSpotLight>(lights[0]));
+    EXPECT_EQ(std::get<SceneSpotLight>(lights[0]), spot);
+    ASSERT_TRUE(std::holds_alternative<ScenePointLight>(lights[1]));
+    EXPECT_EQ(std::get<ScenePointLight>(lights[1]), point);
+    ASSERT_TRUE(std::holds_alternative<SceneDirectionalLight>(lights[2]));
+    EXPECT_EQ(std::get<SceneDirectionalLight>(lights[2]), directional);
+}
+
+TEST(FrameSceneTest, RejectsPunctualLightsWithoutASpectralEnvironment) {
+    auto description = FrameSceneDescription{};
+    description.punctual_lights = {ScenePunctualLight{make_scene_point_light()}};
+
+    expect_error_code(FrameScene::create(std::move(description)),
+                      core::StatusCode::invalid_argument);
+}
+
+TEST(FrameSceneTest, ValidatesEveryPunctualRecordWithoutRepairingIt) {
+    const auto wavelengths = make_scene_wavelengths();
+    const auto environment = make_scene_environment(wavelengths);
+
+    {
+        auto invalid = make_scene_point_light();
+        invalid.absolute_position_error.x = -1.0F;
+        auto description = FrameSceneDescription{};
+        description.punctual_lights = {ScenePunctualLight{invalid}};
+        description.spectral_environment = environment;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto invalid = make_scene_directional_light();
+        invalid.propagation_direction.z = 2.0F;
+        auto description = FrameSceneDescription{};
+        description.punctual_lights = {ScenePunctualLight{invalid}};
+        description.spectral_environment = environment;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto invalid = make_scene_spot_light();
+        invalid.inner_half_angle_radians = 0.75F;
+        auto description = FrameSceneDescription{};
+        description.punctual_lights = {ScenePunctualLight{invalid}};
+        description.spectral_environment = environment;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto invalid = make_scene_point_light();
+        invalid.spectral_radiant_intensity[2] =
+            std::numeric_limits<renderer::TransportScalar>::quiet_NaN();
+        auto description = FrameSceneDescription{};
+        description.punctual_lights = {ScenePunctualLight{invalid}};
+        description.spectral_environment = environment;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
 }
 
 TEST(FrameSceneTest, OwnsCanonicalStorageAndResolvesEveryStableIdentifier) {

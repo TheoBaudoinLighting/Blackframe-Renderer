@@ -67,6 +67,74 @@ if(TARGET Blackframe::Png)
 endif()
 
 add_executable(
+    BlackframeEmbreeNeeRegressionTests
+    NextEventEstimationImageTest.cpp
+)
+blackframe_set_target_role(BlackframeEmbreeNeeRegressionTests test)
+
+target_link_libraries(
+    BlackframeEmbreeNeeRegressionTests
+    PRIVATE
+        Blackframe::CpuEmbree
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+if(TARGET Blackframe::Png)
+    target_link_libraries(
+        BlackframeEmbreeNeeRegressionTests
+        PRIVATE
+            Blackframe::Png
+            Blackframe::Stb
+    )
+    target_compile_definitions(
+        BlackframeEmbreeNeeRegressionTests
+        PRIVATE
+            BLACKFRAME_HAS_PNG_PREVIEW=1
+    )
+else()
+    target_compile_definitions(
+        BlackframeEmbreeNeeRegressionTests
+        PRIVATE
+            BLACKFRAME_HAS_PNG_PREVIEW=0
+    )
+endif()
+
+target_compile_definitions(
+    BlackframeEmbreeNeeRegressionTests
+    PRIVATE
+        BLACKFRAME_EMBREE_NEE_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+)
+
+gtest_discover_tests(
+    BlackframeEmbreeNeeRegressionTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "regression;cpu"
+        TIMEOUT 180
+)
+
+if(TARGET Blackframe::Png)
+    add_test(
+        NAME Blackframe.EmbreePointLightNee64SppImage
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeNeeRegressionTests>"
+            "-DGTEST_FILTER=NextEventEstimationImageTest.WritesStableEmbreePointLightImageAt64Spp"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-point-light-nee-64spp.png"
+            "-DEXPECTED_SHA256=7913b44f675b2db9742ab9aee4bcaecc641bc6c698f064f7b786f93e9e9ff18e"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../../../Renderer/PngChecksumTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.EmbreePointLightNee64SppImage
+        PROPERTIES
+            LABELS "regression;cpu"
+            TIMEOUT 180
+    )
+endif()
+
+add_executable(
     BlackframeEmbreeCornellRegressionTests
     CornellFrameSceneIntegrationTest.cpp
 )
