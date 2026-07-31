@@ -11,6 +11,7 @@ add_executable(
     LightTest.cpp
     PunctualLightImageTest.cpp
     PunctualLightsTest.cpp
+    ShadowRayTest.cpp
 )
 blackframe_set_target_role(BlackframeRendererLightTests test)
 

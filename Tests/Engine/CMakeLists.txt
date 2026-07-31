@@ -56,6 +56,7 @@ gtest_discover_tests(
 add_executable(
     BlackframeSceneTransportTests
     SceneSurfaceInteractionTest.cpp
+    SceneVisibilityTest.cpp
 )
 blackframe_set_target_role(BlackframeSceneTransportTests test)
 

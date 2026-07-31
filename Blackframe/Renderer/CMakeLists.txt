@@ -52,6 +52,7 @@ add_library(
         Include/Blackframe/Renderer/SampleStream.hpp
         Include/Blackframe/Renderer/SamplingMappings.hpp
         Include/Blackframe/Renderer/SceneIdentifiers.hpp
+        Include/Blackframe/Renderer/ShadowRay.hpp
         Include/Blackframe/Renderer/SobolSampling.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
         Include/Blackframe/Renderer/Sphere.hpp

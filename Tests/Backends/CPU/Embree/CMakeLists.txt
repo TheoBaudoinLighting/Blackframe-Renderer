@@ -1,6 +1,7 @@
 add_executable(
     BlackframeEmbreeSmokeTests
     EmbreeSmokeTest.cpp
+    ShadowRayImageTest.cpp
 )
 blackframe_set_target_role(BlackframeEmbreeSmokeTests test)
 
@@ -12,6 +13,33 @@ target_link_libraries(
         GTest::gtest_main
 )
 
+if(TARGET Blackframe::Png)
+    target_link_libraries(
+        BlackframeEmbreeSmokeTests
+        PRIVATE
+            Blackframe::Png
+            Blackframe::Stb
+    )
+    target_compile_definitions(
+        BlackframeEmbreeSmokeTests
+        PRIVATE
+            BLACKFRAME_HAS_PNG_PREVIEW=1
+    )
+else()
+    target_compile_definitions(
+        BlackframeEmbreeSmokeTests
+        PRIVATE
+            BLACKFRAME_HAS_PNG_PREVIEW=0
+    )
+endif()
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
+target_compile_definitions(
+    BlackframeEmbreeSmokeTests
+    PRIVATE
+        BLACKFRAME_EMBREE_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+)
+
 gtest_discover_tests(
     BlackframeEmbreeSmokeTests
     DISCOVERY_MODE PRE_TEST
@@ -19,6 +47,24 @@ gtest_discover_tests(
     PROPERTIES
         LABELS "unit;smoke;regression;cpu"
 )
+
+if(TARGET Blackframe::Png)
+    add_test(
+        NAME Blackframe.EmbreeSharpShadowParityAtlas
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeSmokeTests>"
+            "-DGTEST_FILTER=ShadowRayImageTest.WritesStableAnalyticAndEmbreeSharpShadowAtlas"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-shadow-ray-analytic-embree.png"
+            "-DEXPECTED_SHA256=f0eaa0bdc913057cc6bb54f9371027624907cc9a08a76696f2191088677590eb"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../../../Renderer/PngChecksumTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.EmbreeSharpShadowParityAtlas
+        PROPERTIES
+            LABELS "regression;cpu"
+    )
+endif()
 
 add_executable(
     BlackframeEmbreeCornellRegressionTests
