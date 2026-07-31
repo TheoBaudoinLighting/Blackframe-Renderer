@@ -63,7 +63,8 @@ silently selecting another path.
   supports explicitly configured, compensated Russian roulette from a selected completed depth.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
-  scrambling, and common disk/sphere/hemisphere mappings. No global mutable RNG is used.
+  scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power
+  light-selection distributions. No global mutable RNG is used.
 - **Spectral and color foundations:** four-lane 360-830 nm wavelength packets with marginal PDFs,
   black, constant, and tabulated spectra, `SampledSpectrum<4>`, energy-conserving spectral
   Lambertian reflection, one-sided spectral surface emission, a constant spectral environment, the
@@ -79,7 +80,9 @@ silently selecting another path.
   query the closest surface along a direction, expose explicit one- and two-sided emission, and
   report conservative finite support bounds. Packet-bound latitude-longitude environment maps
   support explicit quaternion rotation and a normalized two-dimensional importance distribution
-  built from spectral packet radiance and exact texel solid angles.
+  built from spectral packet radiance and exact texel solid angles. The light sampler selects stable
+  registry slots uniformly or by normalized four-lane spectral power, retaining an explicit
+  discrete probability separate from each selected light's conditional PDF.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
@@ -103,9 +106,10 @@ Blackframe does not yet provide a production path-tracing integrator, a scene lo
 material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
 renderer. The current BSDF-only transport remains a narrow deterministic Lambertian integrator,
 whether driven by its closed scalar fixture or by a frame scene and Embree; it is not a production
-wavefront backend. The punctual, area, and environment-map light models are not yet connected to
-scene light selection, visibility rays, NEE, or MIS. Acceleration updates currently cover explicit
-full rebuilds and frame-to-frame transform refits between immutable snapshots only. The headless
+wavefront backend. The punctual, area, and environment-map light models and the standalone light
+sampler are not yet connected to a frame-scene light registry, visibility rays, NEE, or MIS.
+Acceleration updates currently cover explicit full rebuilds and frame-to-frame transform refits
+between immutable snapshots only. The headless
 executable currently supports local engine control and device discovery; it does not yet accept a
 scene and render an image from the command line. A consumable CMake install/export package is also
 not available yet. The CornellDiffuse JSON files are closed validation descriptors, not a general

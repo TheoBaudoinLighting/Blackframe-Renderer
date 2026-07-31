@@ -25,6 +25,7 @@ add_library(
         Include/Blackframe/Renderer/Interval.hpp
         Include/Blackframe/Renderer/LambertianReflection.hpp
         Include/Blackframe/Renderer/Light.hpp
+        Include/Blackframe/Renderer/LightSampler.hpp
         Include/Blackframe/Renderer/LocalFrame.hpp
         Include/Blackframe/Renderer/LocalPcg32.hpp
         Include/Blackframe/Renderer/LinearMetrics.hpp
@@ -65,6 +66,7 @@ add_library(
         Source/CapabilityRegistry.cpp
         Source/Cie1931ColorMatchingFunctions.inc
         Source/Cie1931Sensor.cpp
+        Source/LightSampler.cpp
         Source/NumericConversion.cpp
         Source/OwenScrambling.cpp
         Source/PathDepthLimits.cpp

@@ -4,6 +4,8 @@ add_executable(
     AreaLightsTest.cpp
     EnvironmentLightImageTest.cpp
     EnvironmentLightsTest.cpp
+    LightSamplerImageTest.cpp
+    LightSamplerTest.cpp
     LightTest.cpp
     PunctualLightImageTest.cpp
     PunctualLightsTest.cpp
@@ -94,6 +96,26 @@ if(TARGET Blackframe::Png)
     )
     set_tests_properties(
         Blackframe.EnvironmentLightRadiancePdfAtlas
+        PROPERTIES
+            LABELS "regression;cpu"
+    )
+
+    set(
+        blackframe_light_sampler_atlas_sha256
+        "ad19ac06124fc74cda0edfc4a983b35174815da72f5f1bd0dd242b369df9fa2a"
+    )
+    add_test(
+        NAME Blackframe.LightSamplerSelectionAtlas
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeRendererLightTests>"
+            "-DGTEST_FILTER=LightSamplerImageTest.WritesStableUniformAndPowerSelectionAtlas"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-light-sampler-selection.png"
+            "-DEXPECTED_SHA256=${blackframe_light_sampler_atlas_sha256}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../PngChecksumTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.LightSamplerSelectionAtlas
         PROPERTIES
             LABELS "regression;cpu"
     )

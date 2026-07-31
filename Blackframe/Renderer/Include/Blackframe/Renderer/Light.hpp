@@ -394,8 +394,8 @@ using ReferenceLightSampleContext = LightSampleContextT<ReferenceScalar>;
 // Incident radiance and its conditional sampling density. direction_to_light
 // is a world-space unit vector from the query point toward the light.
 // distance is finite for local lights and +infinity for directional or
-// environment lights. The probability excludes the future LightSampler's
-// discrete light-selection probability.
+// environment lights. The probability excludes the LightSampler's discrete
+// light-selection probability.
 template <SpectrumScalar Scalar> class IncidentLightSampleT final {
   public:
     using spectrum_type = LightSpectrumT<Scalar>;
@@ -538,8 +538,8 @@ using IncidentLightSample = IncidentLightSampleT<TransportScalar>;
 using ReferenceIncidentLightSample = IncidentLightSampleT<ReferenceScalar>;
 
 // Individual light implementations satisfy this static contract. It is not a
-// sixth runtime transport interface: the reserved LightSampler remains the
-// component that will select heterogeneous lights.
+// sixth runtime transport interface: LightSampler selects heterogeneous-light
+// registry slots independently of this static model contract.
 //
 // sample_li consumes a canonical sample in [0, 1)^2 and returns Li with a
 // conditional solid-angle density for its explicit endpoint, or a discrete
