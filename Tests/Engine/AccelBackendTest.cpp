@@ -32,6 +32,15 @@ TEST(AnalyticAccelBackendTest, EvaluatesAnyHitShadowsAndVisibilityMasks) {
     test::expect_instanced_occlusion(**backend, AccelBackendKind::analytic_reference);
 }
 
+TEST(AnalyticAccelBackendTest, RefitsAnimatedTransformsWithoutAnImplicitRebuild) {
+    const auto scenes = test::make_accel_lifecycle_scenes();
+    auto backend = create_analytic_accel_backend(scenes.initial);
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+
+    test::expect_refit_and_rebuild_lifecycle(**backend, scenes,
+                                             AccelBackendKind::analytic_reference);
+}
+
 TEST(AnalyticAccelBackendTest, RejectsMissingScenesAndUnrepresentableInstances) {
     const auto missing = create_analytic_accel_backend({});
     ASSERT_FALSE(missing.has_value());

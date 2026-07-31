@@ -37,11 +37,14 @@ silently selecting another path.
   occlusion queries over immutable frame scenes, stable object/surface identifiers, and visibility
   masks. The deterministic analytic oracle transforms rays into object space. The pinned Embree
   implementation shares one triangle BLAS per geometry and registers each logical instance in a
-  compact TLAS using its resolved world transform; logical parent chains are flattened only after
-  deterministic hierarchy resolution. Shadow rays use direct Embree any-hit traversal over that
-  TLAS, with 32-bit ray and per-instance visibility masks. Both implementations are selected through
-  distinct factories returning the same interface, and backend failures or unsupported Embree
-  requirements are reported without analytic substitution.
+  TLAS using its resolved world transform; logical parent chains are flattened only after
+  deterministic hierarchy resolution. The factory commits the initial snapshot; explicit rebuild
+  and transform-only refit operations publish later immutable snapshots and report lifecycle
+  counters. Embree refits the dynamic TLAS while retaining its triangle BLAS data. Incompatible
+  refits fail instead of rebuilding implicitly. Shadow rays use direct Embree any-hit traversal over
+  that TLAS, with 32-bit ray and per-instance visibility masks. Both implementations are selected
+  through distinct factories returning the same interface, and backend failures or unsupported
+  Embree requirements are reported without analytic substitution.
 - **Transport state:** validated float and double `PathState` values own spectral throughput,
   accumulated radiance, bound category depth counters, refraction scaling, wavelengths, delta
   history, and medium identity, with a versioned bit-exact diagnostic dump. A bounded scalar
@@ -77,10 +80,10 @@ silently selecting another path.
 ## Current boundary
 
 Blackframe does not yet provide a production path-tracing integrator, a scene loader, a general
-material or lighting system, a production acceleration build/update pipeline, or a CUDA wavefront
+material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
 renderer. The current BSDF-only loop is a narrow deterministic scalar oracle over resolved
-Lambertian triangles, not a production backend. The acceleration contract builds immutable
-single-frame snapshots and does not yet support deformation or transform motion blur. The headless
+Lambertian triangles, not a production backend. Acceleration updates currently cover explicit full
+rebuilds and frame-to-frame transform refits between immutable snapshots only. The headless
 executable currently supports local engine control and device discovery; it does not yet accept a
 scene and render an image from the command line. A consumable CMake install/export package is also
 not available yet. The CornellDiffuse JSON files are closed validation descriptors, not a general

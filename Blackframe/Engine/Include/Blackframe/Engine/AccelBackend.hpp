@@ -18,6 +18,17 @@ enum class AccelBackendKind : std::uint8_t {
     embree,
 };
 
+// The commits field counts every successfully published immutable snapshot,
+// including the factory's initial commit. The rebuilds and refits fields count
+// only successful explicit post-construction operations.
+struct AccelBuildStatistics final {
+    std::uint64_t commits{};
+    std::uint64_t rebuilds{};
+    std::uint64_t refits{};
+
+    [[nodiscard]] constexpr bool operator==(const AccelBuildStatistics&) const noexcept = default;
+};
+
 // Canonical backend-neutral instance data prepared from one immutable frame
 // scene. The mesh remains in object space and object_to_world is the fully
 // resolved hierarchy transform.
@@ -47,7 +58,11 @@ struct AccelHit final {
 // optional or false. An instance is eligible only when
 // (ray.mask() & visibility_mask) != 0, so a zero ray mask sees no instances.
 // occluded() is an opaque any-hit query that returns at the first crossing in
-// the closed [tMin, tMax] interval without reconstructing surface data.
+// the closed [tMin, tMax] interval without reconstructing surface data. The
+// factory performs the initial scene commit. rebuild() explicitly replaces any
+// topology, while refit() accepts transform-only changes to an otherwise
+// identical snapshot and never falls back to a rebuild. Scene updates and ray
+// queries must not execute concurrently.
 class AccelBackend {
   public:
     virtual ~AccelBackend() noexcept = default;
@@ -64,6 +79,11 @@ class AccelBackend {
 
     [[nodiscard]] virtual core::Result<bool> occluded(const renderer::Ray& ray) const = 0;
 
+    [[nodiscard]] virtual core::Status rebuild(FrameSceneHandle scene) = 0;
+    [[nodiscard]] virtual core::Status refit(FrameSceneHandle scene) = 0;
+
+    [[nodiscard]] virtual AccelBuildStatistics build_statistics() const noexcept;
+
   protected:
     explicit AccelBackend(FrameSceneHandle scene) noexcept;
 
@@ -78,8 +98,16 @@ class AccelBackend {
     [[nodiscard]] static core::Result<renderer::Triangle>
     world_space_triangle(const AccelInstance& instance, std::size_t triangle_index);
 
+    [[nodiscard]] core::Status validate_refit_scene(const FrameSceneHandle& scene) const;
+
+    void publish_rebuild(FrameSceneHandle scene) noexcept;
+    void publish_refit(FrameSceneHandle scene) noexcept;
+
   private:
     FrameSceneHandle scene_;
+    AccelBuildStatistics build_statistics_{
+        .commits = 1U,
+    };
 };
 
 using AccelBackendFactory = core::Result<std::unique_ptr<AccelBackend>> (*)(FrameSceneHandle scene);

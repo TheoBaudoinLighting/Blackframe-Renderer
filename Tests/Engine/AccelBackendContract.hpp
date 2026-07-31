@@ -22,6 +22,8 @@ inline constexpr auto FrontVisibility = renderer::RayMask{1U << 1U};
 inline constexpr auto NearShadowVisibility = renderer::RayMask{1U << 2U};
 inline constexpr auto FarShadowVisibility = renderer::RayMask{1U << 3U};
 inline constexpr auto HierarchyVisibility = renderer::RayMask{1U << 4U};
+inline constexpr auto AnimatedParentVisibility = renderer::RayMask{1U << 5U};
+inline constexpr auto AnimatedChildVisibility = renderer::RayMask{1U << 6U};
 
 [[nodiscard]] inline renderer::Matrix4 identity_transform_matrix() {
     return renderer::identity_matrix<renderer::TransportScalar>();
@@ -316,6 +318,65 @@ make_triangle_mesh_with_leading_miss(const float z) {
     return *scene;
 }
 
+[[nodiscard]] inline FrameSceneHandle
+make_animated_hierarchy_scene(const std::shared_ptr<const TriangleMesh>& mesh,
+                              const float parent_translation_z) {
+    auto scene = FrameScene::create(FrameSceneDescription{
+        .objects =
+            {
+                SceneObject{.id = {.value = 501U}},
+                SceneObject{.id = {.value = 502U}},
+            },
+        .geometries = {SceneGeometry{.id = {.value = 601U}, .mesh = mesh}},
+        .materials =
+            {
+                SceneMaterial{.id = {.value = 701U}},
+                SceneMaterial{.id = {.value = 702U}},
+            },
+        .instances =
+            {
+                SceneInstance{
+                    .id = {.value = 801U},
+                    .parent = std::nullopt,
+                    .object = {.value = 501U},
+                    .geometry = {.value = 601U},
+                    .material = {.value = 701U},
+                    .local_to_parent =
+                        translation_matrix(renderer::Vector3{.z = parent_translation_z}),
+                    .visibility_mask = AnimatedParentVisibility,
+                },
+                SceneInstance{
+                    .id = {.value = 802U},
+                    .parent = renderer::InstanceId{.value = 801U},
+                    .object = {.value = 502U},
+                    .geometry = {.value = 601U},
+                    .material = {.value = 702U},
+                    .local_to_parent = translation_matrix(renderer::Vector3{.z = 1.0F}),
+                    .visibility_mask = AnimatedChildVisibility,
+                },
+            },
+    });
+    if (!scene) {
+        throw std::runtime_error{scene.error().message};
+    }
+    return *scene;
+}
+
+struct AccelLifecycleScenes final {
+    FrameSceneHandle initial;
+    FrameSceneHandle animated;
+    FrameSceneHandle replacement_mesh;
+};
+
+[[nodiscard]] inline AccelLifecycleScenes make_accel_lifecycle_scenes() {
+    const auto shared_mesh = make_triangle_mesh(0.0F);
+    return AccelLifecycleScenes{
+        .initial = make_animated_hierarchy_scene(shared_mesh, 0.0F),
+        .animated = make_animated_hierarchy_scene(shared_mesh, 3.0F),
+        .replacement_mesh = make_animated_hierarchy_scene(make_triangle_mesh(2.0F), 3.0F),
+    };
+}
+
 [[nodiscard]] inline renderer::Ray
 make_ray(const renderer::Point3 origin, const renderer::Vector3 direction, const float t_min = 0.0F,
          const float t_max = std::numeric_limits<float>::infinity(),
@@ -593,6 +654,129 @@ inline void expect_closest_hit_parity(const AccelBackend& analytic, const AccelB
                     accelerated->value().triangle.geometric_normal.y, tolerance);
         EXPECT_NEAR(reference->value().triangle.geometric_normal.z,
                     accelerated->value().triangle.geometric_normal.z, tolerance);
+    }
+}
+
+inline void expect_build_statistics(const AccelBackend& backend, const std::uint64_t commits,
+                                    const std::uint64_t rebuilds, const std::uint64_t refits) {
+    const auto statistics = backend.build_statistics();
+    EXPECT_EQ(statistics.commits, commits);
+    EXPECT_EQ(statistics.rebuilds, rebuilds);
+    EXPECT_EQ(statistics.refits, refits);
+}
+
+[[nodiscard]] inline renderer::Ray
+lifecycle_ray(const float t_min = 0.0F,
+              const float t_max = std::numeric_limits<float>::infinity()) {
+    return make_ray(renderer::Point3{.x = 0.25F, .y = 0.25F, .z = -1.0F},
+                    renderer::Vector3{.z = 1.0F}, t_min, t_max, AnimatedChildVisibility);
+}
+
+inline void expect_lifecycle_hit(const AccelBackend& backend, const float expected_parameter,
+                                 const float expected_position_z) {
+    constexpr auto tolerance = 1.0e-6F;
+    const auto hit = backend.closest_hit(lifecycle_ray());
+    ASSERT_TRUE(hit.has_value()) << hit.error().message;
+    ASSERT_TRUE(hit->has_value());
+    EXPECT_EQ(hit->value().object, (renderer::ObjectId{.value = 502U}));
+    EXPECT_NEAR(hit->value().triangle.parameter, expected_parameter, tolerance);
+    EXPECT_NEAR(hit->value().triangle.position.x, 0.25F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.position.y, 0.25F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.position.z, expected_position_z, tolerance);
+    EXPECT_NEAR(hit->value().triangle.barycentrics.vertex0, 0.5F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.barycentrics.vertex1, 0.25F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.barycentrics.vertex2, 0.25F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.geometric_normal.x, 0.0F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.geometric_normal.y, 0.0F, tolerance);
+    EXPECT_NEAR(hit->value().triangle.geometric_normal.z, 1.0F, tolerance);
+    EXPECT_EQ(hit->value().identifiers, (renderer::SurfaceIdentifiers{
+                                            .instance = {.value = 802U},
+                                            .geometry = {.value = 601U},
+                                            .primitive = {.value = 0U},
+                                            .material = {.value = 702U},
+                                        }));
+}
+
+inline void expect_lifecycle_occlusion(const AccelBackend& backend, const float t_min,
+                                       const float t_max, const bool expected) {
+    const auto occluded = backend.occluded(lifecycle_ray(t_min, t_max));
+    ASSERT_TRUE(occluded.has_value()) << occluded.error().message;
+    EXPECT_EQ(*occluded, expected);
+}
+
+inline void expect_refit_and_rebuild_lifecycle(AccelBackend& backend,
+                                               const AccelLifecycleScenes& scenes,
+                                               const AccelBackendKind expected_kind) {
+    EXPECT_EQ(backend.kind(), expected_kind);
+    expect_build_statistics(backend, 1U, 0U, 0U);
+    expect_lifecycle_hit(backend, 2.0F, 1.0F);
+    expect_lifecycle_occlusion(backend, 0.0F, 3.0F, true);
+    expect_lifecycle_occlusion(backend, 4.0F, 6.0F, false);
+
+    const auto refitted = backend.refit(scenes.animated);
+    ASSERT_TRUE(refitted.has_value()) << refitted.error().message;
+    expect_build_statistics(backend, 2U, 0U, 1U);
+    expect_lifecycle_hit(backend, 5.0F, 4.0F);
+    expect_lifecycle_occlusion(backend, 0.0F, 3.0F, false);
+    expect_lifecycle_occlusion(backend, 4.0F, 6.0F, true);
+
+    const auto incompatible = backend.refit(scenes.replacement_mesh);
+    ASSERT_FALSE(incompatible.has_value());
+    EXPECT_EQ(incompatible.error().code, core::StatusCode::incompatible);
+    EXPECT_FALSE(incompatible.error().message.empty());
+    expect_build_statistics(backend, 2U, 0U, 1U);
+    expect_lifecycle_hit(backend, 5.0F, 4.0F);
+    expect_lifecycle_occlusion(backend, 4.0F, 6.0F, true);
+
+    const auto rebuilt = backend.rebuild(scenes.replacement_mesh);
+    ASSERT_TRUE(rebuilt.has_value()) << rebuilt.error().message;
+    expect_build_statistics(backend, 3U, 1U, 1U);
+    expect_lifecycle_hit(backend, 7.0F, 6.0F);
+    expect_lifecycle_occlusion(backend, 4.0F, 6.0F, false);
+    expect_lifecycle_occlusion(backend, 6.0F, 8.0F, true);
+}
+
+inline void expect_lifecycle_refit_parity(AccelBackend& analytic, AccelBackend& embree,
+                                          const AccelLifecycleScenes& scenes) {
+    const auto analytic_refit = analytic.refit(scenes.animated);
+    ASSERT_TRUE(analytic_refit.has_value()) << analytic_refit.error().message;
+    const auto embree_refit = embree.refit(scenes.animated);
+    ASSERT_TRUE(embree_refit.has_value()) << embree_refit.error().message;
+
+    expect_build_statistics(analytic, 2U, 0U, 1U);
+    expect_build_statistics(embree, 2U, 0U, 1U);
+
+    const auto ray = lifecycle_ray();
+    const auto reference = analytic.closest_hit(ray);
+    const auto accelerated = embree.closest_hit(ray);
+    ASSERT_TRUE(reference.has_value()) << reference.error().message;
+    ASSERT_TRUE(accelerated.has_value()) << accelerated.error().message;
+    ASSERT_TRUE(reference->has_value());
+    ASSERT_TRUE(accelerated->has_value());
+    EXPECT_EQ(reference->value().object, accelerated->value().object);
+    EXPECT_EQ(reference->value().identifiers, accelerated->value().identifiers);
+    EXPECT_NEAR(reference->value().triangle.parameter, accelerated->value().triangle.parameter,
+                1.0e-6F);
+    EXPECT_NEAR(reference->value().triangle.position.x, accelerated->value().triangle.position.x,
+                1.0e-6F);
+    EXPECT_NEAR(reference->value().triangle.position.y, accelerated->value().triangle.position.y,
+                1.0e-6F);
+    EXPECT_NEAR(reference->value().triangle.position.z, accelerated->value().triangle.position.z,
+                1.0e-6F);
+    EXPECT_NEAR(reference->value().triangle.geometric_normal.x,
+                accelerated->value().triangle.geometric_normal.x, 1.0e-6F);
+    EXPECT_NEAR(reference->value().triangle.geometric_normal.y,
+                accelerated->value().triangle.geometric_normal.y, 1.0e-6F);
+    EXPECT_NEAR(reference->value().triangle.geometric_normal.z,
+                accelerated->value().triangle.geometric_normal.z, 1.0e-6F);
+
+    for (const auto segment : std::array{std::array{0.0F, 3.0F}, std::array{4.0F, 6.0F}}) {
+        const auto shadow_ray = lifecycle_ray(segment[0], segment[1]);
+        const auto reference_occlusion = analytic.occluded(shadow_ray);
+        const auto accelerated_occlusion = embree.occluded(shadow_ray);
+        ASSERT_TRUE(reference_occlusion.has_value()) << reference_occlusion.error().message;
+        ASSERT_TRUE(accelerated_occlusion.has_value()) << accelerated_occlusion.error().message;
+        EXPECT_EQ(*accelerated_occlusion, *reference_occlusion);
     }
 }
 

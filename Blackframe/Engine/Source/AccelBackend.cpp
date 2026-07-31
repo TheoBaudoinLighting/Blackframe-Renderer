@@ -1,4 +1,5 @@
 #include <Blackframe/Engine/AccelBackend.hpp>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -149,6 +150,33 @@ class AnalyticAccelBackend final : public AccelBackend {
         return false;
     }
 
+    [[nodiscard]] core::Status rebuild(FrameSceneHandle scene) override {
+        auto instances = prepare_instances(scene);
+        if (!instances) {
+            return std::unexpected(std::move(instances.error()));
+        }
+
+        instances_ = std::move(*instances);
+        publish_rebuild(std::move(scene));
+        return {};
+    }
+
+    [[nodiscard]] core::Status refit(FrameSceneHandle scene) override {
+        const auto compatibility = validate_refit_scene(scene);
+        if (!compatibility) {
+            return std::unexpected(compatibility.error());
+        }
+
+        auto instances = prepare_instances(scene);
+        if (!instances) {
+            return std::unexpected(std::move(instances.error()));
+        }
+
+        instances_ = std::move(*instances);
+        publish_refit(std::move(scene));
+        return {};
+    }
+
   private:
     AnalyticAccelBackend(FrameSceneHandle&& scene, std::vector<AccelInstance>&& instances) noexcept
         : AccelBackend{std::move(scene)}, instances_{std::move(instances)} {}
@@ -159,6 +187,10 @@ class AnalyticAccelBackend final : public AccelBackend {
 } // namespace
 
 AccelBackend::AccelBackend(FrameSceneHandle scene) noexcept : scene_{std::move(scene)} {}
+
+AccelBuildStatistics AccelBackend::build_statistics() const noexcept {
+    return build_statistics_;
+}
 
 core::Result<std::vector<AccelInstance>>
 AccelBackend::prepare_instances(const FrameSceneHandle& scene) {
@@ -216,6 +248,62 @@ AccelBackend::prepare_instances(const FrameSceneHandle& scene) {
             accel_error(core::StatusCode::resource_exhausted,
                         "Acceleration instance preparation exceeded host container limits."));
     }
+}
+
+core::Status AccelBackend::validate_refit_scene(const FrameSceneHandle& scene) const {
+    if (!scene) {
+        return std::unexpected(
+            accel_error(core::StatusCode::invalid_argument,
+                        "Acceleration refit requires an immutable frame scene."));
+    }
+    if (!scene_) {
+        return std::unexpected(accel_error(core::StatusCode::internal_error,
+                                           "Acceleration refit lost the committed frame scene."));
+    }
+
+    if (!std::ranges::equal(scene_->objects(), scene->objects())) {
+        return std::unexpected(
+            accel_error(core::StatusCode::incompatible,
+                        "Acceleration refit cannot change the frame scene object identifiers."));
+    }
+    if (!std::ranges::equal(scene_->geometries(), scene->geometries(),
+                            [](const SceneGeometry& left, const SceneGeometry& right) {
+                                return left.id == right.id && left.mesh == right.mesh;
+                            })) {
+        return std::unexpected(
+            accel_error(core::StatusCode::incompatible,
+                        "Acceleration refit cannot change geometry identifiers or meshes."));
+    }
+    if (!std::ranges::equal(scene_->materials(), scene->materials())) {
+        return std::unexpected(
+            accel_error(core::StatusCode::incompatible,
+                        "Acceleration refit cannot change the frame scene material identifiers."));
+    }
+    if (!std::ranges::equal(scene_->instances(), scene->instances(),
+                            [](const SceneInstance& left, const SceneInstance& right) {
+                                return left.id == right.id && left.parent == right.parent &&
+                                       left.object == right.object &&
+                                       left.geometry == right.geometry &&
+                                       left.material == right.material &&
+                                       left.visibility_mask == right.visibility_mask;
+                            })) {
+        return std::unexpected(
+            accel_error(core::StatusCode::incompatible,
+                        "Acceleration refit accepts only instance transform changes."));
+    }
+    return {};
+}
+
+void AccelBackend::publish_rebuild(FrameSceneHandle scene) noexcept {
+    scene_ = std::move(scene);
+    ++build_statistics_.commits;
+    ++build_statistics_.rebuilds;
+}
+
+void AccelBackend::publish_refit(FrameSceneHandle scene) noexcept {
+    scene_ = std::move(scene);
+    ++build_statistics_.commits;
+    ++build_statistics_.refits;
 }
 
 core::Status AccelBackend::validate_ray(const renderer::Ray& ray) {
