@@ -546,10 +546,11 @@ using ReferenceIncidentLightSample = IncidentLightSampleT<ReferenceScalar>;
 // probability for a delta light. A successful empty result is reserved for
 // valid samples outside the light's support or with zero contribution; an
 // unavailable implementation must return an explicit error. pdf_li consumes a
-// world-space unit direction and always returns a solid-angle density for the
-// closest geometric surface along that direction; it may be zero when that
-// surface is outside the emitter's directional support. A delta light reports
-// exactly zero in solid-angle measure. Both operations receive the path's
+// world-space unit direction and returns the model's conditional solid-angle
+// density in that direction. Finite surface lights resolve their closest
+// geometric surface along the direction; any model may return zero outside its
+// directional support. A delta light reports exactly zero in solid-angle
+// measure. Both operations receive the path's
 // validated four-wavelength packet. le
 // evaluates only radiance carried by an escaped ray; hit-surface emission
 // remains owned by OneSidedSurfaceEmission. Returned radiance is evaluated at
