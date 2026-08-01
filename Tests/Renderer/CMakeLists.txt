@@ -42,6 +42,7 @@ add_executable(
     ShadingNormalCorrectionTest.cpp
     SobolSamplingTest.cpp
     SphereTest.cpp
+    SpecularDeltaTest.cpp
     SpectrumTest.cpp
     StratifiedSamplingTest.cpp
     SurfaceInteractionTest.cpp

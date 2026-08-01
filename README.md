@@ -97,6 +97,13 @@ silently selecting another path.
   complete complex equations independently at every transported wavelength. Both paths support
   transport and reference precision; invalid or unrepresentable values fail instead of being
   clamped, face-forwarded, swapped, or replaced by a Schlick approximation.
+- **Specular delta lobes:** ideal two-sided mirror reflection and achromatic specular transmission
+  expose zero ordinary directional values and densities while sampled atoms use the discrete BSDF
+  measure. Transmission follows Snell's law, reports total internal reflection as absent support,
+  and returns an explicit mode-aware `etaScale` multiplier reciprocal to the radiance adjoint.
+  Unit-vector roundoff introduced by a local frame is reconstructed deterministically; invalid or
+  unrepresentable directions, coefficients, indices, and scaling factors fail without an arbitrary
+  direction substitute. These standalone lobes do not change the current Lambertian scene loops.
 - **Closure storage:** `ClosureSet` owns at most eight insertion-ordered closure records inline
   without dynamic allocation. Transport and reference records retain float and double
   spectral coefficients respectively; their records are fixed at 64 and 120 bytes, and the

@@ -62,6 +62,7 @@ add_library(
         Include/Blackframe/Renderer/ShadingNormalCorrection.hpp
         Include/Blackframe/Renderer/SobolSampling.hpp
         Include/Blackframe/Renderer/Spectrum.hpp
+        Include/Blackframe/Renderer/SpecularDelta.hpp
         Include/Blackframe/Renderer/Sphere.hpp
         Include/Blackframe/Renderer/StratifiedSampling.hpp
         Include/Blackframe/Renderer/SurfaceInteraction.hpp
