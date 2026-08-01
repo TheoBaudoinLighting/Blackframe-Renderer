@@ -420,6 +420,49 @@ TEST(MeshAreaLightTest, KeepsSamplePdfBoundToEndpointAndQueriesClosestSurface) {
     check_mesh_endpoint_conditioning<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void check_mesh_validated_hit_endpoint() {
+    const auto packet = wavelengths<Scalar>();
+    const auto light = MeshAreaLightT<Scalar>::create(
+        {
+            {.x = Scalar{0}, .y = Scalar{0}, .z = Scalar{0}},
+            {.x = Scalar{1}, .y = Scalar{0}, .z = Scalar{0}},
+            {.x = Scalar{0}, .y = Scalar{1}, .z = Scalar{0}},
+        },
+        {{.vertex0 = 0U, .vertex1 = 1U, .vertex2 = 2U}}, Vector3T<Scalar>{},
+        AreaLightSidedness::one_sided, packet, spectrum<Scalar>());
+    ASSERT_TRUE(light.has_value()) << light.error().message;
+
+    const auto above =
+        context<Scalar>(Point3T<Scalar>{.x = Scalar{2}, .y = Scalar{0.25}, .z = Scalar{1}});
+    const auto missed_direction = light->pdf_li(above, Vector3T<Scalar>{.z = Scalar{-1}}, packet);
+    ASSERT_TRUE(missed_direction.has_value()) << missed_direction.error().message;
+    EXPECT_EQ(missed_direction->value(), Scalar{0});
+
+    const auto endpoint = Point3T<Scalar>{.x = Scalar{0.25}, .y = Scalar{0.25}};
+    const auto normal = Normal3T<Scalar>{.z = Scalar{1}};
+    const auto endpoint_pdf = light->pdf_li_at_surface(above, endpoint, normal, packet);
+    const auto expected = convert_area_pdf_to_solid_angle(
+        LightProbabilityDensityT<Scalar>{
+            .value = Scalar{1} / light->surface_area(),
+            .measure = ProbabilityMeasure::area,
+        },
+        above.position(), endpoint, normal);
+    ASSERT_TRUE(endpoint_pdf.has_value()) << endpoint_pdf.error().message;
+    ASSERT_TRUE(expected.has_value()) << expected.error().message;
+    expect_near(endpoint_pdf->value(), static_cast<ReferenceScalar>(expected->value));
+
+    const auto below =
+        context<Scalar>(Point3T<Scalar>{.x = Scalar{0.25}, .y = Scalar{0.25}, .z = Scalar{-1}});
+    const auto unsupported = light->pdf_li_at_surface(below, endpoint, normal, packet);
+    ASSERT_TRUE(unsupported.has_value()) << unsupported.error().message;
+    EXPECT_EQ(unsupported->value(), Scalar{0});
+}
+
+TEST(MeshAreaLightTest, EvaluatesValidatedHitEndpointWithoutRetraversal) {
+    check_mesh_validated_hit_endpoint<TransportScalar>();
+    check_mesh_validated_hit_endpoint<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void check_mesh_closest_backface_occlusion() {
     const auto packet = wavelengths<Scalar>();
     const auto light = MeshAreaLightT<Scalar>::create(

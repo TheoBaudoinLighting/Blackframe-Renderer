@@ -21,6 +21,10 @@ set_target_properties(
 )
 
 if(BUILD_TESTING)
+    set(
+        blackframe_microbenchmark_filter
+        "^(encode_ping|decode_ping|build_light_tree/.*|sample_light_tree/.*|query_light_tree_probability/.*|sample_power_sampler/.*)$"
+    )
     add_test(
         NAME Blackframe.Executables.RenderBenchmarks.Help
         COMMAND "$<TARGET_FILE:BlackframeRenderBenchmarks>" --help
@@ -32,8 +36,20 @@ if(BUILD_TESTING)
             "-DBENCHMARK_EXECUTABLE=$<TARGET_FILE:BlackframeRenderBenchmarks>"
             "-DBINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
             "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/render_benchmarks.json"
+            "-DBENCHMARK_FILTER=${blackframe_microbenchmark_filter}"
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/ValidateBenchmarkJson.cmake"
+    )
+    add_test(
+        NAME Blackframe.Benchmarks.CornellPowerMisConvergence.Json
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DBENCHMARK_EXECUTABLE=$<TARGET_FILE:BlackframeRenderBenchmarks>"
+            "-DBINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/cornell_power_mis_convergence.json"
+            "-DPNG_PATH=${CMAKE_BINARY_DIR}/Benchmarks/Renderer/artifacts/cornell-power-mis-256spp.png"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/ValidateConvergenceBenchmarkJson.cmake"
     )
     set_tests_properties(
         Blackframe.Executables.RenderBenchmarks.Help
@@ -46,5 +62,11 @@ if(BUILD_TESTING)
         PROPERTIES
             LABELS "smoke;cpu"
             TIMEOUT 30
+    )
+    set_tests_properties(
+        Blackframe.Benchmarks.CornellPowerMisConvergence.Json
+        PROPERTIES
+            LABELS "regression;nightly;cpu"
+            TIMEOUT 1800
     )
 endif()

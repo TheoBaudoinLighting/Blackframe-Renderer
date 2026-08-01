@@ -1288,6 +1288,23 @@ template <SpectrumScalar Scalar> class MeshAreaLightT final {
                                              *area_density, sidedness_, *radiance);
     }
 
+    // Evaluates the directional density at a surface endpoint that the caller
+    // has already validated as belonging to this mesh light. This keeps a
+    // backend's closest-hit endpoint authoritative for complementary MIS and
+    // avoids a numerically distinct second ray query after origin offsetting.
+    [[nodiscard]] core::Result<DirectionalLightPdfT<Scalar>>
+    pdf_li_at_surface(const LightSampleContextT<Scalar>& context,
+                      const Point3T<Scalar> surface_position,
+                      const Normal3T<Scalar> surface_geometric_normal,
+                      const SampledWavelengthsT<Scalar>& wavelengths) const {
+        const auto radiance = radiance_.evaluate(wavelengths);
+        if (!radiance) {
+            return std::unexpected(radiance.error());
+        }
+        return area_light_detail::finish_pdf(context, surface_position, surface_geometric_normal,
+                                             measure_.inverse_area, sidedness_, *radiance);
+    }
+
     [[nodiscard]] core::Result<LightSpectrumT<Scalar>>
     le(const RayT<Scalar>&, const SampledWavelengthsT<Scalar>& wavelengths) const {
         const auto radiance = radiance_.evaluate(wavelengths);

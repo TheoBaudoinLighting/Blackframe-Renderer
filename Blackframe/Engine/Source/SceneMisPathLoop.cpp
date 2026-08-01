@@ -262,16 +262,17 @@ class SceneMisDirectLighting final {
                 "The light sampler gives zero support to the emissive surface hit by the BSDF."));
         }
 
-        const auto conditional_probability =
-            area_lights[area_index].pdf_li(previous_bsdf_sample_->context, path_ray.direction(),
-                                           scene_->spectral_environment()->wavelengths);
+        // The acceleration hit is the path endpoint. Re-intersecting the light from
+        // the unoffset previous vertex can disagree at a mesh edge because
+        // continuation rays deliberately use a robustly offset origin. The
+        // mesh sampler is uniform over total area, so evaluate its exact-hit
+        // Jacobian from the already validated endpoint instead of creating a
+        // second geometric answer for the same path.
+        const auto conditional_probability = area_lights[area_index].pdf_li_at_surface(
+            previous_bsdf_sample_->context, surface.interaction().position(),
+            surface.geometric_normal(), scene_->spectral_environment()->wavelengths);
         if (!conditional_probability) {
             return std::unexpected(conditional_probability.error());
-        }
-        if (!(conditional_probability->value() > 0.0F)) {
-            return std::unexpected(scene_mis_error(
-                core::StatusCode::incompatible,
-                "The emissive surface hit by the BSDF has zero directional light density."));
         }
 
         const auto light_probability = renderer::joint_light_pdf<renderer::TransportScalar>(

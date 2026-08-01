@@ -1,4 +1,4 @@
-foreach(required_variable BENCHMARK_EXECUTABLE BINARY_DIRECTORY OUTPUT_PATH)
+foreach(required_variable BENCHMARK_EXECUTABLE BINARY_DIRECTORY OUTPUT_PATH BENCHMARK_FILTER)
     if(NOT DEFINED ${required_variable} OR "${${required_variable}}" STREQUAL "")
         message(FATAL_ERROR "${required_variable} is required.")
     endif()
@@ -34,6 +34,7 @@ execute_process(
     COMMAND
         "${BENCHMARK_EXECUTABLE}"
         --benchmark_min_time=0.001s
+        "--benchmark_filter=${BENCHMARK_FILTER}"
         "--benchmark_out=${normalized_output_path}"
         --benchmark_out_format=json
     RESULT_VARIABLE benchmark_result

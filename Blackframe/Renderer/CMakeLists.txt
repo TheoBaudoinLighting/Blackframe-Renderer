@@ -8,6 +8,7 @@ add_library(
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/Cie1931Sensor.hpp
         Include/Blackframe/Renderer/Color.hpp
+        Include/Blackframe/Renderer/ConvergenceMetrics.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
         Include/Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp
         Include/Blackframe/Renderer/Detail/PacketLightSpectrum.hpp

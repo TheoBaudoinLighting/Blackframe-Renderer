@@ -109,6 +109,16 @@ silently selecting another path.
   optional stb-backed PNG preview writer with a fixed display transform.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
+  A public checkpoint contract reports the first observed inclusive time-to-MSE and time-to-PSNR
+  crossings without interpolation or a last-checkpoint substitute. A Release benchmark renders one
+  canonical 128x128 Cornell box entirely through FrameScene, Embree, spectral Lambertian transport,
+  next-event estimation, and power-heuristic MIS. The same immutable scene and transport path create
+  its independent 512-spp reference, eight seeded progressive evaluations, and its canonical 256-spp
+  PNG: red and green walls, neutral enclosure and ceiling emitter, and exactly two white Lambertian
+  triangle-mesh spheres. Its machine-readable JSON report records median and median absolute
+  deviation for time-to-quality and final error, checks the worst seed against fixed MSE/PSNR
+  targets, and validates coarse linear-image semantics; a missed target is an explicit benchmark
+  failure.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
@@ -187,6 +197,15 @@ The corresponding `*-cpu-release` presets enable benchmarks. CPU sanitizer and C
 also declared for both platforms in `CMakePresets.json`. The main switches are `BUILD_TESTING` and
 the `BLACKFRAME_BUILD_*` / `BLACKFRAME_ENABLE_*` options declared in the root `CMakeLists.txt`;
 enabled but unavailable dependencies fail configuration.
+
+The canonical Cornell convergence report and PNG are generated and validated together in a Release
+build:
+
+```powershell
+ctest --test-dir build/windows-cpu-release `
+  -R '^Blackframe\.Benchmarks\.CornellPowerMisConvergence\.Json$' `
+  --output-on-failure
+```
 
 ## Headless control service
 
