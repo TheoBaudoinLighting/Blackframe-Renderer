@@ -91,6 +91,11 @@ silently selecting another path.
   next path vertices. BSDF values exclude cosine and PDF factors. Radiance and importance modes are
   distinct fixed-width values; only non-symmetric transmission receives the documented radiance
   adjoint factor. Unsupported manifest versions fail instead of returning another schema.
+- **Dielectric Fresnel:** exact unpolarized reflectance accepts an explicit incident-cosine
+  magnitude and explicitly ordered incident/transmitted refractive indices in both transport and
+  reference precision. Equal media, grazing incidence, Snell reciprocity, and total internal
+  reflection have defined analytic results. Invalid values fail instead of being clamped,
+  face-forwarded, swapped, or replaced by a Schlick approximation.
 - **Closure storage:** `ClosureSet` owns at most eight insertion-ordered closure records inline
   without dynamic allocation. Transport and reference records retain float and double
   spectral coefficients respectively; their records are fixed at 64 and 120 bytes, and the

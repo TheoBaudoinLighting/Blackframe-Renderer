@@ -15,6 +15,7 @@ add_executable(
     ExrWriterTest.cpp
     FilmTest.cpp
     FilmTileTest.cpp
+    FresnelTest.cpp
     GeometryTypesTest.cpp
     HdrMetricsTest.cpp
     IndependentSamplerTest.cpp

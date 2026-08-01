@@ -22,6 +22,7 @@ add_library(
         Include/Blackframe/Renderer/EnvironmentLights.hpp
         Include/Blackframe/Renderer/Film.hpp
         Include/Blackframe/Renderer/FilmTile.hpp
+        Include/Blackframe/Renderer/Fresnel.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
         Include/Blackframe/Renderer/HdrMetrics.hpp
