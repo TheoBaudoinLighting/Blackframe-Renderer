@@ -135,6 +135,30 @@ TEST(DirectLightingTest, ReturnsExactZeroOutsideSupportOrThroughZeroTransmittanc
     expect_zero_support<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_estimator_weight_applied_exactly_once() {
+    const auto reflection = LambertianReflectionT<Scalar>::create(unit_spectrum<Scalar>()).value();
+    const auto incident =
+        point_sample<Scalar>(Point3T<Scalar>{.z = Scalar{1}}, unit_spectrum<Scalar>());
+    const auto unweighted = evaluate_lambertian_direct_lighting(
+        unit_spectrum<Scalar>(), reflection, upward_frame<Scalar>(),
+        Vector3T<Scalar>{.z = Scalar{1}}, selection_probability<Scalar>(1U), incident,
+        unit_spectrum<Scalar>());
+    const auto weighted = evaluate_lambertian_direct_lighting(
+        unit_spectrum<Scalar>(), reflection, upward_frame<Scalar>(),
+        Vector3T<Scalar>{.z = Scalar{1}}, selection_probability<Scalar>(1U), incident,
+        unit_spectrum<Scalar>(), Scalar{0.25});
+    ASSERT_TRUE(unweighted.has_value()) << unweighted.error().message;
+    ASSERT_TRUE(weighted.has_value()) << weighted.error().message;
+    for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+        EXPECT_EQ((*weighted)[lane], Scalar{0.25} * (*unweighted)[lane]);
+    }
+}
+
+TEST(DirectLightingTest, AppliesAnEstimatorWeightExactlyOnceInBothPrecisions) {
+    expect_estimator_weight_applied_exactly_once<TransportScalar>();
+    expect_estimator_weight_applied_exactly_once<ReferenceScalar>();
+}
+
 TEST(DirectLightingTest, RejectsInvalidSpectraAndDirections) {
     const auto reflection = LambertianReflection::create(unit_spectrum<TransportScalar>()).value();
     const auto incident =
@@ -171,6 +195,12 @@ TEST(DirectLightingTest, RejectsInvalidSpectraAndDirections) {
         unit_spectrum<TransportScalar>());
     ASSERT_FALSE(direction.has_value());
     EXPECT_EQ(direction.error().code, core::StatusCode::invalid_argument);
+
+    const auto invalid_weight = evaluate_lambertian_direct_lighting(
+        unit_spectrum<TransportScalar>(), reflection, frame, Vector3{.z = 1.0F}, probability,
+        incident, unit_spectrum<TransportScalar>(), -0.25F);
+    ASSERT_FALSE(invalid_weight.has_value());
+    EXPECT_EQ(invalid_weight.error().code, core::StatusCode::invalid_argument);
 }
 
 TEST(DirectLightingTest, ReportsAnUnrepresentableContributionInsteadOfOverflowing) {

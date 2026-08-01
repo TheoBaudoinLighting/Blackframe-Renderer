@@ -85,13 +85,15 @@ checked_product_quotient(const std::array<Scalar, NumeratorCount>& numerators,
 // discrete and the incident sample probability remains conditional on that
 // selection; both therefore appear exactly once in the denominator. The
 // Lambertian value is an unweighted BRDF, so the +Z local cosine is explicit.
+// An optional estimator weight, such as a same-measure MIS weight, appears
+// exactly once in the numerator; delta callers leave it at one.
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<LightSpectrumT<Scalar>> evaluate_lambertian_direct_lighting(
     const LightSpectrumT<Scalar>& beta, const LambertianReflectionT<Scalar>& reflection,
     const OrthonormalFrameT<Scalar>& frame, const Vector3T<Scalar> outgoing_world,
     const LightSelectionProbabilityT<Scalar> selection_probability,
-    const IncidentLightSampleT<Scalar>& incident_light,
-    const LightSpectrumT<Scalar>& transmittance) {
+    const IncidentLightSampleT<Scalar>& incident_light, const LightSpectrumT<Scalar>& transmittance,
+    const Scalar estimator_weight = Scalar{1}) {
     if (!direct_lighting_detail::finite_non_negative(beta)) {
         return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
             "Direct-lighting throughput must be finite and non-negative."));
@@ -110,6 +112,11 @@ template <SpectrumScalar Scalar>
         !(selection_probability.value() > Scalar{0}) || selection_probability.value() > Scalar{1}) {
         return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
             "A direct-lighting selection probability must lie in (0, 1]."));
+    }
+    if (!std::isfinite(estimator_weight) || estimator_weight < Scalar{0} ||
+        estimator_weight > Scalar{1}) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "A direct-lighting estimator weight must lie in [0, 1]."));
     }
 
     const auto conditional_probability = incident_light.probability();
@@ -140,11 +147,20 @@ template <SpectrumScalar Scalar>
 
     auto result = LightSpectrumT<Scalar>{};
     for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
-        const auto contribution = direct_lighting_detail::checked_product_quotient(
-            std::array{beta[lane], reflection.reflectance()[lane], std::numbers::inv_pi_v<Scalar>,
-                       incident_light.incident_radiance()[lane], incoming_local.z,
-                       transmittance[lane]},
-            std::array{selection_probability.value(), conditional_probability.value});
+        const auto contribution =
+            estimator_weight == Scalar{1}
+                ? direct_lighting_detail::checked_product_quotient(
+                      std::array{beta[lane], reflection.reflectance()[lane],
+                                 std::numbers::inv_pi_v<Scalar>,
+                                 incident_light.incident_radiance()[lane], incoming_local.z,
+                                 transmittance[lane]},
+                      std::array{selection_probability.value(), conditional_probability.value})
+                : direct_lighting_detail::checked_product_quotient(
+                      std::array{beta[lane], reflection.reflectance()[lane],
+                                 std::numbers::inv_pi_v<Scalar>,
+                                 incident_light.incident_radiance()[lane], incoming_local.z,
+                                 transmittance[lane], estimator_weight},
+                      std::array{selection_probability.value(), conditional_probability.value});
         if (!contribution) {
             return std::unexpected(contribution.error());
         }

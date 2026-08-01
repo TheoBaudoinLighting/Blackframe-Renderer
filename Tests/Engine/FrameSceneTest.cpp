@@ -115,6 +115,18 @@ make_scene_environment(const renderer::SampledWavelengths wavelengths) {
     };
 }
 
+[[nodiscard]] SceneSpectralMaterial
+make_scene_spectral_material(const renderer::SampledWavelengths wavelengths,
+                             const renderer::TransportSpectrum emitted_radiance = {}) {
+    auto reflectance = renderer::TransportSpectrum{};
+    reflectance.values.fill(0.5F);
+    return SceneSpectralMaterial{
+        .wavelengths = wavelengths,
+        .reflectance = reflectance,
+        .emitted_radiance = emitted_radiance,
+    };
+}
+
 [[nodiscard]] FrameSceneDescription make_scene_description() {
     const auto mesh = make_scene_mesh();
     return FrameSceneDescription{
@@ -232,6 +244,11 @@ TEST(FrameSceneTest, KeepsEveryIdentifierDomainStrongAndSnapshotAccessReadOnly) 
                                std::span<const SceneInstance>>);
     static_assert(std::same_as<decltype(std::declval<const FrameScene&>().punctual_lights()),
                                std::span<const ScenePunctualLight>>);
+    static_assert(std::same_as<decltype(std::declval<const FrameScene&>().mesh_area_lights()),
+                               std::span<const renderer::MeshAreaLight>>);
+    static_assert(
+        std::same_as<decltype(std::declval<const FrameScene&>().mesh_area_light_instance_ids()),
+                     std::span<const renderer::InstanceId>>);
     static_assert(std::variant_size_v<ScenePunctualLight> == 3U);
     static_assert(std::same_as<std::variant_alternative_t<0, ScenePunctualLight>, ScenePointLight>);
     static_assert(
@@ -323,6 +340,119 @@ TEST(FrameSceneTest, ValidatesEveryPunctualRecordWithoutRepairingIt) {
         expect_error_code(FrameScene::create(std::move(description)),
                           core::StatusCode::invalid_argument);
     }
+}
+
+TEST(FrameSceneTest, DerivesMeshAreaLightsFromCanonicalInstancesInStableOrder) {
+    const auto wavelengths = make_scene_wavelengths();
+    const auto emitted = scene_light_spectrum(0.5F);
+    auto description = make_three_level_scene_description();
+    description.spectral_environment = make_scene_environment(wavelengths);
+    description.materials.front().spectral = make_scene_spectral_material(wavelengths, emitted);
+
+    const auto scene_result = FrameScene::create(std::move(description));
+    ASSERT_TRUE(scene_result.has_value()) << scene_result.error().message;
+    const auto& scene = **scene_result;
+    const auto lights = scene.mesh_area_lights();
+    const auto instance_ids = scene.mesh_area_light_instance_ids();
+    ASSERT_EQ(lights.size(), 3U);
+    ASSERT_EQ(instance_ids.size(), lights.size());
+    EXPECT_EQ(instance_ids[0], (renderer::InstanceId{.value = 10}));
+    EXPECT_EQ(instance_ids[1], (renderer::InstanceId{.value = 20}));
+    EXPECT_EQ(instance_ids[2], (renderer::InstanceId{.value = 30}));
+
+    for (auto light_index = std::size_t{}; light_index < lights.size(); ++light_index) {
+        const auto instance = scene.instance(instance_ids[light_index]);
+        const auto world = scene.world_transform(instance_ids[light_index]);
+        ASSERT_TRUE(instance.has_value()) << instance.error().message;
+        ASSERT_TRUE(world.has_value()) << world.error().message;
+        const auto geometry = scene.geometry(instance->get().geometry);
+        ASSERT_TRUE(geometry.has_value()) << geometry.error().message;
+
+        const auto source_positions = geometry->get().mesh->positions();
+        ASSERT_EQ(lights[light_index].positions().size(), source_positions.size());
+        for (auto vertex = std::size_t{}; vertex < source_positions.size(); ++vertex) {
+            EXPECT_EQ(lights[light_index].positions()[vertex],
+                      world->get().apply(source_positions[vertex]));
+        }
+        ASSERT_EQ(lights[light_index].triangles().size(), 1U);
+        EXPECT_EQ(lights[light_index].triangles()[0], (renderer::AreaLightTriangleIndices{
+                                                          .vertex0 = 0U,
+                                                          .vertex1 = 1U,
+                                                          .vertex2 = 2U,
+                                                      }));
+        EXPECT_EQ(lights[light_index].sidedness(), renderer::AreaLightSidedness::one_sided);
+
+        const auto& positions = lights[light_index].positions();
+        const auto center = renderer::Point3{
+            .x = (positions[0].x + positions[1].x + positions[2].x) / 3.0F,
+            .y = (positions[0].y + positions[1].y + positions[2].y) / 3.0F,
+            .z = (positions[0].z + positions[1].z + positions[2].z) / 3.0F + 4.0F,
+        };
+        const auto context = renderer::LightSampleContext::create(center, 0.5F);
+        ASSERT_TRUE(context.has_value()) << context.error().message;
+        const auto sampled = lights[light_index].sample_li(
+            *context, renderer::Point2{.x = 0.25F, .y = 0.5F}, wavelengths);
+        ASSERT_TRUE(sampled.has_value()) << sampled.error().message;
+        ASSERT_TRUE(sampled->has_value());
+        EXPECT_EQ((**sampled).incident_radiance(), emitted);
+        const auto endpoint_error = (**sampled).endpoint().absolute_position_error();
+        ASSERT_TRUE(endpoint_error.has_value());
+        EXPECT_GT(endpoint_error->x, 0.0F);
+        EXPECT_GT(endpoint_error->y, 0.0F);
+        EXPECT_GT(endpoint_error->z, 0.0F);
+    }
+}
+
+TEST(FrameSceneTest, OmitsBlackMaterialsWithoutInventingAreaLights) {
+    const auto wavelengths = make_scene_wavelengths();
+    auto description = make_scene_description();
+    description.spectral_environment = make_scene_environment(wavelengths);
+    for (auto& material : description.materials) {
+        material.spectral = make_scene_spectral_material(wavelengths);
+    }
+    const auto emissive_material =
+        std::ranges::find_if(description.materials, [](const auto& value) {
+            return value.id == renderer::MaterialId{.value = 2};
+        });
+    ASSERT_NE(emissive_material, description.materials.end());
+    emissive_material->spectral->emitted_radiance = scene_light_spectrum();
+
+    const auto scene_result = FrameScene::create(std::move(description));
+    ASSERT_TRUE(scene_result.has_value()) << scene_result.error().message;
+    const auto lights = (*scene_result)->mesh_area_lights();
+    const auto instance_ids = (*scene_result)->mesh_area_light_instance_ids();
+    ASSERT_EQ(lights.size(), 1U);
+    ASSERT_EQ(instance_ids.size(), 1U);
+    EXPECT_EQ(instance_ids.front(), (renderer::InstanceId{.value = 1}));
+}
+
+TEST(FrameSceneTest, RejectsUnrepresentableEmissiveWorldMeshesInsteadOfSkippingThem) {
+    const auto wavelengths = make_scene_wavelengths();
+    auto description = make_scene_description();
+    description.spectral_environment = make_scene_environment(wavelengths);
+    for (auto& material : description.materials) {
+        material.spectral = make_scene_spectral_material(wavelengths);
+    }
+    const auto instance = std::ranges::find_if(description.instances, [](const auto& value) {
+        return value.id == renderer::InstanceId{.value = 1};
+    });
+    ASSERT_NE(instance, description.instances.end());
+    instance->local_to_parent = identity_transform_matrix();
+    instance->local_to_parent(0, 0) = std::numeric_limits<float>::max() / 2.0F;
+    instance->local_to_parent(0, 3) = std::numeric_limits<float>::max();
+
+    const auto black_scene = FrameScene::create(description);
+    ASSERT_TRUE(black_scene.has_value()) << black_scene.error().message;
+    EXPECT_TRUE((*black_scene)->mesh_area_lights().empty());
+
+    const auto emissive_material =
+        std::ranges::find_if(description.materials, [](const auto& value) {
+            return value.id == renderer::MaterialId{.value = 2};
+        });
+    ASSERT_NE(emissive_material, description.materials.end());
+    emissive_material->spectral->emitted_radiance = scene_light_spectrum();
+    expect_error_code(FrameScene::create(std::move(description)),
+                      core::StatusCode::invalid_argument);
 }
 
 TEST(FrameSceneTest, OwnsCanonicalStorageAndResolvesEveryStableIdentifier) {

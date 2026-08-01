@@ -26,9 +26,12 @@ silently selecting another path.
   when the snapshot closes. A snapshot may remain geometry-only, or carry one explicit four-lane
   environment plus wavelength-resolved Lambertian reflection and one-sided emission for every
   material. The same packet also closes an insertion-ordered registry of point, directional, and
-  spot lights whose slots remain stable for light sampling; partially populated spectral scenes
-  are rejected. Missing meshes, duplicate IDs, dangling references, cycles, invalid compositions,
-  invalid lights, and lookup failures are explicit errors.
+  spot lights whose slots remain stable for light sampling. Every non-black emissive mesh instance
+  additionally derives a one-sided area-light model from that exact mesh, resolved world transform,
+  and material emission, in stable instance-ID order; there is no second emitter description.
+  Partially populated spectral scenes are rejected. Missing meshes, duplicate IDs, dangling
+  references, cycles, invalid compositions, invalid lights, unrepresentable emissive transforms,
+  and lookup failures are explicit errors.
 - **Triangle meshes:** the Engine imports strictly triangulated OBJ text and PLY ASCII 1.0 assets
   from explicit absolute paths. Positions, unit normals, UVs, and 32-bit indices are validated;
   independent OBJ index domains are canonicalized at seams. Missing attributes, polygons, invalid
@@ -62,11 +65,17 @@ silently selecting another path.
   scene path samples exactly one registered punctual light at every accepted Lambertian vertex,
   evaluates its discrete light-selection and conditional probabilities once, and traces the
   resulting shadow ray through the selected acceleration backend. It rejects incomplete sampler
-  support and non-vacuum visibility instead of changing estimators silently. Explicit depth budgets
-  count diffuse, glossy, specular, transmission, and volume events separately; transmitted surface
-  events advance both their scattering family and transmission counters. The current Lambertian
-  loops consume only diffuse-reflection depth and support explicitly configured, compensated
-  Russian roulette from a selected completed depth.
+  support and non-vacuum visibility instead of changing estimators silently. A separate MIS path
+  samples the combined punctual and emissive-mesh registry. Punctual delta samples retain weight
+  one; continuous samples compare the joint `P(slot) * p_li` solid-angle density with the
+  Lambertian PDF using an explicitly selected balance or power heuristic. The complementary weight
+  is applied before accumulating an emissive surface reached by a BSDF continuation, so the two
+  techniques do not double count the same transport path. Unsupported heuristic values, resumed
+  non-delta paths missing their previous directional PDF, and incomplete light-sampler support fail
+  explicitly. Explicit depth budgets count diffuse, glossy, specular, transmission, and volume
+  events separately; transmitted surface events advance both their scattering family and
+  transmission counters. The current Lambertian loops consume only diffuse-reflection depth and
+  support explicitly configured, compensated Russian roulette from a selected completed depth.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power
@@ -92,9 +101,9 @@ silently selecting another path.
   spatial Light Tree. The tree builds a deterministic median BVH over finite emitters, isolates
   canonically unbounded lights, and normalizes a context-dependent power-and-distance heuristic
   without changing registry slots. Its discrete probability remains separate from each selected
-  light's conditional PDF. The scalar scene path currently connects this selection contract to the
-  frame-scene punctual registry and robust closest-hit/occlusion backends; area and environment
-  models remain standalone.
+  light's conditional PDF. Scalar scene paths connect this selection contract to both the
+  frame-scene punctual registry and its derived emissive-mesh registry through robust
+  closest-hit/occlusion backends. Environment models remain hit-only in the current transport path.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
@@ -109,7 +118,11 @@ silently selecting another path.
   point-light scene exercises punctual NEE over real Embree closest-hit and shadow traversal,
   verifies deterministic replay, and checks median MSE/PSNR convergence over eight seeds at 1, 4,
   and 16 spp. Its 64-spp PNG preview is checksum-locked and checked against an enumerated double
-  direct-lighting result.
+  direct-lighting result. A distinct Veach-style scene uses a Lambertian receiver and a mesh emitter
+  through Embree to exercise both direct-light and BSDF-hit estimators. Balance and power estimates
+  agree with independent double quadrature within their fixed tolerance and remain close to one
+  reference contribution rather than two; replay and dispatch failures are also covered. Its
+  checksum-locked neutral 64x64 preview shows four white mesh emitters of different sizes at 128 spp.
 - **Host control:** bounded versioned local IPC, a C extension ABI, explicit absolute-path loading,
   XPU device discovery, a reference discovery plugin, and a headless `render` control executable.
 - **Backend integration:** explicit capability reporting and pre-dispatch checks, pinned Embree 4
@@ -122,10 +135,11 @@ Blackframe does not yet provide a production path-tracing integrator, a scene lo
 material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
 renderer. The current BSDF-only transport remains a narrow deterministic Lambertian integrator,
 whether driven by its closed scalar fixture or by a frame scene and Embree; it is not a production
-wavefront backend. Punctual NEE is currently a scalar, vacuum-only path over point, directional, and
-spot lights. Area lights and environment maps are not yet registered for NEE, and no light family
-has MIS. Acceleration updates currently cover explicit full rebuilds and frame-to-frame transform
-refits between immutable snapshots only. The headless
+wavefront backend. Direct lighting and MIS are currently scalar, vacuum-only Lambertian paths over
+point, directional, spot, and emissive triangle-mesh lights. Environment maps are not yet sampled
+by NEE/MIS, and the public MIS entry point starts complete primary paths because `PathState` does
+not carry a prior vertex's directional PDFs. Acceleration updates currently cover explicit full
+rebuilds and frame-to-frame transform refits between immutable snapshots only. The headless
 executable currently supports local engine control and device discovery; it does not yet accept a
 scene and render an image from the command line. A consumable CMake install/export package is also
 not available yet. The CornellDiffuse JSON files are closed validation descriptors, not a general

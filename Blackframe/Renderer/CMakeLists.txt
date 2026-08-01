@@ -32,6 +32,7 @@ add_library(
         Include/Blackframe/Renderer/LinearMetrics.hpp
         Include/Blackframe/Renderer/MatrixOperations.hpp
         Include/Blackframe/Renderer/MatrixTypes.hpp
+        Include/Blackframe/Renderer/MisHeuristics.hpp
         Include/Blackframe/Renderer/NumericConversion.hpp
         Include/Blackframe/Renderer/NumericPrecision.hpp
         Include/Blackframe/Renderer/OwenScrambling.hpp

@@ -5,6 +5,7 @@ add_library(
         Include/Blackframe/Engine/Detail/SceneSurfaceQuery.hpp
         Include/Blackframe/Engine/FrameScene.hpp
         Include/Blackframe/Engine/SceneBsdfOnlyPathLoop.hpp
+        Include/Blackframe/Engine/SceneMisPathLoop.hpp
         Include/Blackframe/Engine/SceneNeePathLoop.hpp
         Include/Blackframe/Engine/SceneSurfaceInteraction.hpp
         Include/Blackframe/Engine/SceneVisibility.hpp
@@ -12,6 +13,7 @@ add_library(
         Source/AccelBackend.cpp
         Source/FrameScene.cpp
         Source/SceneBsdfOnlyPathLoop.cpp
+        Source/SceneMisPathLoop.cpp
         Source/SceneNeePathLoop.cpp
         Source/SceneSurfaceInteraction.cpp
         Source/SceneVisibility.cpp

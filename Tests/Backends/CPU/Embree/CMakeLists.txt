@@ -135,6 +135,74 @@ if(TARGET Blackframe::Png)
 endif()
 
 add_executable(
+    BlackframeEmbreeMisRegressionTests
+    VeachMisImageTest.cpp
+)
+blackframe_set_target_role(BlackframeEmbreeMisRegressionTests test)
+
+target_link_libraries(
+    BlackframeEmbreeMisRegressionTests
+    PRIVATE
+        Blackframe::CpuEmbree
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+if(TARGET Blackframe::Png)
+    target_link_libraries(
+        BlackframeEmbreeMisRegressionTests
+        PRIVATE
+            Blackframe::Png
+            Blackframe::Stb
+    )
+    target_compile_definitions(
+        BlackframeEmbreeMisRegressionTests
+        PRIVATE
+            BLACKFRAME_HAS_PNG_PREVIEW=1
+    )
+else()
+    target_compile_definitions(
+        BlackframeEmbreeMisRegressionTests
+        PRIVATE
+            BLACKFRAME_HAS_PNG_PREVIEW=0
+    )
+endif()
+
+target_compile_definitions(
+    BlackframeEmbreeMisRegressionTests
+    PRIVATE
+        BLACKFRAME_EMBREE_MIS_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+)
+
+gtest_discover_tests(
+    BlackframeEmbreeMisRegressionTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "regression;cpu"
+        TIMEOUT 300
+)
+
+if(TARGET Blackframe::Png)
+    add_test(
+        NAME Blackframe.EmbreeVeachMisPower128SppImage
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeMisRegressionTests>"
+            "-DGTEST_FILTER=VeachMisImageTest.WritesNeutralStablePowerHeuristicPreview"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-veach-mis-power-128spp.png"
+            "-DEXPECTED_SHA256=76ff012ade3552e0ef58a725c8d478c8993cf1c0300bc968be6ee42ebb59b63c"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../../../Renderer/PngChecksumTest.cmake"
+    )
+    set_tests_properties(
+        Blackframe.EmbreeVeachMisPower128SppImage
+        PROPERTIES
+            LABELS "regression;cpu"
+            TIMEOUT 300
+    )
+endif()
+
+add_executable(
     BlackframeEmbreeCornellRegressionTests
     CornellFrameSceneIntegrationTest.cpp
 )

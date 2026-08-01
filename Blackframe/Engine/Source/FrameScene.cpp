@@ -4,8 +4,11 @@
 #include <Blackframe/Renderer/PathState.hpp>
 #include <Blackframe/Renderer/PunctualLights.hpp>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -120,6 +123,146 @@ struct ResolvedInstanceTransforms final {
     std::vector<renderer::AffineTransform> local;
     std::vector<renderer::AffineTransform> world;
 };
+
+struct TransformedMeshPositions final {
+    std::vector<renderer::Point3> positions;
+    renderer::Vector3 absolute_position_error;
+};
+
+struct DerivedMeshAreaLights final {
+    std::vector<renderer::MeshAreaLight> models;
+    std::vector<renderer::InstanceId> instance_ids;
+};
+
+[[nodiscard]] bool is_black(const renderer::TransportSpectrum& spectrum) noexcept {
+    return std::ranges::all_of(spectrum.values,
+                               [](const renderer::TransportScalar value) { return value == 0.0F; });
+}
+
+[[nodiscard]] core::Result<TransformedMeshPositions>
+transform_mesh_positions(const TriangleMesh& mesh, const renderer::AffineTransform& transform) {
+    auto transformed = TransformedMeshPositions{};
+    transformed.positions.reserve(mesh.positions().size());
+
+    constexpr auto scalar_epsilon =
+        static_cast<double>(std::numeric_limits<renderer::TransportScalar>::epsilon());
+    constexpr auto gamma7 = (7.0 * scalar_epsilon) / (1.0 - 7.0 * scalar_epsilon);
+    constexpr auto underflow_allowance =
+        7.0 * static_cast<double>(std::numeric_limits<renderer::TransportScalar>::denorm_min());
+    constexpr auto maximum =
+        static_cast<double>(std::numeric_limits<renderer::TransportScalar>::max());
+
+    auto maximum_error = std::array<renderer::TransportScalar, 3>{};
+    for (const auto source_position : mesh.positions()) {
+        const auto world_position = transform.apply(source_position);
+        const auto source = std::array{source_position.x, source_position.y, source_position.z};
+        const auto world = std::array{world_position.x, world_position.y, world_position.z};
+
+        for (auto row = std::size_t{}; row < 3U; ++row) {
+            auto magnitude = std::abs(static_cast<double>(transform.matrix()(row, 3)));
+            for (auto column = std::size_t{}; column < 3U; ++column) {
+                magnitude += std::abs(static_cast<double>(transform.matrix()(row, column))) *
+                             std::abs(static_cast<double>(source[column]));
+            }
+            const auto bound = std::fma(gamma7, magnitude, underflow_allowance);
+            if (!std::isfinite(static_cast<double>(world[row])) || !std::isfinite(magnitude) ||
+                !std::isfinite(bound) || bound < 0.0 || bound > maximum) {
+                return std::unexpected(scene_error(
+                    core::StatusCode::invalid_argument,
+                    "An emissive mesh world position or its error bound is not representable."));
+            }
+
+            auto rounded_bound = static_cast<renderer::TransportScalar>(bound);
+            if (static_cast<double>(rounded_bound) < bound) {
+                rounded_bound = std::nextafter(
+                    rounded_bound, std::numeric_limits<renderer::TransportScalar>::infinity());
+            }
+            if (!std::isfinite(rounded_bound) || rounded_bound < 0.0F ||
+                (bound > 0.0 && rounded_bound == 0.0F)) {
+                return std::unexpected(
+                    scene_error(core::StatusCode::invalid_argument,
+                                "An emissive mesh world-position error is not representable."));
+            }
+            maximum_error[row] = std::max(maximum_error[row], rounded_bound);
+        }
+        transformed.positions.push_back(world_position);
+    }
+
+    transformed.absolute_position_error = renderer::Vector3{
+        .x = maximum_error[0],
+        .y = maximum_error[1],
+        .z = maximum_error[2],
+    };
+    return transformed;
+}
+
+[[nodiscard]] core::Result<DerivedMeshAreaLights>
+derive_mesh_area_lights(const FrameSceneDescription& description,
+                        const std::vector<renderer::AffineTransform>& world_transforms) {
+    if (description.instances.size() != world_transforms.size()) {
+        return std::unexpected(
+            scene_error(core::StatusCode::internal_error,
+                        "Frame scene area-light derivation lost the aligned world transforms."));
+    }
+
+    auto derived = DerivedMeshAreaLights{};
+    derived.models.reserve(description.instances.size());
+    derived.instance_ids.reserve(description.instances.size());
+
+    for (auto instance_index = std::size_t{}; instance_index < description.instances.size();
+         ++instance_index) {
+        const auto& instance = description.instances[instance_index];
+        const auto material_index = find_record_index(description.materials, instance.material);
+        const auto geometry_index = find_record_index(description.geometries, instance.geometry);
+        if (!material_index || !geometry_index) {
+            return std::unexpected(scene_error(
+                core::StatusCode::internal_error,
+                "Frame scene area-light derivation lost validated instance references."));
+        }
+
+        const auto& material = description.materials[*material_index];
+        if (!material.spectral || is_black(material.spectral->emitted_radiance)) {
+            continue;
+        }
+        if (!description.spectral_environment) {
+            return std::unexpected(
+                scene_error(core::StatusCode::internal_error,
+                            "An emissive mesh lost the frame scene spectral environment."));
+        }
+        if (derived.models.size() == std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(scene_error(
+                core::StatusCode::resource_exhausted,
+                "Frame scene mesh area lights exceed the stable 32-bit registry-slot domain."));
+        }
+
+        const auto& mesh = *description.geometries[*geometry_index].mesh;
+        auto transformed = transform_mesh_positions(mesh, world_transforms[instance_index]);
+        if (!transformed) {
+            return std::unexpected(std::move(transformed.error()));
+        }
+
+        auto triangles = std::vector<renderer::AreaLightTriangleIndices>{};
+        triangles.reserve(mesh.triangles().size());
+        for (const auto& triangle : mesh.triangles()) {
+            triangles.push_back(renderer::AreaLightTriangleIndices{
+                .vertex0 = triangle.vertices[0],
+                .vertex1 = triangle.vertices[1],
+                .vertex2 = triangle.vertices[2],
+            });
+        }
+
+        auto model = renderer::MeshAreaLight::create(
+            std::move(transformed->positions), std::move(triangles),
+            transformed->absolute_position_error, renderer::AreaLightSidedness::one_sided,
+            description.spectral_environment->wavelengths, material.spectral->emitted_radiance);
+        if (!model) {
+            return std::unexpected(std::move(model.error()));
+        }
+        derived.models.push_back(std::move(*model));
+        derived.instance_ids.push_back(instance.id);
+    }
+    return derived;
+}
 
 [[nodiscard]] core::Status validate_spectral_transport(const FrameSceneDescription& description) {
     if (description.punctual_lights.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -376,8 +519,14 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
             return std::unexpected(std::move(transforms.error()));
         }
 
-        return FrameSceneHandle{new FrameScene{std::move(description), std::move(transforms->local),
-                                               std::move(transforms->world)}};
+        auto mesh_area_lights = derive_mesh_area_lights(description, transforms->world);
+        if (!mesh_area_lights) {
+            return std::unexpected(std::move(mesh_area_lights.error()));
+        }
+
+        return FrameSceneHandle{new FrameScene{
+            std::move(description), std::move(transforms->local), std::move(transforms->world),
+            std::move(mesh_area_lights->models), std::move(mesh_area_lights->instance_ids)}};
     } catch (const std::bad_alloc&) {
         return std::unexpected(scene_error(core::StatusCode::resource_exhausted,
                                            "Frame scene storage exhausted host memory."));
@@ -389,13 +538,17 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
 
 FrameScene::FrameScene(FrameSceneDescription&& description,
                        std::vector<renderer::AffineTransform>&& local_transforms,
-                       std::vector<renderer::AffineTransform>&& world_transforms) noexcept
+                       std::vector<renderer::AffineTransform>&& world_transforms,
+                       std::vector<renderer::MeshAreaLight>&& mesh_area_lights,
+                       std::vector<renderer::InstanceId>&& mesh_area_light_instance_ids) noexcept
     : objects_{std::move(description.objects)}, geometries_{std::move(description.geometries)},
       materials_{std::move(description.materials)}, instances_{std::move(description.instances)},
       punctual_lights_{std::move(description.punctual_lights)},
       spectral_environment_{std::move(description.spectral_environment)},
       local_transforms_{std::move(local_transforms)},
-      world_transforms_{std::move(world_transforms)} {}
+      world_transforms_{std::move(world_transforms)},
+      mesh_area_lights_{std::move(mesh_area_lights)},
+      mesh_area_light_instance_ids_{std::move(mesh_area_light_instance_ids)} {}
 
 std::span<const SceneObject> FrameScene::objects() const noexcept {
     return objects_;
@@ -415,6 +568,14 @@ std::span<const SceneInstance> FrameScene::instances() const noexcept {
 
 std::span<const ScenePunctualLight> FrameScene::punctual_lights() const noexcept {
     return punctual_lights_;
+}
+
+std::span<const renderer::MeshAreaLight> FrameScene::mesh_area_lights() const noexcept {
+    return mesh_area_lights_;
+}
+
+std::span<const renderer::InstanceId> FrameScene::mesh_area_light_instance_ids() const noexcept {
+    return mesh_area_light_instance_ids_;
 }
 
 const std::optional<SceneSpectralEnvironment>& FrameScene::spectral_environment() const noexcept {

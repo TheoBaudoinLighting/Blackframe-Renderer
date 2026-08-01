@@ -4,6 +4,7 @@ add_subdirectory(Applications)
 add_subdirectory(Core)
 add_subdirectory(Build)
 add_subdirectory(Renderer)
+add_subdirectory(Renderer/Mis)
 add_subdirectory(Renderer/Light)
 add_subdirectory(Extensions)
 add_subdirectory(XPU)
@@ -32,6 +33,7 @@ set(
     BlackframeCornellReference64Tests
     BlackframeCornellReference256Tests
     BlackframeRendererLightTests
+    BlackframeRendererMisTests
     BlackframeRendererTests
     BlackframeSceneTests
     BlackframeSceneTransportTests
@@ -42,6 +44,7 @@ if(BLACKFRAME_ENABLE_EMBREE)
         APPEND
         blackframe_test_targets
         BlackframeEmbreeCornellRegressionTests
+        BlackframeEmbreeMisRegressionTests
         BlackframeEmbreeSmokeTests
     )
 endif()

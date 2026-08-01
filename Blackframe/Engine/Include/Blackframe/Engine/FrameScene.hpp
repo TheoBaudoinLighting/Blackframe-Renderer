@@ -2,6 +2,7 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Engine/TriangleMesh.hpp>
+#include <Blackframe/Renderer/AreaLights.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
@@ -139,6 +140,11 @@ class FrameScene final {
     [[nodiscard]] std::span<const SceneMaterial> materials() const noexcept;
     [[nodiscard]] std::span<const SceneInstance> instances() const noexcept;
     [[nodiscard]] std::span<const ScenePunctualLight> punctual_lights() const noexcept;
+    // Derived in stable instance-identifier order from the exact committed mesh, world transform,
+    // and non-black spectral material emission. The two spans are index-aligned.
+    [[nodiscard]] std::span<const renderer::MeshAreaLight> mesh_area_lights() const noexcept;
+    [[nodiscard]] std::span<const renderer::InstanceId>
+    mesh_area_light_instance_ids() const noexcept;
     [[nodiscard]] const std::optional<SceneSpectralEnvironment>&
     spectral_environment() const noexcept;
 
@@ -158,7 +164,9 @@ class FrameScene final {
   private:
     explicit FrameScene(FrameSceneDescription&& description,
                         std::vector<renderer::AffineTransform>&& local_transforms,
-                        std::vector<renderer::AffineTransform>&& world_transforms) noexcept;
+                        std::vector<renderer::AffineTransform>&& world_transforms,
+                        std::vector<renderer::MeshAreaLight>&& mesh_area_lights,
+                        std::vector<renderer::InstanceId>&& mesh_area_light_instance_ids) noexcept;
 
     std::vector<SceneObject> objects_;
     std::vector<SceneGeometry> geometries_;
@@ -168,6 +176,8 @@ class FrameScene final {
     std::optional<SceneSpectralEnvironment> spectral_environment_;
     std::vector<renderer::AffineTransform> local_transforms_;
     std::vector<renderer::AffineTransform> world_transforms_;
+    std::vector<renderer::MeshAreaLight> mesh_area_lights_;
+    std::vector<renderer::InstanceId> mesh_area_light_instance_ids_;
 };
 
 static_assert(std::is_nothrow_destructible_v<FrameScene>);
