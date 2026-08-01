@@ -5,6 +5,7 @@ add_executable(
     BsdfOnlyPathLoopTest.cpp
     CapabilityRegistryTest.cpp
     Cie1931SensorTest.cpp
+    ClosureSetTest.cpp
     DebugIntegratorGoldenTest.cpp
     DebugIntegratorsTest.cpp
     DisplayPsnrTest.cpp

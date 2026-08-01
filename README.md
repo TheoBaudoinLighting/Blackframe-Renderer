@@ -85,6 +85,12 @@ silently selecting another path.
   next path vertices. BSDF values exclude cosine and PDF factors. Radiance and importance modes are
   distinct fixed-width values; only non-symmetric transmission receives the documented radiance
   adjoint factor. Unsupported manifest versions fail instead of returning another schema.
+- **Closure storage:** `ClosureSet` owns at most eight insertion-ordered closure records inline
+  without dynamic allocation. Transport and reference records retain float and double
+  spectral coefficients respectively; their records are fixed at 64 and 120 bytes, and the
+  corresponding sets at 520 and 968 bytes, all with eight-byte alignment. The current public
+  append operation accepts validated Lambertian reflection only. Invalid payloads and a ninth
+  closure return distinct statuses without clamping, merging, eviction, or implicit replacement.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power

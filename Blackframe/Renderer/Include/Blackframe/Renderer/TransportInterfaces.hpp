@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Blackframe/Renderer/ClosureSet.hpp>
 #include <Blackframe/Renderer/LightSampler.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
@@ -7,10 +8,9 @@
 
 namespace blackframe::renderer {
 
-// SampleStream, PathState, and these three reserved contracts are the only five central transport
-// interfaces. LightSampler is now defined; the remaining operations stay undefined until their
-// owning features are implemented.
-struct ClosureSet;
+// SampleStream, PathState, ClosureSet, LightSampler, and MediumTracker are the only five central
+// transport interfaces. ClosureSet and LightSampler are defined; MediumTracker remains reserved
+// until its owning feature is implemented.
 struct MediumTracker;
 
 } // namespace blackframe::renderer
