@@ -91,6 +91,13 @@ silently selecting another path.
   corresponding sets at 520 and 968 bytes, all with eight-byte alignment. The current public
   append operation accepts validated Lambertian reflection only. Invalid payloads and a ninth
   closure return distinct statuses without clamping, merging, eviction, or implicit replacement.
+  `ClosureMixture` keeps caller-supplied component probabilities in a fixed-capacity dyadic CDF; it
+  never derives a scalar probability from spectral weights. Near-unit inputs are projected
+  deterministically onto the scalar sampler grid, while invalid or unrepresentable distributions
+  fail explicitly. Physical closure values add directly, and the solid-angle directional PDF is
+  the explicit sum `p_mix = sum(q_i * p_i)`. Sampling reports the selected slot and its effective
+  discrete probability, and returns the full mixture value and PDF without applying selection
+  twice.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power

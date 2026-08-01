@@ -7,6 +7,7 @@ add_library(
         Include/Blackframe/Renderer/BsdfOnlyPathLoop.hpp
         Include/Blackframe/Renderer/CapabilityRegistry.hpp
         Include/Blackframe/Renderer/Cie1931Sensor.hpp
+        Include/Blackframe/Renderer/ClosureMixture.hpp
         Include/Blackframe/Renderer/ClosureSet.hpp
         Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/ConvergenceMetrics.hpp
