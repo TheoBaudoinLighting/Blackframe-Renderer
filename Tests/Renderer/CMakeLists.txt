@@ -36,6 +36,7 @@ add_executable(
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
     RussianRouletteTest.cpp
+    RoughDiffuseReflectionTest.cpp
     SampleDimensionMapTest.cpp
     SampleStreamTest.cpp
     SamplingMappingsTest.cpp

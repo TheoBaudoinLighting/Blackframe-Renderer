@@ -19,12 +19,14 @@ inline constexpr std::uint32_t ClosureParameterScalarCount = 10U;
 enum class ClosureKind : std::uint32_t {
     none = 0U,
     lambertian_reflection = 1U,
+    rough_diffuse_reflection = 2U,
 };
 
 [[nodiscard]] constexpr bool is_known_closure_kind(const ClosureKind kind) noexcept {
     switch (kind) {
     case ClosureKind::none:
     case ClosureKind::lambertian_reflection:
+    case ClosureKind::rough_diffuse_reflection:
         return true;
     }
     return false;
@@ -36,9 +38,10 @@ enum class ClosureAppendStatus : std::uint32_t {
     capacity_exhausted = 2U,
 };
 
-// Every slot is a fixed ABI record. Weight is the model's spectral coefficient; the ten scalar
-// parameters remain zero for Lambertian reflection and reserve enough inline storage for spectral
-// eta, spectral k, and two roughness axes without growing the record.
+// Every slot is a fixed ABI record. Weight is the model's spectral coefficient. Lambertian
+// reflection leaves all ten scalar parameters zero; rough diffuse stores normalized roughness in
+// parameters[0]. The remaining inline storage can hold spectral eta, spectral k, and a second
+// roughness axis without growing the record.
 template <SpectrumScalar Scalar> struct alignas(8) ClosureT final {
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
 
@@ -56,7 +59,7 @@ namespace closure_set_detail {
 template <SpectrumScalar Scalar> struct ClosureSetLayoutProbe;
 
 template <SpectrumScalar Scalar>
-[[nodiscard]] bool valid_lambertian_reflectance(
+[[nodiscard]] bool valid_reflectance(
     const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& reflectance) noexcept {
     for (const auto value : reflectance.values) {
         if (!std::isfinite(value) || value < Scalar{0} || value > Scalar{1}) {
@@ -64,6 +67,11 @@ template <SpectrumScalar Scalar>
         }
     }
     return true;
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] bool valid_roughness(const Scalar roughness) noexcept {
+    return std::isfinite(roughness) && roughness >= Scalar{0} && roughness <= Scalar{1};
 }
 
 } // namespace closure_set_detail
@@ -95,7 +103,7 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
 
     [[nodiscard]] ClosureAppendStatus
     append_lambertian_reflection(const spectrum_type reflectance) noexcept {
-        if (!closure_set_detail::valid_lambertian_reflectance(reflectance)) {
+        if (!closure_set_detail::valid_reflectance(reflectance)) {
             return ClosureAppendStatus::invalid_payload;
         }
         if (full()) {
@@ -107,6 +115,29 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
             .lobes = ScatteringLobe::diffuse | ScatteringLobe::reflection,
             .weight = reflectance,
             .parameters = {},
+        };
+        ++size_;
+        return ClosureAppendStatus::appended;
+    }
+
+    [[nodiscard]] ClosureAppendStatus
+    append_rough_diffuse_reflection(const spectrum_type reflectance,
+                                    const Scalar roughness) noexcept {
+        if (!closure_set_detail::valid_reflectance(reflectance) ||
+            !closure_set_detail::valid_roughness(roughness)) {
+            return ClosureAppendStatus::invalid_payload;
+        }
+        if (full()) {
+            return ClosureAppendStatus::capacity_exhausted;
+        }
+
+        auto parameters = std::array<Scalar, ClosureParameterScalarCount>{};
+        parameters[0] = roughness;
+        closures_[size_] = closure_type{
+            .kind = ClosureKind::rough_diffuse_reflection,
+            .lobes = ScatteringLobe::diffuse | ScatteringLobe::reflection,
+            .weight = reflectance,
+            .parameters = parameters,
         };
         ++size_;
         return ClosureAppendStatus::appended;
@@ -139,6 +170,7 @@ static_assert(sizeof(ClosureKind) == sizeof(std::uint32_t));
 static_assert(sizeof(ClosureAppendStatus) == sizeof(std::uint32_t));
 static_assert(static_cast<std::uint32_t>(ClosureKind::none) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::lambertian_reflection) == 1U);
+static_assert(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection) == 2U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::appended) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::invalid_payload) == 1U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::capacity_exhausted) == 2U);

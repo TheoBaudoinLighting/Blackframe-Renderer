@@ -77,9 +77,11 @@ TEST(ClosureSetTest, FreezesTheInlineAbiForTransportAndReferencePrecision) {
 TEST(ClosureSetTest, FreezesKindAndAppendStatusCodes) {
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::none), 0U);
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::lambertian_reflection), 1U);
+    EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection), 2U);
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::none));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::lambertian_reflection));
-    EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(2U)));
+    EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_diffuse_reflection));
+    EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(3U)));
     EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(0xffffffffU)));
 
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureAppendStatus::appended), 0U);
@@ -140,6 +142,30 @@ TEST(ClosureSetTest, PreservesTheActivePrefixInBothPrecisions) {
     expect_stable_capacity_and_order<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_rough_diffuse_record() {
+    auto set = ClosureSetFor<Scalar>{};
+    const auto reflectance = constant_spectrum(Scalar{0.625});
+    ASSERT_EQ(set.append_lambertian_reflection(constant_spectrum(Scalar{0.25})),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.append_rough_diffuse_reflection(reflectance, Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.size(), 2U);
+
+    const auto& closure = set.closures()[1];
+    EXPECT_EQ(closure.kind, ClosureKind::rough_diffuse_reflection);
+    EXPECT_EQ(closure.lobes, ScatteringLobe::diffuse | ScatteringLobe::reflection);
+    EXPECT_EQ(closure.weight, reflectance);
+    EXPECT_EQ(closure.parameters[0], Scalar{0.75});
+    for (auto index = std::size_t{1}; index < closure.parameters.size(); ++index) {
+        EXPECT_EQ(closure.parameters[index], Scalar{0});
+    }
+}
+
+TEST(ClosureSetTest, StoresRoughDiffuseInTheExistingInlineAbi) {
+    expect_rough_diffuse_record<TransportScalar>();
+    expect_rough_diffuse_record<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void expect_invalid_payloads_are_atomic() {
     auto set = ClosureSetFor<Scalar>{};
     ASSERT_EQ(set.append_lambertian_reflection(constant_spectrum(Scalar{0.25})),
@@ -164,6 +190,35 @@ template <SpectrumScalar Scalar> void expect_invalid_payloads_are_atomic() {
 TEST(ClosureSetTest, RejectsMalformedLambertianPayloadsWithoutMutationOrClamping) {
     expect_invalid_payloads_are_atomic<TransportScalar>();
     expect_invalid_payloads_are_atomic<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_invalid_rough_diffuse_payloads_are_atomic() {
+    auto set = ClosureSetFor<Scalar>{};
+    ASSERT_EQ(set.append_rough_diffuse_reflection(constant_spectrum(Scalar{0.25}), Scalar{0.5}),
+              ClosureAppendStatus::appended);
+    const auto original = object_bytes(set);
+
+    for (const auto invalid : std::array{
+             std::numeric_limits<Scalar>::quiet_NaN(),
+             std::numeric_limits<Scalar>::infinity(),
+             -std::numeric_limits<Scalar>::denorm_min(),
+             std::nextafter(Scalar{1}, std::numeric_limits<Scalar>::infinity()),
+         }) {
+        EXPECT_EQ(set.append_rough_diffuse_reflection(constant_spectrum(Scalar{0.5}), invalid),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+
+        auto malformed = constant_spectrum(Scalar{0.5});
+        malformed[1] = invalid;
+        EXPECT_EQ(set.append_rough_diffuse_reflection(malformed, Scalar{0.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
+}
+
+TEST(ClosureSetTest, RejectsMalformedRoughDiffusePayloadsAtomically) {
+    expect_invalid_rough_diffuse_payloads_are_atomic<TransportScalar>();
+    expect_invalid_rough_diffuse_payloads_are_atomic<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_overflow_is_atomic() {
@@ -199,6 +254,10 @@ static_assert(noexcept(
     std::declval<ClosureSet&>().append_lambertian_reflection(std::declval<TransportSpectrum>())));
 static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_lambertian_reflection(
     std::declval<ReferenceSpectrum>())));
+static_assert(noexcept(std::declval<ClosureSet&>().append_rough_diffuse_reflection(
+    std::declval<TransportSpectrum>(), std::declval<TransportScalar>())));
+static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_diffuse_reflection(
+    std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>())));
 static_assert(noexcept(std::declval<const ClosureSet&>().closures()));
 static_assert(noexcept(std::declval<const ReferenceClosureSet&>().closures()));
 

@@ -28,6 +28,11 @@ using ReflectionFor = std::conditional_t<std::same_as<Scalar, TransportScalar>,
                                          LambertianReflection, ReferenceLambertianReflection>;
 
 template <SpectrumScalar Scalar>
+using RoughReflectionFor =
+    std::conditional_t<std::same_as<Scalar, TransportScalar>, RoughDiffuseReflection,
+                       ReferenceRoughDiffuseReflection>;
+
+template <SpectrumScalar Scalar>
 using SpectrumFor = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
 
 template <SpectrumScalar Scalar> using DensityFor = ClosureProbabilityDensityT<Scalar>;
@@ -315,6 +320,79 @@ TEST(ClosureMixtureTest, DelegatesASingletonWithoutApplyingSelectionTwice) {
     expect_singleton_delegation<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_rough_diffuse_dispatch() {
+    const auto rough_reflectance = SpectrumFor<Scalar>{
+        .values = {Scalar{0.125}, Scalar{0.25}, Scalar{0.5}, Scalar{1}},
+    };
+    auto singleton_set = SetFor<Scalar>{};
+    ASSERT_EQ(singleton_set.append_rough_diffuse_reflection(rough_reflectance, Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    const auto singleton_probability = std::array{Scalar{1}};
+    const auto singleton = MixtureFor<Scalar>::create(singleton_set, singleton_probability);
+    const auto direct = RoughReflectionFor<Scalar>::create(rough_reflectance, Scalar{0.75});
+    ASSERT_TRUE(singleton.has_value());
+    ASSERT_TRUE(direct.has_value());
+
+    const auto outgoing = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
+    const auto incoming = Vector3T<Scalar>{
+        .x = Scalar{-0.3}, .y = Scalar{0.4}, .z = static_cast<Scalar>(std::sqrt(0.75L))};
+    const auto singleton_value = singleton->eval(outgoing, incoming);
+    const auto direct_value = direct->eval(outgoing, incoming);
+    const auto singleton_pdf = singleton->pdf(outgoing, incoming);
+    const auto direct_pdf = direct->pdf(outgoing, incoming);
+    ASSERT_TRUE(singleton_value.has_value());
+    ASSERT_TRUE(direct_value.has_value());
+    ASSERT_TRUE(singleton_pdf.has_value());
+    ASSERT_TRUE(direct_pdf.has_value());
+    EXPECT_EQ(*singleton_value, *direct_value);
+    EXPECT_EQ(singleton_pdf->value, direct_pdf->value);
+    EXPECT_EQ(singleton_pdf->measure, direct_pdf->measure);
+
+    const auto lambert_reflectance = constant_spectrum<Scalar>(Scalar{0.2});
+    auto mixed_set = SetFor<Scalar>{};
+    ASSERT_EQ(mixed_set.append_lambertian_reflection(lambert_reflectance),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(mixed_set.append_rough_diffuse_reflection(rough_reflectance, Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
+    const auto mixture = MixtureFor<Scalar>::create(mixed_set, probabilities);
+    const auto lambert = ReflectionFor<Scalar>::create(lambert_reflectance);
+    ASSERT_TRUE(mixture.has_value());
+    ASSERT_TRUE(lambert.has_value());
+
+    const auto mixture_value = mixture->eval(outgoing, incoming);
+    const auto lambert_value = lambert->eval(outgoing, incoming);
+    ASSERT_TRUE(mixture_value.has_value());
+    ASSERT_TRUE(lambert_value.has_value());
+    auto expected_value = SpectrumFor<Scalar>{};
+    for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+        expected_value[lane] = (*lambert_value)[lane] + (*direct_value)[lane];
+    }
+    expect_spectrum_near(*mixture_value, expected_value);
+
+    const auto canonical = Point2T<Scalar>{.x = Scalar{0.625}, .y = Scalar{0.25}};
+    const auto selected_lambert = mixture->sample(outgoing, Scalar{0.125}, canonical);
+    const auto selected_rough = mixture->sample(outgoing, Scalar{0.625}, canonical);
+    ASSERT_TRUE(selected_lambert.has_value());
+    ASSERT_TRUE(selected_lambert->has_value());
+    ASSERT_TRUE(selected_rough.has_value());
+    ASSERT_TRUE(selected_rough->has_value());
+    EXPECT_EQ((**selected_lambert).selected_closure, 0U);
+    EXPECT_EQ((**selected_lambert).lobes, ScatteringLobe::diffuse | ScatteringLobe::reflection);
+    EXPECT_EQ((**selected_rough).selected_closure, 1U);
+    EXPECT_EQ((**selected_rough).lobes, ScatteringLobe::diffuse | ScatteringLobe::reflection);
+    EXPECT_EQ((**selected_lambert).selection_probability.value, Scalar{0.25});
+    EXPECT_EQ((**selected_rough).selection_probability.value, Scalar{0.75});
+    EXPECT_EQ((**selected_lambert).incoming_local, (**selected_rough).incoming_local);
+    EXPECT_EQ((**selected_lambert).value, (**selected_rough).value);
+    EXPECT_EQ((**selected_lambert).probability.value, (**selected_rough).probability.value);
+}
+
+TEST(ClosureMixtureTest, DispatchesRoughDiffuseWithoutAHiddenLambertianFallback) {
+    expect_rough_diffuse_dispatch<TransportScalar>();
+    expect_rough_diffuse_dispatch<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void expect_two_component_mixture() {
     const auto first = SpectrumFor<Scalar>{
         .values = {Scalar{0.125}, Scalar{0.25}, Scalar{0.375}, Scalar{0.5}},
@@ -598,6 +676,24 @@ template <SpectrumScalar Scalar> void expect_corrupt_records_are_rejected() {
         overwrite_bytes(valid_set, set_storage_offset + closure_weight_offset,
                         std::numeric_limits<Scalar>::quiet_NaN());
     expect_invalid(MixtureFor<Scalar>::create(invalid_weight, probability));
+
+    auto rough_set = SetFor<Scalar>{};
+    ASSERT_EQ(rough_set.append_rough_diffuse_reflection(constant_spectrum<Scalar>(Scalar{0.5}),
+                                                        Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    const auto rough_incompatible_lobes =
+        overwrite_bytes(rough_set, set_storage_offset + std::size_t{4},
+                        ScatteringLobe::glossy | ScatteringLobe::reflection);
+    expect_invalid(MixtureFor<Scalar>::create(rough_incompatible_lobes, probability));
+
+    const auto invalid_roughness =
+        overwrite_bytes(rough_set, set_storage_offset + parameter_offset,
+                        std::nextafter(Scalar{1}, std::numeric_limits<Scalar>::infinity()));
+    expect_invalid(MixtureFor<Scalar>::create(invalid_roughness, probability));
+
+    const auto rough_nonzero_reserved = overwrite_bytes(
+        rough_set, set_storage_offset + parameter_offset + sizeof(Scalar), Scalar{1});
+    expect_invalid(MixtureFor<Scalar>::create(rough_nonzero_reserved, probability));
 }
 
 TEST(ClosureMixtureTest, RejectsUnsupportedOrCorruptRecordsWithoutDispatchFallback) {

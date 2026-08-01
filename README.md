@@ -97,6 +97,11 @@ silently selecting another path.
   complete complex equations independently at every transported wavelength. Both paths support
   transport and reference precision; invalid or unrepresentable values fail instead of being
   clamped, face-forwarded, swapped, or replaced by a Schlick approximation.
+- **Rough diffuse reflection:** the four-lane energy-preserving Oren--Nayar model combines the
+  reciprocal Fujii single-scattering lobe with exact analytical multiple-scattering compensation.
+  Its normalized roughness is explicit in `[0, 1]`, zero roughness reduces exactly to Lambert,
+  and cosine-weighted samples retain a complete solid-angle PDF. Float and double white-furnace
+  quadrature verify unit reflected energy for white surfaces across roughness and view angle.
 - **Specular delta lobes:** ideal two-sided mirror reflection and achromatic specular transmission
   expose zero ordinary directional values and densities while sampled atoms use the discrete BSDF
   measure. Transmission follows Snell's law, reports total internal reflection as absent support,
@@ -107,9 +112,11 @@ silently selecting another path.
 - **Closure storage:** `ClosureSet` owns at most eight insertion-ordered closure records inline
   without dynamic allocation. Transport and reference records retain float and double
   spectral coefficients respectively; their records are fixed at 64 and 120 bytes, and the
-  corresponding sets at 520 and 968 bytes, all with eight-byte alignment. The current public
-  append operation accepts validated Lambertian reflection only. Invalid payloads and a ninth
-  closure return distinct statuses without clamping, merging, eviction, or implicit replacement.
+  corresponding sets at 520 and 968 bytes, all with eight-byte alignment. Public append operations
+  accept validated Lambertian or rough-diffuse reflection; the latter uses the first reserved
+  scalar for normalized roughness without changing either record layout. Invalid payloads and a
+  ninth closure return distinct statuses without clamping, merging, eviction, or implicit
+  replacement.
   `ClosureMixture` keeps caller-supplied component probabilities in a fixed-capacity dyadic CDF; it
   never derives a scalar probability from spectral weights. Near-unit inputs are projected
   deterministically onto the scalar sampler grid, while invalid or unrepresentable distributions
@@ -124,8 +131,9 @@ silently selecting another path.
   is used.
 - **Spectral and color foundations:** four-lane 360-830 nm wavelength packets with marginal PDFs,
   black, constant, and tabulated spectra, `SampledSpectrum<4>`, energy-conserving spectral
-  Lambertian reflection, one-sided spectral surface emission, a constant spectral environment, the
-  CIE 1931 2-degree observer to relative XYZ, and signed scene-linear RGB.
+  Lambertian and energy-preserving rough-diffuse reflection, one-sided spectral surface emission,
+  a constant spectral environment, the CIE 1931 2-degree observer to relative XYZ, and signed
+  scene-linear RGB.
 - **Light contract:** statically dispatched float and double light models expose incident-radiance
   sampling, directional PDFs, escaped-ray radiance, spectral power, and conservative world bounds.
   Continuous and delta probabilities retain distinct solid-angle and discrete measures. Explicit

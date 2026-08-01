@@ -3,6 +3,7 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/ClosureSet.hpp>
 #include <Blackframe/Renderer/LambertianReflection.hpp>
+#include <Blackframe/Renderer/RoughDiffuseReflection.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -349,6 +350,157 @@ lambertian_from_record(const ClosureT<Scalar>& closure) {
     return LambertianReflectionT<Scalar>::create(closure.weight);
 }
 
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<RoughDiffuseReflectionT<Scalar>>
+rough_diffuse_from_record(const ClosureT<Scalar>& closure) {
+    constexpr auto rough_diffuse_lobes = ScatteringLobe::diffuse | ScatteringLobe::reflection;
+    if (closure.kind != ClosureKind::rough_diffuse_reflection) {
+        return std::unexpected(
+            invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+    }
+    if (closure.lobes != rough_diffuse_lobes) {
+        return std::unexpected(invalid_closure_mixture(
+            "A rough-diffuse closure record has an incompatible lobe mask."));
+    }
+    for (auto index = std::size_t{1}; index < closure.parameters.size(); ++index) {
+        if (closure.parameters[index] != Scalar{0}) {
+            return std::unexpected(invalid_closure_mixture(
+                "A rough-diffuse closure record has a non-zero reserved payload."));
+        }
+    }
+    return RoughDiffuseReflectionT<Scalar>::create(closure.weight, closure.parameters[0]);
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Status validate_closure_record(const ClosureT<Scalar>& closure) {
+    switch (closure.kind) {
+    case ClosureKind::lambertian_reflection: {
+        const auto model = lambertian_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return {};
+    }
+    case ClosureKind::rough_diffuse_reflection: {
+        const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return {};
+    }
+    case ClosureKind::none:
+        break;
+    }
+    return std::unexpected(
+        invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<SampledSpectrum<TransportSpectrumSampleCount, Scalar>>
+eval_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgoing_local,
+                    const Vector3T<Scalar> incoming_local) {
+    switch (closure.kind) {
+    case ClosureKind::lambertian_reflection: {
+        const auto model = lambertian_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->eval(outgoing_local, incoming_local);
+    }
+    case ClosureKind::rough_diffuse_reflection: {
+        const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->eval(outgoing_local, incoming_local);
+    }
+    case ClosureKind::none:
+        break;
+    }
+    return std::unexpected(
+        invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<ClosureProbabilityDensityT<Scalar>>
+pdf_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgoing_local,
+                   const Vector3T<Scalar> incoming_local) {
+    switch (closure.kind) {
+    case ClosureKind::lambertian_reflection: {
+        const auto model = lambertian_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->pdf(outgoing_local, incoming_local);
+    }
+    case ClosureKind::rough_diffuse_reflection: {
+        const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->pdf(outgoing_local, incoming_local);
+    }
+    case ClosureKind::none:
+        break;
+    }
+    return std::unexpected(
+        invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+}
+
+template <SpectrumScalar Scalar> struct ClosureDirectionSampleT final {
+    Vector3T<Scalar> incoming_local{};
+    SampledSpectrum<TransportSpectrumSampleCount, Scalar> value{};
+    ClosureProbabilityDensityT<Scalar> probability{
+        .value = Scalar{0},
+        .measure = ContinuousBsdfProbabilityMeasure,
+    };
+};
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<std::optional<ClosureDirectionSampleT<Scalar>>>
+sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgoing_local,
+                      const Point2T<Scalar> direction_sample) {
+    const auto convert = [](const auto& sampled) -> std::optional<ClosureDirectionSampleT<Scalar>> {
+        if (!sampled.has_value()) {
+            return {};
+        }
+        return ClosureDirectionSampleT<Scalar>{
+            .incoming_local = sampled->incoming_local,
+            .value = sampled->value,
+            .probability = sampled->probability,
+        };
+    };
+
+    switch (closure.kind) {
+    case ClosureKind::lambertian_reflection: {
+        const auto model = lambertian_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        const auto sampled = model->sample(outgoing_local, direction_sample);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        return convert(*sampled);
+    }
+    case ClosureKind::rough_diffuse_reflection: {
+        const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        const auto sampled = model->sample(outgoing_local, direction_sample);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        return convert(*sampled);
+    }
+    case ClosureKind::none:
+        break;
+    }
+    return std::unexpected(
+        invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+}
+
 } // namespace closure_mixture_detail
 
 // The discrete component probabilities are supplied explicitly and are not inferred from spectral
@@ -393,9 +545,9 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             return std::unexpected(distribution.error());
         }
         for (const auto& closure : closures.closures()) {
-            const auto model = closure_mixture_detail::lambertian_from_record(closure);
-            if (!model) {
-                return std::unexpected(model.error());
+            const auto status = closure_mixture_detail::validate_closure_record(closure);
+            if (!status) {
+                return std::unexpected(status.error());
             }
         }
         return ClosureMixtureT{std::move(closures), distribution->probabilities, distribution->cdf};
@@ -425,21 +577,14 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             return spectrum_type{};
         }
         if (closures_.size() == 1U) {
-            const auto model =
-                closure_mixture_detail::lambertian_from_record(closures_.closures().front());
-            if (!model) {
-                return std::unexpected(model.error());
-            }
-            return model->eval(outgoing_local, incoming_local);
+            return closure_mixture_detail::eval_closure_record(closures_.closures().front(),
+                                                               outgoing_local, incoming_local);
         }
 
         auto result = spectrum_type{};
         for (const auto& closure : closures_.closures()) {
-            const auto model = closure_mixture_detail::lambertian_from_record(closure);
-            if (!model) {
-                return std::unexpected(model.error());
-            }
-            const auto component = model->eval(outgoing_local, incoming_local);
+            const auto component = closure_mixture_detail::eval_closure_record(
+                closure, outgoing_local, incoming_local);
             if (!component) {
                 return std::unexpected(component.error());
             }
@@ -469,23 +614,15 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             };
         }
         if (closures_.size() == 1U) {
-            const auto model =
-                closure_mixture_detail::lambertian_from_record(closures_.closures().front());
-            if (!model) {
-                return std::unexpected(model.error());
-            }
-            return model->pdf(outgoing_local, incoming_local);
+            return closure_mixture_detail::pdf_closure_record(closures_.closures().front(),
+                                                              outgoing_local, incoming_local);
         }
 
         auto conditional_probabilities =
             std::array<probability_density_type, MaximumClosureCount>{};
         for (auto index = std::size_t{}; index < closures_.closures().size(); ++index) {
-            const auto model =
-                closure_mixture_detail::lambertian_from_record(closures_.closures()[index]);
-            if (!model) {
-                return std::unexpected(model.error());
-            }
-            const auto component = model->pdf(outgoing_local, incoming_local);
+            const auto component = closure_mixture_detail::pdf_closure_record(
+                closures_.closures()[index], outgoing_local, incoming_local);
             if (!component) {
                 return std::unexpected(component.error());
             }
@@ -525,11 +662,8 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             return std::unexpected(selected.error());
         }
         const auto& closure = closures_.closures()[*selected];
-        const auto model = closure_mixture_detail::lambertian_from_record(closure);
-        if (!model) {
-            return std::unexpected(model.error());
-        }
-        const auto sampled = model->sample(outgoing_local, direction_sample);
+        const auto sampled = closure_mixture_detail::sample_closure_record(closure, outgoing_local,
+                                                                           direction_sample);
         if (!sampled) {
             return std::unexpected(sampled.error());
         }
