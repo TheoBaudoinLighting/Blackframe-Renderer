@@ -76,6 +76,12 @@ silently selecting another path.
   events separately; transmitted surface events advance both their scattering family and
   transmission counters. The current Lambertian loops consume only diffuse-reflection depth and
   support explicitly configured, compensated Russian roulette from a selected completed depth.
+- **Shading normals:** scalar surface transport builds closure frames and evaluates their cosine and
+  directional PDF from `Ns`, while `Ng` remains authoritative for sidedness, visibility, ray
+  offsets, emission orientation, and area/solid-angle Jacobians. Directions on which the two normals
+  disagree have zero support instead of being face-forwarded. The documented Veach adjoint factor
+  is exactly one for the current radiance paths and the explicit `|wo.Ns| |wi.Ng| / (|wo.Ng|
+  |wi.Ns|)` ratio in importance mode; invalid modes and unrepresentable ratios fail explicitly.
 - **BSDF conventions:** a versioned machine-readable contract fixes the numeric PDF measures and
   lobe bits shared by every backend. Concrete surface events contain exactly one
   diffuse/glossy/specular family and one reflection/transmission direction; specular is the delta
@@ -131,6 +137,8 @@ silently selecting another path.
   optional stb-backed PNG preview writer with a fixed display transform.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
+  A deterministic tilted-normal Lambertian furnace validates both precisions against its analytic
+  common-hemisphere energy and verifies that the correction does not create energy.
   A public checkpoint contract reports the first observed inclusive time-to-MSE and time-to-PSNR
   crossings without interpolation or a last-checkpoint substitute. A Release benchmark renders one
   canonical 128x128 Cornell box entirely through FrameScene, Embree, spectral Lambertian transport,

@@ -2,10 +2,14 @@
 #include <Blackframe/Engine/SceneBsdfOnlyPathLoop.hpp>
 #include <Blackframe/Engine/SceneSurfaceInteraction.hpp>
 #include <Blackframe/Renderer/IndependentSampler.hpp>
+#include <Blackframe/Renderer/LocalFrame.hpp>
 #include <Blackframe/Renderer/MatrixOperations.hpp>
+#include <Blackframe/Renderer/SampleDimensionMap.hpp>
+#include <Blackframe/Renderer/SamplingMappings.hpp>
 #include <Blackframe/Renderer/WavelengthSampling.hpp>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -20,7 +24,8 @@ namespace {
     return renderer::sample_uniform_visible_wavelengths(sample).value();
 }
 
-[[nodiscard]] std::shared_ptr<const TriangleMesh> make_surface_mesh() {
+[[nodiscard]] std::shared_ptr<const TriangleMesh>
+make_surface_mesh(const renderer::Normal3 shading_normal = {.z = 1.0F}) {
     auto mesh = TriangleMesh::create(
         {
             renderer::Point3{.x = 0.0F, .y = 0.0F, .z = 0.0F},
@@ -28,9 +33,9 @@ namespace {
             renderer::Point3{.x = 0.0F, .y = 2.0F, .z = 0.0F},
         },
         {
-            renderer::Normal3{.x = 0.0F, .y = 0.0F, .z = 1.0F},
-            renderer::Normal3{.x = 0.0F, .y = 0.0F, .z = 1.0F},
-            renderer::Normal3{.x = 0.0F, .y = 0.0F, .z = 1.0F},
+            shading_normal,
+            shading_normal,
+            shading_normal,
         },
         {
             renderer::Point2{.x = 0.0F, .y = 0.0F},
@@ -484,6 +489,59 @@ TEST(SceneBsdfOnlyPathLoopTest, RejectsAPathResolvedAtDifferentWavelengths) {
                                               renderer::RussianRoulettePolicy::disabled());
 
     expect_error(traced, core::StatusCode::incompatible);
+}
+
+TEST(SceneBsdfOnlyPathLoopTest, SamplesTheShadingFrameAndKeepsGeometricSupport) {
+    constexpr auto geometric_normal = renderer::Normal3{.z = 1.0F};
+    constexpr auto shading_normal = renderer::Normal3{.x = 0.6F, .z = 0.8F};
+    auto description = make_spectral_scene_description();
+    description.geometries.front().mesh = make_surface_mesh(shading_normal);
+    const auto scene = FrameScene::create(std::move(description));
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    const auto acceleration = create_analytic_accel_backend(*scene);
+    ASSERT_TRUE(acceleration.has_value()) << acceleration.error().message;
+    const auto state =
+        renderer::PathState::create_initial(make_wavelengths(), renderer::VacuumMedium);
+    ASSERT_TRUE(state.has_value()) << state.error().message;
+    const auto ray = renderer::Ray::create(renderer::Point3{.x = 0.5F, .y = 1.0F, .z = 2.0F},
+                                           renderer::Vector3{.z = -1.0F}, 0.0F, 8.0F, 0.375F,
+                                           renderer::AllRayVisibility, renderer::VacuumMedium);
+    ASSERT_TRUE(ray.has_value()) << ray.error().message;
+
+    const auto dimensions = renderer::sample_dimensions_for_bounce(0U);
+    const auto shading_frame = renderer::OrthonormalFrame::from_normal(shading_normal);
+    ASSERT_TRUE(dimensions.has_value()) << dimensions.error().message;
+    ASSERT_TRUE(shading_frame.has_value()) << shading_frame.error().message;
+    const auto sampler = renderer::IndependentSampler{0xD1B54A32D192ED03ULL};
+    auto selected_stream = std::optional<renderer::SampleStream>{};
+    auto expected_direction = std::optional<renderer::Vector3>{};
+    for (auto sample = std::uint64_t{}; sample < 128U; ++sample) {
+        const auto stream = sampler.make_stream(0U, 0U, sample);
+        const auto local = renderer::map_cosine_hemisphere(renderer::Point2{
+            .x = stream.sample_1d(dimensions->bsdf_u),
+            .y = stream.sample_1d(dimensions->bsdf_v),
+        });
+        ASSERT_TRUE(local.has_value()) << local.error().message;
+        const auto world = renderer::normalized(shading_frame->to_world(*local));
+        ASSERT_TRUE(world.has_value()) << world.error().message;
+        if (renderer::dot(geometric_normal, *world) > 0.2F) {
+            selected_stream = stream;
+            expected_direction = *world;
+            break;
+        }
+    }
+    ASSERT_TRUE(selected_stream.has_value());
+    ASSERT_TRUE(expected_direction.has_value());
+
+    const auto traced = trace_scene_bsdf_only(*ray, *state, *selected_stream, **acceleration,
+                                              renderer::PathDepthLimits{.diffuse = 1U},
+                                              renderer::RussianRoulettePolicy::disabled());
+    ASSERT_TRUE(traced.has_value()) << traced.error().message;
+    EXPECT_EQ(traced->termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+    EXPECT_EQ(traced->state.depth(), 1U);
+    expect_vector_near(traced->terminal_ray.direction(), *expected_direction, 2.0e-6F);
+    EXPECT_GT(renderer::dot(geometric_normal, traced->terminal_ray.direction()), 0.0F);
+    EXPECT_GT(renderer::dot(shading_normal, traced->terminal_ray.direction()), 0.0F);
 }
 
 } // namespace

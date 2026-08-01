@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/LocalFrame.hpp>
 #include <Blackframe/Renderer/RayOriginOffset.hpp>
 #include <Blackframe/Renderer/SampleDimensionMap.hpp>
+#include <Blackframe/Renderer/ShadingNormalCorrection.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -241,7 +242,7 @@ template <SpectrumScalar Scalar, typename SurfaceQuery, typename DirectLightingP
             return finish(BsdfOnlyPathTermination::zero_throughput, ScatteringLobe::none);
         }
 
-        const auto frame = OrthonormalFrameT<Scalar>::from_normal(surface.geometric_normal());
+        const auto frame = OrthonormalFrameT<Scalar>::from_normal(surface.shading_normal());
         if (!frame) {
             return std::unexpected(frame.error());
         }
@@ -288,23 +289,32 @@ template <SpectrumScalar Scalar, typename SurfaceQuery, typename DirectLightingP
             return std::unexpected(
                 path_loop_error("The Lambertian BSDF returned an invalid continuation sample."));
         }
-        // For the cosine-sampled Lambertian closure, f * cos(theta) / pdf
-        // cancels exactly to reflectance.
-        const auto updated_beta =
-            checked_product(beta, surface.reflection().reflectance(),
-                            "BSDF-only Lambertian throughput is not representable.");
-        if (!updated_beta) {
-            return std::unexpected(updated_beta.error());
-        }
-
         const auto incoming_world =
             robust_unit_direction(frame->to_world(bsdf_sample.incoming_local));
         if (!incoming_world) {
             return std::unexpected(incoming_world.error());
         }
-        if (!(dot(surface.geometric_normal(), *incoming_world) > Scalar{0})) {
+        const auto correction =
+            shading_normal_correction(surface.geometric_normal(), surface.shading_normal(),
+                                      *outgoing_world, *incoming_world, TransportMode::radiance);
+        if (!correction) {
+            return std::unexpected(correction.error());
+        }
+        if (*correction == Scalar{0}) {
+            return finish(BsdfOnlyPathTermination::outside_bsdf_support, ScatteringLobe::none);
+        }
+        if (*correction != Scalar{1}) {
             return std::unexpected(
-                path_loop_error("A Lambertian continuation left the geometric-normal support."));
+                path_loop_error("A radiance path received a non-unit shading-normal correction."));
+        }
+
+        // Ns defines both the Lambertian cosine and its sampling PDF, so f * cos(Ns) / pdf
+        // cancels exactly to reflectance. The radiance-mode Veach correction above is one.
+        const auto updated_beta =
+            checked_product(beta, surface.reflection().reflectance(),
+                            "BSDF-only Lambertian throughput is not representable.");
+        if (!updated_beta) {
+            return std::unexpected(updated_beta.error());
         }
 
         const auto next_depth = path_depth_total(depth_event->counters);

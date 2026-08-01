@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp>
 #include <Blackframe/Renderer/DirectLighting.hpp>
 #include <Blackframe/Renderer/PunctualLights.hpp>
+#include <Blackframe/Renderer/ShadingNormalCorrection.hpp>
 #include <Blackframe/Renderer/ShadowRay.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -154,6 +155,15 @@ class ScenePunctualDirectLighting final {
         if (!(outgoing_local.z > 0.0F) || !(incoming_local.z > 0.0F)) {
             return renderer::TransportSpectrum{};
         }
+        const auto correction = renderer::shading_normal_correction(
+            surface.geometric_normal(), surface.shading_normal(), outgoing_world,
+            (**incident).direction_to_light(), renderer::TransportMode::radiance);
+        if (!correction) {
+            return std::unexpected(correction.error());
+        }
+        if (*correction == 0.0F) {
+            return renderer::TransportSpectrum{};
+        }
 
         const auto shadow_ray =
             renderer::make_shadow_ray(surface.interaction(), surface.position_error(), **incident,
@@ -165,9 +175,13 @@ class ScenePunctualDirectLighting final {
         if (!transmittance) {
             return std::unexpected(transmittance.error());
         }
-        return renderer::evaluate_lambertian_direct_lighting(
+        const auto evaluated = renderer::evaluate_lambertian_direct_lighting(
             beta, surface.reflection(), frame, outgoing_world, selection->probability(), **incident,
             *transmittance);
+        if (!evaluated) {
+            return std::unexpected(evaluated.error());
+        }
+        return *evaluated * *correction;
     }
 
   private:

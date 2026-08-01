@@ -20,6 +20,10 @@ struct ScenePathSurface final {
         return surface.interaction.geometric_normal();
     }
 
+    [[nodiscard]] const renderer::Normal3& shading_normal() const noexcept {
+        return surface.interaction.shading_normal();
+    }
+
     [[nodiscard]] const renderer::LambertianReflection& reflection() const noexcept {
         return surface.reflection;
     }

@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp>
 #include <Blackframe/Renderer/DirectLighting.hpp>
 #include <Blackframe/Renderer/PunctualLights.hpp>
+#include <Blackframe/Renderer/ShadingNormalCorrection.hpp>
 #include <Blackframe/Renderer/ShadowRay.hpp>
 #include <cmath>
 #include <concepts>
@@ -164,6 +165,15 @@ class SceneMisDirectLighting final {
         if (!(outgoing_local.z > 0.0F) || !(incoming_local.z > 0.0F)) {
             return renderer::TransportSpectrum{};
         }
+        const auto correction = renderer::shading_normal_correction(
+            surface.geometric_normal(), surface.shading_normal(), outgoing_world,
+            (**incident).direction_to_light(), renderer::TransportMode::radiance);
+        if (!correction) {
+            return std::unexpected(correction.error());
+        }
+        if (*correction == 0.0F) {
+            return renderer::TransportSpectrum{};
+        }
 
         auto weight = renderer::TransportScalar{1};
         const auto conditional_probability = (**incident).probability();
@@ -199,9 +209,13 @@ class SceneMisDirectLighting final {
         if (!transmittance) {
             return std::unexpected(transmittance.error());
         }
-        return renderer::evaluate_lambertian_direct_lighting(
+        const auto evaluated = renderer::evaluate_lambertian_direct_lighting(
             beta, surface.reflection(), frame, outgoing_world, selection->probability(), **incident,
             *transmittance, weight);
+        if (!evaluated) {
+            return std::unexpected(evaluated.error());
+        }
+        return *evaluated * *correction;
     }
 
     [[nodiscard]] core::Result<renderer::TransportScalar>
@@ -553,7 +567,7 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
                           renderer::ScatteringLobe::none);
         }
 
-        const auto frame = renderer::OrthonormalFrame::from_normal(surface.geometric_normal());
+        const auto frame = renderer::OrthonormalFrame::from_normal(surface.shading_normal());
         if (!frame) {
             return std::unexpected(frame.error());
         }
@@ -602,22 +616,31 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
                 core::StatusCode::invalid_argument,
                 "The Lambertian BSDF returned an invalid MIS continuation sample."));
         }
-        const auto updated_beta = renderer::bsdf_only_path_loop_detail::checked_product(
-            beta, surface.reflection().reflectance(),
-            "MIS Lambertian throughput is not representable.");
-        if (!updated_beta) {
-            return std::unexpected(updated_beta.error());
-        }
-
         const auto incoming_world = renderer::bsdf_only_path_loop_detail::robust_unit_direction(
             frame->to_world(bsdf_sample.incoming_local));
         if (!incoming_world) {
             return std::unexpected(incoming_world.error());
         }
-        if (!(renderer::dot(surface.geometric_normal(), *incoming_world) > 0.0F)) {
+        const auto correction = renderer::shading_normal_correction(
+            surface.geometric_normal(), surface.shading_normal(), *outgoing_world, *incoming_world,
+            renderer::TransportMode::radiance);
+        if (!correction) {
+            return std::unexpected(correction.error());
+        }
+        if (*correction == 0.0F) {
+            return finish(renderer::BsdfOnlyPathTermination::outside_bsdf_support,
+                          renderer::ScatteringLobe::none);
+        }
+        if (*correction != 1.0F) {
             return std::unexpected(scene_mis_error(
                 core::StatusCode::invalid_argument,
-                "A Lambertian MIS continuation left the geometric-normal support."));
+                "A radiance MIS path received a non-unit shading-normal correction."));
+        }
+        const auto updated_beta = renderer::bsdf_only_path_loop_detail::checked_product(
+            beta, surface.reflection().reflectance(),
+            "MIS Lambertian throughput is not representable.");
+        if (!updated_beta) {
+            return std::unexpected(updated_beta.error());
         }
 
         const auto next_depth = renderer::path_depth_total(depth_event->counters);

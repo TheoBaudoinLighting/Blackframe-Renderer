@@ -38,6 +38,7 @@ add_executable(
     SampleDimensionMapTest.cpp
     SampleStreamTest.cpp
     SamplingMappingsTest.cpp
+    ShadingNormalCorrectionTest.cpp
     SobolSamplingTest.cpp
     SphereTest.cpp
     SpectrumTest.cpp

@@ -21,6 +21,10 @@ template <SpectrumScalar Scalar> struct LinearSurfaceHit final {
         return triangle_hit.geometric_normal;
     }
 
+    [[nodiscard]] constexpr const Normal3T<Scalar>& shading_normal() const noexcept {
+        return triangle_hit.geometric_normal;
+    }
+
     [[nodiscard]] constexpr const LambertianReflectionT<Scalar>& reflection() const noexcept {
         return surface->reflection();
     }
