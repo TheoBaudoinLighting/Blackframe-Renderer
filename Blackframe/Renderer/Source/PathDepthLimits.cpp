@@ -17,12 +17,7 @@ namespace {
 }
 
 [[nodiscard]] core::Status validate_known_event(const ScatteringLobe event_lobes) {
-    constexpr auto known_lobes = ScatteringLobe::diffuse | ScatteringLobe::glossy |
-                                 ScatteringLobe::specular | ScatteringLobe::reflection |
-                                 ScatteringLobe::transmission | ScatteringLobe::volume;
-    const auto bits = static_cast<std::uint32_t>(event_lobes);
-    const auto known_bits = static_cast<std::uint32_t>(known_lobes);
-    if (bits == 0 || (bits & ~known_bits) != 0) {
+    if (event_lobes == ScatteringLobe::none || !is_known_scattering_lobe_mask(event_lobes)) {
         return std::unexpected(
             depth_error(core::StatusCode::invalid_argument,
                         "A path-depth event must contain only supported scattering-lobe bits."));
@@ -38,14 +33,7 @@ namespace {
         return {};
     }
 
-    const auto family_count =
-        static_cast<unsigned>(has_scattering_lobe(event_lobes, ScatteringLobe::diffuse)) +
-        static_cast<unsigned>(has_scattering_lobe(event_lobes, ScatteringLobe::glossy)) +
-        static_cast<unsigned>(has_scattering_lobe(event_lobes, ScatteringLobe::specular));
-    const auto direction_count =
-        static_cast<unsigned>(has_scattering_lobe(event_lobes, ScatteringLobe::reflection)) +
-        static_cast<unsigned>(has_scattering_lobe(event_lobes, ScatteringLobe::transmission));
-    if (family_count != 1 || direction_count != 1) {
+    if (!is_valid_surface_scattering_event(event_lobes)) {
         return std::unexpected(depth_error(
             core::StatusCode::invalid_argument,
             "A surface path-depth event requires exactly one family and one direction."));

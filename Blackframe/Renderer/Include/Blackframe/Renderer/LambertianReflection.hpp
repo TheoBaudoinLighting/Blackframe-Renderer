@@ -22,13 +22,14 @@ using LambertianProbabilityDensityT =
                        ReferenceProbabilityDensity>;
 
 template <SpectrumScalar Scalar> struct LambertianSampleT final {
-    // Both directions use the local convention documented by LambertianReflectionT.
+    // This is wi: the direction from the surface toward the sampled next vertex. Both wo and wi
+    // use the local convention documented by LambertianReflectionT.
     Vector3T<Scalar> incoming_local{};
     // This is the BRDF value f, not a cosine- or PDF-weighted throughput.
     SampledSpectrum<TransportSpectrumSampleCount, Scalar> value{};
     LambertianProbabilityDensityT<Scalar> probability{
         .value = Scalar{0},
-        .measure = ProbabilityMeasure::solid_angle,
+        .measure = ContinuousBsdfProbabilityMeasure,
     };
 };
 
@@ -69,9 +70,10 @@ template <SpectrumScalar Scalar>
 
 } // namespace lambertian_reflection_detail
 
-// Directions are unit vectors in the local shading frame and point away from the surface. +Z is
-// the oriented surface hemisphere. The closure is one-sided: valid directions outside its open
-// reflection support return zero rather than being flipped or face-forwarded.
+// Directions are unit vectors in the caller-supplied local closure frame and point away from the
+// surface. outgoing_local is wo toward the previous path vertex; incoming_local is wi toward the
+// next vertex. +Z is the oriented closure hemisphere. The closure is one-sided: valid directions
+// outside its open reflection support return zero rather than being flipped or face-forwarded.
 template <SpectrumScalar Scalar> class LambertianReflectionT final {
   public:
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
@@ -103,6 +105,8 @@ template <SpectrumScalar Scalar> class LambertianReflectionT final {
         return reflectance_ * std::numbers::inv_pi_v<Scalar>;
     }
 
+    // Returns the complete conditional density p(wi | wo) in the engine's continuous BSDF
+    // measure. This one-component closure has no separate component-selection factor.
     [[nodiscard]] core::Result<probability_density_type>
     pdf(const Vector3T<Scalar> outgoing_local, const Vector3T<Scalar> incoming_local) const {
         const auto directions = validate_directions(outgoing_local, incoming_local);
@@ -112,7 +116,7 @@ template <SpectrumScalar Scalar> class LambertianReflectionT final {
 
         auto result = probability_density_type{
             .value = Scalar{0},
-            .measure = ProbabilityMeasure::solid_angle,
+            .measure = ContinuousBsdfProbabilityMeasure,
         };
         if (!(outgoing_local.z > Scalar{0}) || !(incoming_local.z > Scalar{0})) {
             return result;

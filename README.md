@@ -76,6 +76,15 @@ silently selecting another path.
   events separately; transmitted surface events advance both their scattering family and
   transmission counters. The current Lambertian loops consume only diffuse-reflection depth and
   support explicitly configured, compensated Russian roulette from a selected completed depth.
+- **BSDF conventions:** a versioned machine-readable contract fixes the numeric PDF measures and
+  lobe bits shared by every backend. Concrete surface events contain exactly one
+  diffuse/glossy/specular family and one reflection/transmission direction; specular is the delta
+  family and volume remains a separate event. Continuous BSDF PDFs use solid angle, delta samples
+  use discrete probability, and internal component selection is included exactly once. `wo` and
+  `wi` are unit local-closure directions pointing away from the surface toward the previous and
+  next path vertices. BSDF values exclude cosine and PDF factors. Radiance and importance modes are
+  distinct fixed-width values; only non-symmetric transmission receives the documented radiance
+  adjoint factor. Unsupported manifest versions fail instead of returning another schema.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power

@@ -62,6 +62,7 @@ add_library(
         Include/Blackframe/Renderer/StratifiedSampling.hpp
         Include/Blackframe/Renderer/SurfaceInteraction.hpp
         Include/Blackframe/Renderer/Transforms.hpp
+        Include/Blackframe/Renderer/TransportConventionDiagnostics.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Include/Blackframe/Renderer/Triangle.hpp
@@ -84,6 +85,7 @@ add_library(
         Source/SampleDimensionMap.cpp
         Source/SobolDirectionNumbers.inc
         Source/SobolSampling.cpp
+        Source/TransportConventionDiagnostics.cpp
 )
 add_library(Blackframe::Renderer ALIAS BlackframeRenderer)
 blackframe_set_target_role(BlackframeRenderer core)

@@ -42,6 +42,7 @@ add_executable(
     StratifiedSamplingTest.cpp
     SurfaceInteractionTest.cpp
     TransformsTest.cpp
+    TransportConventionsTest.cpp
     TriangleTest.cpp
     WavelengthSamplingTest.cpp
 )

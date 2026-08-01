@@ -32,16 +32,7 @@ namespace mis_detail {
 }
 
 [[nodiscard]] constexpr bool supported_measure(const ProbabilityMeasure measure) noexcept {
-    switch (measure) {
-    case ProbabilityMeasure::discrete:
-    case ProbabilityMeasure::solid_angle:
-    case ProbabilityMeasure::area:
-    case ProbabilityMeasure::distance:
-    case ProbabilityMeasure::volume:
-    case ProbabilityMeasure::wavelength:
-        return true;
-    }
-    return false;
+    return is_known_probability_measure(measure);
 }
 
 template <MisScalar Scalar>

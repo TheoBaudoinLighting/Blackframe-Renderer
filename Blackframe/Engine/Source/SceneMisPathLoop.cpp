@@ -595,7 +595,7 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
 
         const auto& bsdf_sample = **sampled;
         if (!renderer::bsdf_only_path_loop_detail::finite_non_negative(bsdf_sample.value) ||
-            bsdf_sample.probability.measure != renderer::ProbabilityMeasure::solid_angle ||
+            bsdf_sample.probability.measure != renderer::ContinuousBsdfProbabilityMeasure ||
             !std::isfinite(bsdf_sample.probability.value) ||
             !(bsdf_sample.probability.value > 0.0F) || !(bsdf_sample.incoming_local.z > 0.0F)) {
             return std::unexpected(scene_mis_error(
