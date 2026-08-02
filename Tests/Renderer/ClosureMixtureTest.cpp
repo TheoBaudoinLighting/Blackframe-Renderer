@@ -1,4 +1,5 @@
 #include <Blackframe/Renderer/ClosureMixture.hpp>
+#include <Blackframe/Renderer/RoughConductorReflection.hpp>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -31,6 +32,11 @@ template <SpectrumScalar Scalar>
 using RoughReflectionFor =
     std::conditional_t<std::same_as<Scalar, TransportScalar>, RoughDiffuseReflection,
                        ReferenceRoughDiffuseReflection>;
+
+template <SpectrumScalar Scalar>
+using RoughConductorFor =
+    std::conditional_t<std::same_as<Scalar, TransportScalar>, RoughConductorReflection,
+                       ReferenceRoughConductorReflection>;
 
 template <SpectrumScalar Scalar>
 using SpectrumFor = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
@@ -391,6 +397,106 @@ template <SpectrumScalar Scalar> void expect_rough_diffuse_dispatch() {
 TEST(ClosureMixtureTest, DispatchesRoughDiffuseWithoutAHiddenLambertianFallback) {
     expect_rough_diffuse_dispatch<TransportScalar>();
     expect_rough_diffuse_dispatch<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
+    const auto coefficient = SpectrumFor<Scalar>{
+        .values = {Scalar{0.25}, Scalar{0.5}, Scalar{0.75}, Scalar{1}},
+    };
+    const auto relative_eta = SpectrumFor<Scalar>{
+        .values = {Scalar{0.2}, Scalar{0.5}, Scalar{1.5}, Scalar{2}},
+    };
+    const auto relative_k = SpectrumFor<Scalar>{
+        .values = {Scalar{3}, Scalar{2}, Scalar{1}, Scalar{4}},
+    };
+    constexpr auto alpha = Scalar{0.5};
+    auto singleton_set = SetFor<Scalar>{};
+    ASSERT_EQ(singleton_set.append_rough_conductor_reflection(
+                  coefficient, relative_eta, relative_k, alpha),
+              ClosureAppendStatus::appended);
+    const auto singleton_probability = std::array{Scalar{1}};
+    const auto singleton = MixtureFor<Scalar>::create(singleton_set, singleton_probability);
+    const auto direct =
+        RoughConductorFor<Scalar>::create(coefficient, relative_eta, relative_k, alpha);
+    ASSERT_TRUE(singleton.has_value());
+    ASSERT_TRUE(direct.has_value());
+
+    const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
+    const auto incoming = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
+    const auto singleton_value = singleton->eval(outgoing, incoming);
+    const auto direct_value = direct->eval(outgoing, incoming);
+    const auto singleton_pdf = singleton->pdf(outgoing, incoming);
+    const auto direct_pdf = direct->pdf(outgoing, incoming);
+    ASSERT_TRUE(singleton_value.has_value());
+    ASSERT_TRUE(direct_value.has_value());
+    ASSERT_TRUE(singleton_pdf.has_value());
+    ASSERT_TRUE(direct_pdf.has_value());
+    EXPECT_EQ(*singleton_value, *direct_value);
+    EXPECT_EQ(singleton_pdf->value, direct_pdf->value);
+    EXPECT_EQ(singleton_pdf->measure, direct_pdf->measure);
+
+    const auto canonical = Point2T<Scalar>{.x = Scalar{0.2}, .y = Scalar{0.375}};
+    const auto singleton_sample = singleton->sample(outgoing, Scalar{0.5}, canonical);
+    const auto direct_sample = direct->sample(outgoing, canonical);
+    ASSERT_TRUE(singleton_sample.has_value());
+    ASSERT_TRUE(singleton_sample->has_value());
+    ASSERT_TRUE(direct_sample.has_value());
+    ASSERT_TRUE(direct_sample->has_value());
+    EXPECT_EQ((**singleton_sample).selected_closure, 0U);
+    EXPECT_EQ((**singleton_sample).lobes, ScatteringLobe::glossy | ScatteringLobe::reflection);
+    EXPECT_EQ((**singleton_sample).selection_probability.value, Scalar{1});
+    EXPECT_EQ((**singleton_sample).incoming_local, (**direct_sample).incoming_local);
+    EXPECT_EQ((**singleton_sample).value, (**direct_sample).value);
+    EXPECT_EQ((**singleton_sample).probability.value, (**direct_sample).probability.value);
+
+    const auto lambert_reflectance = constant_spectrum<Scalar>(Scalar{0.2});
+    auto mixed_set = SetFor<Scalar>{};
+    ASSERT_EQ(mixed_set.append_lambertian_reflection(lambert_reflectance),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(mixed_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
+                                                         alpha),
+              ClosureAppendStatus::appended);
+    const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
+    const auto mixture = MixtureFor<Scalar>::create(mixed_set, probabilities);
+    const auto lambert = ReflectionFor<Scalar>::create(lambert_reflectance);
+    ASSERT_TRUE(mixture.has_value());
+    ASSERT_TRUE(lambert.has_value());
+
+    const auto mixture_value = mixture->eval(outgoing, incoming);
+    const auto lambert_value = lambert->eval(outgoing, incoming);
+    const auto mixture_pdf = mixture->pdf(outgoing, incoming);
+    const auto lambert_pdf = lambert->pdf(outgoing, incoming);
+    ASSERT_TRUE(mixture_value.has_value());
+    ASSERT_TRUE(lambert_value.has_value());
+    ASSERT_TRUE(mixture_pdf.has_value());
+    ASSERT_TRUE(lambert_pdf.has_value());
+    auto expected_value = SpectrumFor<Scalar>{};
+    for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+        expected_value[lane] = (*lambert_value)[lane] + (*direct_value)[lane];
+    }
+    expect_spectrum_near(*mixture_value, expected_value);
+    EXPECT_NEAR(static_cast<double>(mixture_pdf->value),
+                static_cast<double>(Scalar{0.25} * lambert_pdf->value +
+                                    Scalar{0.75} * direct_pdf->value),
+                AnalyticTolerance<Scalar>);
+
+    const auto selected_conductor = mixture->sample(outgoing, Scalar{0.625}, canonical);
+    const auto lambert_sample = lambert->sample(outgoing, canonical);
+    ASSERT_TRUE(selected_conductor.has_value());
+    ASSERT_TRUE(selected_conductor->has_value());
+    ASSERT_TRUE(lambert_sample.has_value());
+    ASSERT_TRUE(lambert_sample->has_value());
+    EXPECT_EQ((**selected_conductor).selected_closure, 1U);
+    EXPECT_EQ((**selected_conductor).lobes,
+              ScatteringLobe::glossy | ScatteringLobe::reflection);
+    EXPECT_EQ((**selected_conductor).selection_probability.value, Scalar{0.75});
+    EXPECT_EQ((**selected_conductor).incoming_local, (**direct_sample).incoming_local);
+    EXPECT_NE((**selected_conductor).incoming_local, (**lambert_sample).incoming_local);
+}
+
+TEST(ClosureMixtureTest, DispatchesRoughConductorWithoutAHiddenDiffuseOrDeltaFallback) {
+    expect_rough_conductor_dispatch<TransportScalar>();
+    expect_rough_conductor_dispatch<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_two_component_mixture() {

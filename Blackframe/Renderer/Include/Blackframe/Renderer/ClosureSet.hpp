@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <numbers>
 #include <span>
 #include <type_traits>
 
@@ -20,6 +22,7 @@ enum class ClosureKind : std::uint32_t {
     none = 0U,
     lambertian_reflection = 1U,
     rough_diffuse_reflection = 2U,
+    rough_conductor_reflection = 3U,
 };
 
 [[nodiscard]] constexpr bool is_known_closure_kind(const ClosureKind kind) noexcept {
@@ -27,6 +30,7 @@ enum class ClosureKind : std::uint32_t {
     case ClosureKind::none:
     case ClosureKind::lambertian_reflection:
     case ClosureKind::rough_diffuse_reflection:
+    case ClosureKind::rough_conductor_reflection:
         return true;
     }
     return false;
@@ -40,8 +44,8 @@ enum class ClosureAppendStatus : std::uint32_t {
 
 // Every slot is a fixed ABI record. Weight is the model's spectral coefficient. Lambertian
 // reflection leaves all ten scalar parameters zero; rough diffuse stores normalized roughness in
-// parameters[0]. The remaining inline storage can hold spectral eta, spectral k, and a second
-// roughness axis without growing the record.
+// parameters[0]. Rough conductor stores spectral eta in parameters[0..3], spectral k in
+// parameters[4..7], isotropic GGX alpha in parameters[8], and leaves parameters[9] reserved.
 template <SpectrumScalar Scalar> struct alignas(8) ClosureT final {
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
 
@@ -72,6 +76,39 @@ template <SpectrumScalar Scalar>
 template <SpectrumScalar Scalar>
 [[nodiscard]] bool valid_roughness(const Scalar roughness) noexcept {
     return std::isfinite(roughness) && roughness >= Scalar{0} && roughness <= Scalar{1};
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] bool valid_relative_eta(
+    const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& relative_eta) noexcept {
+    for (const auto value : relative_eta.values) {
+        if (!std::isfinite(value) || !(value > Scalar{0})) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] bool valid_relative_k(
+    const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& relative_k) noexcept {
+    for (const auto value : relative_k.values) {
+        if (!std::isfinite(value) || value < Scalar{0}) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] bool valid_ggx_alpha(const Scalar alpha) noexcept {
+    if (!std::isfinite(alpha) || !(alpha > Scalar{0})) {
+        return false;
+    }
+    const auto maximum_alpha = std::sqrt(std::numeric_limits<Scalar>::max()) *
+                               std::sqrt(std::numbers::pi_v<Scalar>);
+    const auto minimum_alpha = Scalar{1} / maximum_alpha;
+    return alpha >= minimum_alpha && alpha <= maximum_alpha;
 }
 
 } // namespace closure_set_detail
@@ -143,6 +180,37 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
         return ClosureAppendStatus::appended;
     }
 
+    [[nodiscard]] ClosureAppendStatus
+    append_rough_conductor_reflection(const spectrum_type coefficient,
+                                      const spectrum_type relative_eta,
+                                      const spectrum_type relative_k,
+                                      const Scalar alpha) noexcept {
+        if (!closure_set_detail::valid_reflectance(coefficient) ||
+            !closure_set_detail::valid_relative_eta(relative_eta) ||
+            !closure_set_detail::valid_relative_k(relative_k) ||
+            !closure_set_detail::valid_ggx_alpha(alpha)) {
+            return ClosureAppendStatus::invalid_payload;
+        }
+        if (full()) {
+            return ClosureAppendStatus::capacity_exhausted;
+        }
+
+        auto parameters = std::array<Scalar, ClosureParameterScalarCount>{};
+        for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+            parameters[lane] = relative_eta[lane];
+            parameters[TransportSpectrumSampleCount + lane] = relative_k[lane];
+        }
+        parameters[TransportSpectrumSampleCount * 2U] = alpha;
+        closures_[size_] = closure_type{
+            .kind = ClosureKind::rough_conductor_reflection,
+            .lobes = ScatteringLobe::glossy | ScatteringLobe::reflection,
+            .weight = coefficient,
+            .parameters = parameters,
+        };
+        ++size_;
+        return ClosureAppendStatus::appended;
+    }
+
   private:
     friend struct closure_set_detail::ClosureSetLayoutProbe<Scalar>;
 
@@ -171,6 +239,7 @@ static_assert(sizeof(ClosureAppendStatus) == sizeof(std::uint32_t));
 static_assert(static_cast<std::uint32_t>(ClosureKind::none) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::lambertian_reflection) == 1U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection) == 2U);
+static_assert(static_cast<std::uint32_t>(ClosureKind::rough_conductor_reflection) == 3U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::appended) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::invalid_payload) == 1U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::capacity_exhausted) == 2U);

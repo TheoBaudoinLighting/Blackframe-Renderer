@@ -55,6 +55,7 @@ add_library(
         Include/Blackframe/Renderer/RenderConfiguration.hpp
         Include/Blackframe/Renderer/RenderSessionState.hpp
         Include/Blackframe/Renderer/RussianRoulette.hpp
+        Include/Blackframe/Renderer/RoughConductorReflection.hpp
         Include/Blackframe/Renderer/RoughDiffuseReflection.hpp
         Include/Blackframe/Renderer/SampleDimensionMap.hpp
         Include/Blackframe/Renderer/SampleStream.hpp

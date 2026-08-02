@@ -103,6 +103,13 @@ silently selecting another path.
   changes the continuous distribution into a delta. VNDF probabilities are explicitly densities
   over microfacet normals in solid angle. Projected and visible normalization plus deterministic
   normal and oblique chi-square tests cover both transport and reference precision.
+- **Rough conductor reflection:** the four-lane isotropic Cook--Torrance lobe combines exact
+  conductor Fresnel with the GGX distribution and height-correlated Smith masking-shadowing.
+  Reflected directions use Heitz visible-normal sampling and the explicit half-vector Jacobian;
+  samples outside the one-sided support remain absent instead of selecting another distribution.
+  Float and double quadrature verify reciprocity and white-furnace energy conservation across
+  spectral indices, roughness, and view angle. This standalone lobe does not change the current
+  Lambertian scene loops.
 - **Rough diffuse reflection:** the four-lane energy-preserving Oren--Nayar model combines the
   reciprocal Fujii single-scattering lobe with exact analytical multiple-scattering compensation.
   Its normalized roughness is explicit in `[0, 1]`, zero roughness reduces exactly to Lambert,
@@ -119,10 +126,11 @@ silently selecting another path.
   without dynamic allocation. Transport and reference records retain float and double
   spectral coefficients respectively; their records are fixed at 64 and 120 bytes, and the
   corresponding sets at 520 and 968 bytes, all with eight-byte alignment. Public append operations
-  accept validated Lambertian or rough-diffuse reflection; the latter uses the first reserved
-  scalar for normalized roughness without changing either record layout. Invalid payloads and a
-  ninth closure return distinct statuses without clamping, merging, eviction, or implicit
-  replacement.
+  accept validated Lambertian, rough-diffuse, or rough-conductor reflection. Rough diffuse uses the
+  first reserved scalar for normalized roughness; rough conductor stores its four-lane relative
+  `eta`, four-lane relative `k`, and isotropic `alpha` in nine reserved scalars. Neither model
+  changes the record layout. Invalid payloads and a ninth closure return distinct statuses without
+  clamping, merging, eviction, or implicit replacement.
   `ClosureMixture` keeps caller-supplied component probabilities in a fixed-capacity dyadic CDF; it
   never derives a scalar probability from spectral weights. Near-unit inputs are projected
   deterministically onto the scalar sampler grid, while invalid or unrepresentable distributions

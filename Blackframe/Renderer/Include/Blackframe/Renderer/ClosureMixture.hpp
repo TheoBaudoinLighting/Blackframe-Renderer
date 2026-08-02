@@ -3,6 +3,7 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/ClosureSet.hpp>
 #include <Blackframe/Renderer/LambertianReflection.hpp>
+#include <Blackframe/Renderer/RoughConductorReflection.hpp>
 #include <Blackframe/Renderer/RoughDiffuseReflection.hpp>
 #include <algorithm>
 #include <array>
@@ -372,6 +373,35 @@ rough_diffuse_from_record(const ClosureT<Scalar>& closure) {
 }
 
 template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<RoughConductorReflectionT<Scalar>>
+rough_conductor_from_record(const ClosureT<Scalar>& closure) {
+    constexpr auto rough_conductor_lobes = ScatteringLobe::glossy | ScatteringLobe::reflection;
+    if (closure.kind != ClosureKind::rough_conductor_reflection) {
+        return std::unexpected(
+            invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+    }
+    if (closure.lobes != rough_conductor_lobes) {
+        return std::unexpected(invalid_closure_mixture(
+            "A rough-conductor closure record has an incompatible lobe mask."));
+    }
+
+    auto relative_eta = SampledSpectrum<TransportSpectrumSampleCount, Scalar>{};
+    auto relative_k = SampledSpectrum<TransportSpectrumSampleCount, Scalar>{};
+    for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+        relative_eta[lane] = closure.parameters[lane];
+        relative_k[lane] = closure.parameters[TransportSpectrumSampleCount + lane];
+    }
+    constexpr auto alpha_parameter = TransportSpectrumSampleCount * 2U;
+    constexpr auto reserved_parameter = alpha_parameter + 1U;
+    if (closure.parameters[reserved_parameter] != Scalar{0}) {
+        return std::unexpected(invalid_closure_mixture(
+            "A rough-conductor closure record has a non-zero reserved payload."));
+    }
+    return RoughConductorReflectionT<Scalar>::create(
+        closure.weight, relative_eta, relative_k, closure.parameters[alpha_parameter]);
+}
+
+template <SpectrumScalar Scalar>
 [[nodiscard]] core::Status validate_closure_record(const ClosureT<Scalar>& closure) {
     switch (closure.kind) {
     case ClosureKind::lambertian_reflection: {
@@ -383,6 +413,13 @@ template <SpectrumScalar Scalar>
     }
     case ClosureKind::rough_diffuse_reflection: {
         const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return {};
+    }
+    case ClosureKind::rough_conductor_reflection: {
+        const auto model = rough_conductor_from_record(closure);
         if (!model) {
             return std::unexpected(model.error());
         }
@@ -414,6 +451,13 @@ eval_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outg
         }
         return model->eval(outgoing_local, incoming_local);
     }
+    case ClosureKind::rough_conductor_reflection: {
+        const auto model = rough_conductor_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->eval(outgoing_local, incoming_local);
+    }
     case ClosureKind::none:
         break;
     }
@@ -435,6 +479,13 @@ pdf_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgo
     }
     case ClosureKind::rough_diffuse_reflection: {
         const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->pdf(outgoing_local, incoming_local);
+    }
+    case ClosureKind::rough_conductor_reflection: {
+        const auto model = rough_conductor_from_record(closure);
         if (!model) {
             return std::unexpected(model.error());
         }
@@ -485,6 +536,17 @@ sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> ou
     }
     case ClosureKind::rough_diffuse_reflection: {
         const auto model = rough_diffuse_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        const auto sampled = model->sample(outgoing_local, direction_sample);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        return convert(*sampled);
+    }
+    case ClosureKind::rough_conductor_reflection: {
+        const auto model = rough_conductor_from_record(closure);
         if (!model) {
             return std::unexpected(model.error());
         }
