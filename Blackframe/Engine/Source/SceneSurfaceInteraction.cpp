@@ -347,8 +347,9 @@ surface_derivatives(const std::array<renderer::Point3, 3>& positions,
     return SurfaceDerivatives{.dpdu = dpdu, .dpdv = dpdv};
 }
 
-core::Result<ResolvedSceneSurface>
-resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const renderer::Ray& ray) {
+core::Result<ResolvedSceneSurface> resolve_scene_surface_hit_impl(const FrameScene& scene,
+                                                                  const AccelHit& hit,
+                                                                  const renderer::Ray& ray) {
     if (!std::isfinite(hit.triangle.parameter) || !ray.contains_parameter(hit.triangle.parameter)) {
         return std::unexpected(
             surface_error(core::StatusCode::invalid_argument,
@@ -467,6 +468,11 @@ resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const re
 }
 
 } // namespace
+
+core::Result<ResolvedSceneSurface>
+resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const renderer::Ray& ray) {
+    return resolve_scene_surface_hit_impl(scene, hit, ray);
+}
 
 core::Result<std::optional<ResolvedSceneSurface>>
 resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray) {

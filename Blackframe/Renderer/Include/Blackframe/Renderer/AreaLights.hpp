@@ -331,15 +331,9 @@ template <SpectrumScalar Scalar>
 finish_sample(const LightSampleContextT<Scalar>& context, const SurfacePointT<Scalar>& surface,
               const Scalar inverse_area, const AreaLightSidedness sidedness,
               const LightSpectrumT<Scalar>& radiance) {
-    const auto solid_angle_probability = convert_area_pdf_to_solid_angle(
-        LightProbabilityDensityT<Scalar>{
-            .value = inverse_area,
-            .measure = ProbabilityMeasure::area,
-        },
-        context.position(), surface.position, surface.geometric_normal);
-    if (!solid_angle_probability) {
-        return std::unexpected(solid_angle_probability.error());
-    }
+    // A back-facing or exactly tangent one-sided sample has zero physical support. Classify that
+    // support before forming a Jacobian that is intentionally undefined at tangency; two-sided
+    // emitters still validate and reject the same singular conversion below.
     if (sidedness == AreaLightSidedness::one_sided) {
         const auto supported =
             one_sided_support(surface.geometric_normal, context.position() - surface.position);
@@ -349,6 +343,15 @@ finish_sample(const LightSampleContextT<Scalar>& context, const SurfacePointT<Sc
         if (!*supported) {
             return std::optional<IncidentLightSampleT<Scalar>>{};
         }
+    }
+    const auto solid_angle_probability = convert_area_pdf_to_solid_angle(
+        LightProbabilityDensityT<Scalar>{
+            .value = inverse_area,
+            .measure = ProbabilityMeasure::area,
+        },
+        context.position(), surface.position, surface.geometric_normal);
+    if (!solid_angle_probability) {
+        return std::unexpected(solid_angle_probability.error());
     }
 
     const auto endpoint = LightSampleEndpointT<Scalar>::create_surface(
@@ -372,15 +375,7 @@ template <SpectrumScalar Scalar>
 finish_pdf(const LightSampleContextT<Scalar>& context, const Point3T<Scalar> surface_position,
            const Normal3T<Scalar> geometric_normal, const Scalar inverse_area,
            const AreaLightSidedness sidedness, const LightSpectrumT<Scalar>& radiance) {
-    const auto solid_angle_probability = convert_area_pdf_to_solid_angle(
-        LightProbabilityDensityT<Scalar>{
-            .value = inverse_area,
-            .measure = ProbabilityMeasure::area,
-        },
-        context.position(), surface_position, geometric_normal);
-    if (!solid_angle_probability) {
-        return std::unexpected(solid_angle_probability.error());
-    }
+    // Keep the zero-support branch independent of a Jacobian that does not exist at tangency.
     if (sidedness == AreaLightSidedness::one_sided) {
         const auto supported =
             one_sided_support(geometric_normal, context.position() - surface_position);
@@ -390,6 +385,15 @@ finish_pdf(const LightSampleContextT<Scalar>& context, const Point3T<Scalar> sur
         if (!*supported) {
             return DirectionalLightPdfT<Scalar>::create(Scalar{0});
         }
+    }
+    const auto solid_angle_probability = convert_area_pdf_to_solid_angle(
+        LightProbabilityDensityT<Scalar>{
+            .value = inverse_area,
+            .measure = ProbabilityMeasure::area,
+        },
+        context.position(), surface_position, geometric_normal);
+    if (!solid_angle_probability) {
+        return std::unexpected(solid_angle_probability.error());
     }
 
     if (is_black(radiance)) {

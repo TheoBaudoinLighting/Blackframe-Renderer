@@ -19,6 +19,13 @@ struct ResolvedSceneSurface final {
     renderer::OneSidedSurfaceEmission emission;
 };
 
+// Resolves already traversed closest-hit data without issuing a second acceleration query. The
+// caller owns the provenance contract: hit must come from the supplied immutable scene snapshot
+// and ray. This function validates the observable identifiers, barycentrics, geometry, ray
+// parameter, and material lookup, but cannot prove which equivalent snapshot produced the hit.
+[[nodiscard]] core::Result<ResolvedSceneSurface>
+resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const renderer::Ray& ray);
+
 [[nodiscard]] core::Result<std::optional<ResolvedSceneSurface>>
 resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray);
 

@@ -224,3 +224,26 @@ gtest_discover_tests(
         LABELS "smoke;regression;cpu"
         TIMEOUT 120
 )
+
+add_executable(
+    BlackframeEmbreeWavefrontMisTests
+    WavefrontMisTransportTest.cpp
+)
+blackframe_set_target_role(BlackframeEmbreeWavefrontMisTests test)
+
+target_link_libraries(
+    BlackframeEmbreeWavefrontMisTests
+    PRIVATE
+        Blackframe::CpuEmbree
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeEmbreeWavefrontMisTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;regression;cpu"
+        TIMEOUT 120
+)

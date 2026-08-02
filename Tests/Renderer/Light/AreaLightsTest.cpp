@@ -382,6 +382,55 @@ TEST(MeshAreaLightTest, SamplesCompactIndexedTrianglesByTheirArea) {
     check_mesh<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void check_one_sided_tangent_support_precedes_jacobian() {
+    const auto packet = wavelengths<Scalar>();
+    const auto radiance = spectrum<Scalar>();
+    const auto tangent_context = context<Scalar>(Point3T<Scalar>{.x = Scalar{3}});
+    const auto normal = Normal3T<Scalar>{.z = Scalar{1}};
+
+    const auto one_sided_rectangle = RectangleAreaLightT<Scalar>::create(
+        Point3T<Scalar>{}, normal, Vector3T<Scalar>{.x = Scalar{1}}, Scalar{1}, Scalar{1},
+        Vector3T<Scalar>{}, AreaLightSidedness::one_sided, packet, radiance);
+    const auto two_sided_rectangle = RectangleAreaLightT<Scalar>::create(
+        Point3T<Scalar>{}, normal, Vector3T<Scalar>{.x = Scalar{1}}, Scalar{1}, Scalar{1},
+        Vector3T<Scalar>{}, AreaLightSidedness::two_sided, packet, radiance);
+    ASSERT_TRUE(one_sided_rectangle.has_value()) << one_sided_rectangle.error().message;
+    ASSERT_TRUE(two_sided_rectangle.has_value()) << two_sided_rectangle.error().message;
+
+    const auto canonical = Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}};
+    const auto unsupported = one_sided_rectangle->sample_li(tangent_context, canonical, packet);
+    ASSERT_TRUE(unsupported.has_value()) << unsupported.error().message;
+    EXPECT_FALSE(unsupported->has_value());
+    const auto singular = two_sided_rectangle->sample_li(tangent_context, canonical, packet);
+    expect_invalid(singular);
+    EXPECT_EQ(singular.error().message,
+              "Light PDF conversion Jacobian is singular or numerically ambiguous.");
+
+    const auto one_sided_mesh = MeshAreaLightT<Scalar>::create(
+        mesh_positions<Scalar>(), mesh_triangles(), Vector3T<Scalar>{},
+        AreaLightSidedness::one_sided, packet, radiance);
+    const auto two_sided_mesh = MeshAreaLightT<Scalar>::create(
+        mesh_positions<Scalar>(), mesh_triangles(), Vector3T<Scalar>{},
+        AreaLightSidedness::two_sided, packet, radiance);
+    ASSERT_TRUE(one_sided_mesh.has_value()) << one_sided_mesh.error().message;
+    ASSERT_TRUE(two_sided_mesh.has_value()) << two_sided_mesh.error().message;
+
+    const auto zero_pdf =
+        one_sided_mesh->pdf_li_at_surface(tangent_context, Point3T<Scalar>{}, normal, packet);
+    ASSERT_TRUE(zero_pdf.has_value()) << zero_pdf.error().message;
+    EXPECT_EQ(zero_pdf->value(), Scalar{0});
+    const auto singular_pdf =
+        two_sided_mesh->pdf_li_at_surface(tangent_context, Point3T<Scalar>{}, normal, packet);
+    expect_invalid(singular_pdf);
+    EXPECT_EQ(singular_pdf.error().message,
+              "Light PDF conversion Jacobian is singular or numerically ambiguous.");
+}
+
+TEST(AreaLightSidednessTest, RejectsUnsupportedTangentsBeforeConvertingTheirPdf) {
+    check_one_sided_tangent_support_precedes_jacobian<TransportScalar>();
+    check_one_sided_tangent_support_precedes_jacobian<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void check_mesh_endpoint_conditioning() {
     const auto packet = wavelengths<Scalar>();
     const auto light = MeshAreaLightT<Scalar>::create(
@@ -623,8 +672,8 @@ template <SpectrumScalar Scalar> void check_failures_and_black() {
     const auto escaped = black.le(escaped_ray<Scalar>(), packet);
     ASSERT_TRUE(escaped.has_value()) << escaped.error().message;
     EXPECT_EQ(*escaped, LightSpectrumT<Scalar>{});
-    expect_invalid(black.sample_li(context<Scalar>(Point3T<Scalar>{.x = Scalar{2}}),
-                                   Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}}, packet));
+    expect_invalid(black.sample_li(context<Scalar>(Point3T<Scalar>{.z = Scalar{2}}),
+                                   Point2T<Scalar>{.x = Scalar{1}, .y = Scalar{0.5}}, packet));
 }
 
 TEST(AreaLightsValidationTest, RejectsInvalidInputsWithoutBlackFallbacks) {

@@ -1,4 +1,5 @@
 #include <Blackframe/Backends/CPU/Embree/AccelBackend.hpp>
+#include <Blackframe/Backends/CPU/Embree/WavefrontMisTransport.hpp>
 #include <Blackframe/Engine/FrameScene.hpp>
 #include <Blackframe/Engine/SceneMisPathLoop.hpp>
 #include <Blackframe/Engine/TriangleMesh.hpp>
@@ -52,6 +53,7 @@ inline constexpr auto ImageSeeds = std::array<std::uint64_t, 8U>{
 };
 inline constexpr auto ReferenceSeed = std::uint64_t{0x13198A2E03707344ULL};
 inline constexpr auto PathTime = renderer::TransportScalar{0.5F};
+inline constexpr auto CpuWavefrontWorkerCount = std::uint32_t{4U};
 inline constexpr auto SphereLongitudeSegments = std::uint32_t{64U};
 inline constexpr auto SphereLatitudeSegments = std::uint32_t{32U};
 inline constexpr auto CheckpointSamples =
@@ -427,12 +429,11 @@ make_quad(const std::array<renderer::Point3, 4U>& positions, const renderer::Nor
 }
 
 template <renderer::AccumulationPrecision Precision>
-[[nodiscard]] core::Status
-render_sample_range(renderer::FilmT<Precision>& film, const std::uint64_t first_sample,
-                    const std::uint64_t sample_end, const std::uint64_t seed,
-                    const renderer::PinholeCamera& camera,
-                    const renderer::SampledWavelengths& wavelengths,
-                    const AccelBackend& acceleration, const renderer::LightSampler& light_sampler) {
+[[nodiscard]] core::Status render_scalar_reference_sample_range(
+    renderer::FilmT<Precision>& film, const std::uint64_t first_sample,
+    const std::uint64_t sample_end, const std::uint64_t seed, const renderer::PinholeCamera& camera,
+    const renderer::SampledWavelengths& wavelengths, const AccelBackend& acceleration,
+    const renderer::LightSampler& light_sampler) {
     if (first_sample >= sample_end) {
         return std::unexpected(benchmark_error("A Cornell render batch must be non-empty."));
     }
@@ -485,6 +486,89 @@ render_sample_range(renderer::FilmT<Precision>& film, const std::uint64_t first_
                 if (!status) {
                     return std::unexpected(status.error());
                 }
+            }
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] core::Status render_cpu_wavefront_sample_range(
+    renderer::Film& film, const std::uint64_t first_sample, const std::uint64_t sample_end,
+    const std::uint64_t seed, const renderer::PinholeCamera& camera,
+    const renderer::SampledWavelengths& wavelengths,
+    const renderer::CpuWavefrontScheduler& scheduler, const AccelBackend& acceleration,
+    const renderer::LightSampler& light_sampler) {
+    if (first_sample >= sample_end) {
+        return std::unexpected(benchmark_error("A Cornell render batch must be non-empty."));
+    }
+    const auto initial_state =
+        renderer::PathState::create_initial(wavelengths, renderer::VacuumMedium);
+    if (!initial_state) {
+        return std::unexpected(initial_state.error());
+    }
+    const auto independent_sampler = renderer::IndependentSampler{seed};
+    const auto path_count =
+        static_cast<std::size_t>(ImageExtent.width) * static_cast<std::size_t>(ImageExtent.height);
+    auto inputs = std::vector<CpuWavefrontMisPathInput>{};
+    inputs.reserve(path_count);
+
+    for (auto sample_index = first_sample; sample_index < sample_end; ++sample_index) {
+        inputs.clear();
+        for (auto y = std::uint32_t{}; y < ImageExtent.height; ++y) {
+            for (auto x = std::uint32_t{}; x < ImageExtent.width; ++x) {
+                const auto index = renderer::PixelSampleIndex{
+                    .pixel_x = x,
+                    .pixel_y = y,
+                    .sample_index = sample_index,
+                    .seed = seed,
+                };
+                const auto ray = camera.generate_primary_ray(
+                    index, renderer::PixelJitterMode::uniform, PathTime);
+                if (!ray) {
+                    return std::unexpected(ray.error());
+                }
+                inputs.push_back(CpuWavefrontMisPathInput{
+                    .primary_ray = *ray,
+                    .initial_state = *initial_state,
+                    .sample = independent_sampler.make_stream(x, y, sample_index).index(),
+                });
+            }
+        }
+
+        const auto traced = trace_cpu_wavefront_mis(
+            inputs, scheduler, acceleration, light_sampler, renderer::MisHeuristic::power,
+            renderer::PathDepthLimits{.diffuse = 5U}, renderer::RussianRoulettePolicy::disabled());
+        if (!traced) {
+            return std::unexpected(traced.error());
+        }
+        if (traced->paths.size() != inputs.size() || traced->report.path_count != inputs.size() ||
+            traced->report.schema_version != CurrentCpuWavefrontMisReportSchemaVersion ||
+            traced->report.configured_workers != scheduler.worker_count()) {
+            return std::unexpected(benchmark_error(
+                "CPU wavefront Cornell transport returned an inconsistent batch report."));
+        }
+
+        for (auto lane = std::size_t{}; lane < traced->paths.size(); ++lane) {
+            const auto xyz = renderer::cie_1931_spectrum_to_xyz(
+                traced->paths[lane].state.accumulated_radiance(), wavelengths);
+            if (!xyz) {
+                return std::unexpected(xyz.error());
+            }
+            const auto rgb = renderer::xyz_to_linear_rgb(*xyz);
+            if (!rgb) {
+                return std::unexpected(rgb.error());
+            }
+            const auto x = static_cast<std::uint32_t>(lane % ImageExtent.width);
+            const auto y = static_cast<std::uint32_t>(lane / ImageExtent.width);
+            const auto status = film.add_sample(x, y,
+                                                renderer::Film::Color{
+                                                    .red = rgb->red,
+                                                    .green = rgb->green,
+                                                    .blue = rgb->blue,
+                                                },
+                                                1.0F);
+            if (!status) {
+                return std::unexpected(status.error());
             }
         }
     }
@@ -578,6 +662,25 @@ struct PixelRegion final {
     std::uint32_t maximum_y{};
 };
 
+[[nodiscard]] constexpr std::uint32_t
+scale_preview_coordinate(const std::uint32_t coordinate, const std::uint32_t extent) noexcept {
+    constexpr auto canonical_extent = std::uint64_t{128U};
+    return static_cast<std::uint32_t>(static_cast<std::uint64_t>(coordinate) * extent /
+                                      canonical_extent);
+}
+
+[[nodiscard]] constexpr PixelRegion scaled_preview_region(const std::uint32_t minimum_x,
+                                                          const std::uint32_t minimum_y,
+                                                          const std::uint32_t maximum_x,
+                                                          const std::uint32_t maximum_y) noexcept {
+    return PixelRegion{
+        .minimum_x = scale_preview_coordinate(minimum_x, ImageExtent.width),
+        .minimum_y = scale_preview_coordinate(minimum_y, ImageExtent.height),
+        .maximum_x = scale_preview_coordinate(maximum_x, ImageExtent.width),
+        .maximum_y = scale_preview_coordinate(maximum_y, ImageExtent.height),
+    };
+}
+
 struct RegionMean final {
     double red{};
     double green{};
@@ -628,29 +731,23 @@ validate_preview_semantics(const renderer::Film& film) {
     if (!whole_image) {
         return std::unexpected(whole_image.error());
     }
-    const auto left_wall = mean_region(
-        film, PixelRegion{.minimum_x = 4U, .minimum_y = 28U, .maximum_x = 20U, .maximum_y = 85U});
+    const auto left_wall = mean_region(film, scaled_preview_region(4U, 28U, 20U, 85U));
     if (!left_wall) {
         return std::unexpected(left_wall.error());
     }
-    const auto right_wall = mean_region(
-        film,
-        PixelRegion{.minimum_x = 108U, .minimum_y = 28U, .maximum_x = 124U, .maximum_y = 85U});
+    const auto right_wall = mean_region(film, scaled_preview_region(108U, 28U, 124U, 85U));
     if (!right_wall) {
         return std::unexpected(right_wall.error());
     }
-    const auto neutral_enclosure = mean_region(
-        film, PixelRegion{.minimum_x = 48U, .minimum_y = 24U, .maximum_x = 80U, .maximum_y = 50U});
+    const auto neutral_enclosure = mean_region(film, scaled_preview_region(48U, 24U, 80U, 50U));
     if (!neutral_enclosure) {
         return std::unexpected(neutral_enclosure.error());
     }
-    const auto left_sphere = mean_region(
-        film, PixelRegion{.minimum_x = 31U, .minimum_y = 85U, .maximum_x = 46U, .maximum_y = 101U});
+    const auto left_sphere = mean_region(film, scaled_preview_region(31U, 85U, 46U, 101U));
     if (!left_sphere) {
         return std::unexpected(left_sphere.error());
     }
-    const auto right_sphere = mean_region(
-        film, PixelRegion{.minimum_x = 80U, .minimum_y = 78U, .maximum_x = 96U, .maximum_y = 96U});
+    const auto right_sphere = mean_region(film, scaled_preview_region(80U, 78U, 96U, 96U));
     if (!right_sphere) {
         return std::unexpected(right_sphere.error());
     }
@@ -808,14 +905,19 @@ void cornell_power_mis_convergence(benchmark::State& state) {
         return;
     }
     const auto wavelengths = (*scene)->spectral_environment()->wavelengths;
+    const auto scheduler = renderer::CpuWavefrontScheduler::create(CpuWavefrontWorkerCount);
+    if (!scheduler) {
+        state.SkipWithError(scheduler.error().message);
+        return;
+    }
     auto reference = renderer::ReferenceFilm::create(ImageExtent);
     if (!reference) {
         state.SkipWithError(reference.error().message);
         return;
     }
-    const auto reference_status =
-        render_sample_range(*reference, 0U, ReferenceSamplesPerPixel, ReferenceSeed, *camera,
-                            wavelengths, **acceleration, *light_sampler);
+    const auto reference_status = render_scalar_reference_sample_range(
+        *reference, 0U, ReferenceSamplesPerPixel, ReferenceSeed, *camera, wavelengths,
+        **acceleration, *light_sampler);
     if (!reference_status) {
         state.SkipWithError(reference_status.error().message);
         return;
@@ -849,9 +951,10 @@ void cornell_power_mis_convergence(benchmark::State& state) {
                 const auto samples_per_pixel = CheckpointSamples[checkpoint_index];
                 state.ResumeTiming();
                 const auto render_start = Clock::now();
-                const auto render_status = render_sample_range(
+                const auto render_status = render_cpu_wavefront_sample_range(
                     *evaluated, previous_samples_per_pixel, samples_per_pixel,
-                    ImageSeeds[seed_index], *camera, wavelengths, **acceleration, *light_sampler);
+                    ImageSeeds[seed_index], *camera, wavelengths, *scheduler, **acceleration,
+                    *light_sampler);
                 const auto render_end = Clock::now();
                 state.PauseTiming();
                 cumulative_render_time +=
@@ -1021,6 +1124,7 @@ void cornell_power_mis_convergence(benchmark::State& state) {
         state.counters["reference_spp"] = static_cast<double>(ReferenceSamplesPerPixel);
         state.counters["image_spp"] = static_cast<double>(ImageSamplesPerPixel);
         state.counters["seed_count"] = static_cast<double>(ImageSeeds.size());
+        state.counters["cpu_wavefront_workers"] = static_cast<double>(scheduler->worker_count());
         state.counters["scene_instance_count"] = static_cast<double>((*scene)->instances().size());
         state.counters["sphere_instance_count"] = 2.0;
         state.counters["image_mean_luminance"] = preview_semantics->mean_luminance;

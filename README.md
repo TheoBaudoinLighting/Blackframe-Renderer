@@ -76,15 +76,22 @@ silently selecting another path.
   events separately; transmitted surface events advance both their scattering family and
   transmission counters. The current Lambertian loops consume only diffuse-reflection depth and
   support explicitly configured, compensated Russian roulette from a selected completed depth.
-- **Wavefront execution foundation:** a versioned path-state structure of arrays and seven distinct
-  bounded stage queues provide fixed-capacity storage, guarded double buffering, and stable
-  terminated-lane compaction with optional canonical path-slot ordering. A synchronous CPU
-  scheduler dispatches immutable queue snapshots over an explicit bounded worker count: one worker
-  runs inline, while a persistent multi-worker pool receives deterministic contiguous lane
-  partitions and reaches a barrier before any queue mutation or output merge. Every path slot is
-  validated against its declared state domain before dispatch; invalid stages, missing kernels,
-  worker-launch failures, and worker exceptions are reported explicitly without selecting another
-  execution mode.
+- **CPU wavefront transport:** a versioned path-state structure of arrays and seven distinct bounded
+  camera, ray, hit, miss, shade, shadow, and continuation queues provide fixed-capacity storage,
+  guarded double buffering, and stable terminated-lane compaction with optional canonical path-slot
+  ordering. A synchronous scheduler dispatches immutable queue snapshots over an explicit bounded
+  worker count: one worker runs inline, while a persistent multi-worker pool receives deterministic
+  contiguous lane partitions and reaches a barrier before queue publication. The current Embree
+  transport consumes the indexed per-pixel and per-sample stream, carries the four-lane spectral
+  packet through every stage, and resolves each FrameScene Lambertian material into an inline
+  single-component `ClosureSet` and explicit `ClosureMixture`. It samples point, directional, spot,
+  and derived emissive-mesh lights and applies explicitly selected balance or power MIS to NEE and
+  BSDF-hit contributions. Invalid path slots, queue overflow, incomplete sampling state,
+  unsupported media or heuristics, worker failures, and non-Embree acceleration are explicit batch
+  errors; the implementation never retries through another backend or transport loop. The scalar
+  scene path remains the independent readable oracle. Other implemented closure models that are
+  not yet representable by the FrameScene material schema remain standalone and are not substituted
+  for Lambertian scene materials.
 - **Shading normals:** scalar surface transport builds closure frames and evaluates their cosine and
   directional PDF from `Ns`, while `Ng` remains authoritative for sidedness, visibility, ray
   offsets, emission orientation, and area/solid-angle Jacobians. Directions on which the two normals
@@ -185,14 +192,14 @@ silently selecting another path.
   common-hemisphere energy and verifies that the correction does not create energy.
   A public checkpoint contract reports the first observed inclusive time-to-MSE and time-to-PSNR
   crossings without interpolation or a last-checkpoint substitute. A Release benchmark renders one
-  canonical 128x128 Cornell box entirely through FrameScene, Embree, spectral Lambertian transport,
-  next-event estimation, and power-heuristic MIS. The same immutable scene and transport path create
-  its independent 512-spp reference, eight seeded progressive evaluations, and its canonical 256-spp
-  PNG: red and green walls, neutral enclosure and ceiling emitter, and exactly two white Lambertian
-  triangle-mesh spheres. Its machine-readable JSON report records median and median absolute
-  deviation for time-to-quality and final error, checks the worst seed against fixed MSE/PSNR
-  targets, and validates coarse linear-image semantics; a missed target is an explicit benchmark
-  failure.
+  canonical 128x128 Cornell box through FrameScene, Embree, spectral Lambertian transport,
+  next-event estimation, and power-heuristic MIS. The scalar scene path creates its independent
+  512-spp oracle image; the four-worker CPU wavefront path creates eight seeded progressive
+  evaluations and the canonical 256-spp PNG: red and green walls, neutral enclosure and ceiling
+  emitter, and exactly two white Lambertian triangle-mesh spheres. Its machine-readable JSON report
+  records the wavefront worker count, median and median absolute deviation for time-to-quality and
+  final error, checks the worst seed against fixed MSE/PSNR targets, and validates coarse
+  linear-image semantics; a missed target is an explicit benchmark failure.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
@@ -215,19 +222,20 @@ silently selecting another path.
 
 ## Current boundary
 
-Blackframe does not yet provide a production path-tracing integrator, a scene loader, a general
-material or lighting system, deformation updates, transform motion blur, or a CUDA wavefront
-renderer. The current BSDF-only transport remains a narrow deterministic Lambertian integrator,
-whether driven by its closed scalar fixture or by a frame scene and Embree; it is not a production
-wavefront backend. Direct lighting and MIS are currently scalar, vacuum-only Lambertian paths over
-point, directional, spot, and emissive triangle-mesh lights. Environment maps are not yet sampled
-by NEE/MIS, and the public MIS entry point starts complete primary paths because `PathState` does
-not carry a prior vertex's directional PDFs. Acceleration updates currently cover explicit full
-rebuilds and frame-to-frame transform refits between immutable snapshots only. The headless
-executable currently supports local engine control and device discovery; it does not yet accept a
-scene and render an image from the command line. A consumable CMake install/export package is also
-not available yet. The CornellDiffuse JSON files are closed validation descriptors, not a general
-scene-interchange format or a hidden scene loader.
+Blackframe does not yet provide a general production path-tracing integrator, a scene loader, a
+general material or lighting system, deformation updates, transform motion blur, or a CUDA
+wavefront renderer. The CPU wavefront transport is currently a narrow vacuum-only spectral
+Lambertian path over FrameScene and Embree, with punctual and emissive triangle-mesh lights, NEE,
+and balance or power MIS. `scalar_ref` remains a separate oracle rather than an execution fallback.
+The rough diffuse, rough conductor, specular delta, rough dielectric, and anisotropic closure
+implementations remain standalone until the FrameScene material schema can describe them.
+Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
+primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
+updates currently cover explicit full rebuilds and frame-to-frame transform refits between
+immutable snapshots only. The headless executable currently supports local engine control and
+device discovery; it does not yet accept a scene and render an image from the command line. A
+consumable CMake install/export package is also not available yet. The CornellDiffuse JSON files
+are closed validation descriptors, not a general scene-interchange format or a hidden scene loader.
 
 ## Building
 

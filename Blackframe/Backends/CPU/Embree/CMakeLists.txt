@@ -2,7 +2,9 @@ add_library(
     BlackframeCpuEmbree
     STATIC
         Include/Blackframe/Backends/CPU/Embree/AccelBackend.hpp
+        Include/Blackframe/Backends/CPU/Embree/WavefrontMisTransport.hpp
         Source/AccelBackend.cpp
+        Source/WavefrontMisTransport.cpp
 )
 add_library(Blackframe::CpuEmbree ALIAS BlackframeCpuEmbree)
 blackframe_set_target_role(BlackframeCpuEmbree cpu_embree)
