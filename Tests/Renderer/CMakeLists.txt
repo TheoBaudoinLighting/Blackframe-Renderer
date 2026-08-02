@@ -28,6 +28,7 @@ add_executable(
     OwenScramblingTest.cpp
     PathDepthLimitsTest.cpp
     PathStateTest.cpp
+    PathStateSoATest.cpp
     PinholeCameraTest.cpp
     PixelJitterTest.cpp
     PlanarPrimitivesTest.cpp

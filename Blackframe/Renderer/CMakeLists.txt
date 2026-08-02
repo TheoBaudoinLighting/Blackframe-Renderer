@@ -44,6 +44,7 @@ add_library(
         Include/Blackframe/Renderer/PathDepthLimits.hpp
         Include/Blackframe/Renderer/PathState.hpp
         Include/Blackframe/Renderer/PathStateDiagnostics.hpp
+        Include/Blackframe/Renderer/PathStateSoA.hpp
         Include/Blackframe/Renderer/PinholeCamera.hpp
         Include/Blackframe/Renderer/PixelJitter.hpp
         Include/Blackframe/Renderer/Plane.hpp
@@ -85,6 +86,7 @@ add_library(
         Source/OwenScrambling.cpp
         Source/PathDepthLimits.cpp
         Source/PathStateDiagnostics.cpp
+        Source/PathStateSoA.cpp
         Source/RayDiagnostics.cpp
         Source/RenderConfiguration.cpp
         Source/RenderConfigurationLimits.hpp
