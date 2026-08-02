@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <utility>
 
 namespace blackframe::renderer {
@@ -123,6 +124,33 @@ template <GeometryScalar Scalar> class OrthonormalFrameT final {
     }
     [[nodiscard]] const Normal3T<Scalar>& normal() const noexcept {
         return normal_;
+    }
+
+    // Returns this frame rotated about its normal. Positive angles are measured in radians and
+    // rotate the tangent toward the bitangent. A frame has a full-turn period, so finite inputs
+    // are reduced modulo 2*pi before evaluating the trigonometric functions.
+    [[nodiscard]] core::Result<OrthonormalFrameT>
+    rotated_about_normal(const Scalar angle_radians) const {
+        if (!std::isfinite(angle_radians)) {
+            return std::unexpected(core::Error{
+                .code = core::StatusCode::invalid_argument,
+                .message = "A tangent-frame rotation angle must be finite.",
+            });
+        }
+
+        const auto reduced_angle =
+            std::remainder(angle_radians, Scalar{2} * std::numbers::pi_v<Scalar>);
+        const auto cosine = std::cos(reduced_angle);
+        const auto sine = std::sin(reduced_angle);
+        if (!std::isfinite(reduced_angle) || !std::isfinite(cosine) || !std::isfinite(sine)) {
+            return std::unexpected(core::Error{
+                .code = core::StatusCode::invalid_argument,
+                .message = "A tangent-frame rotation is not representable.",
+            });
+        }
+
+        const auto rotated_tangent = tangent_ * cosine + bitangent_ * sine;
+        return from_unit_normal_and_tangent(normal_, rotated_tangent);
     }
 
     [[nodiscard]] Vector3T<Scalar> to_local(const Vector3T<Scalar> world) const noexcept {

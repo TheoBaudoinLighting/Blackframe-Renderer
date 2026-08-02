@@ -393,14 +393,11 @@ rough_conductor_from_record(const ClosureT<Scalar>& closure) {
         relative_eta[lane] = closure.parameters[lane];
         relative_k[lane] = closure.parameters[TransportSpectrumSampleCount + lane];
     }
-    constexpr auto alpha_parameter = TransportSpectrumSampleCount * 2U;
-    constexpr auto reserved_parameter = alpha_parameter + 1U;
-    if (closure.parameters[reserved_parameter] != Scalar{0}) {
-        return std::unexpected(invalid_closure_mixture(
-            "A rough-conductor closure record has a non-zero reserved payload."));
-    }
+    constexpr auto alpha_x_parameter = TransportSpectrumSampleCount * 2U;
+    constexpr auto alpha_y_parameter = alpha_x_parameter + 1U;
     return RoughConductorReflectionT<Scalar>::create(closure.weight, relative_eta, relative_k,
-                                                     closure.parameters[alpha_parameter]);
+                                                     closure.parameters[alpha_x_parameter],
+                                                     closure.parameters[alpha_y_parameter]);
 }
 
 template <SpectrumScalar Scalar>
@@ -416,14 +413,15 @@ rough_dielectric_from_record(const ClosureT<Scalar>& closure) {
         return std::unexpected(invalid_closure_mixture(
             "A rough-dielectric closure record has an incompatible lobe mask."));
     }
-    for (auto index = std::size_t{3}; index < closure.parameters.size(); ++index) {
+    for (auto index = std::size_t{4}; index < closure.parameters.size(); ++index) {
         if (closure.parameters[index] != Scalar{0}) {
             return std::unexpected(invalid_closure_mixture(
                 "A rough-dielectric closure record has a non-zero reserved payload."));
         }
     }
     return RoughDielectricT<Scalar>::create(closure.weight, closure.parameters[0],
-                                            closure.parameters[1], closure.parameters[2]);
+                                            closure.parameters[1], closure.parameters[2],
+                                            closure.parameters[3]);
 }
 
 template <SpectrumScalar Scalar>

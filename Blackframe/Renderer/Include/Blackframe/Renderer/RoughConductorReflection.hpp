@@ -132,11 +132,13 @@ reflection_geometry(const Vector3T<Scalar> outgoing_local, const Vector3T<Scalar
 
 } // namespace rough_conductor_reflection_detail
 
-// Isotropic single-scattering GGX conductor reflection. Directions are finite unit vectors in a
+// Anisotropic single-scattering GGX conductor reflection. Directions are finite unit vectors in a
 // caller-supplied local closure frame, point away from the surface, and use +Z as the open
-// reflection hemisphere. Alpha is the mathematical GGX slope width and is neither remapped nor
-// clamped. Eta and k are relative to the non-absorbing incident medium. The coefficient scales the
-// physical closure and is kept separate from the exact spectral Fresnel term.
+// reflection hemisphere. AlphaX and alphaY are the mathematical GGX slope widths along that
+// frame's tangent and bitangent; rotating those axes belongs to the caller's frame construction.
+// The widths are neither remapped nor clamped. Eta and k are relative to the non-absorbing incident
+// medium. The coefficient scales the physical closure and is kept separate from the exact spectral
+// Fresnel term.
 template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
   public:
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
@@ -146,6 +148,12 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
     [[nodiscard]] static core::Result<RoughConductorReflectionT>
     create(const spectrum_type coefficient, const spectrum_type relative_eta,
            const spectrum_type relative_k, const Scalar alpha) {
+        return create(coefficient, relative_eta, relative_k, alpha, alpha);
+    }
+
+    [[nodiscard]] static core::Result<RoughConductorReflectionT>
+    create(const spectrum_type coefficient, const spectrum_type relative_eta,
+           const spectrum_type relative_k, const Scalar alpha_x, const Scalar alpha_y) {
         if (!rough_conductor_reflection_detail::valid_coefficient(coefficient)) {
             return std::unexpected(rough_conductor_reflection_detail::invalid_rough_conductor(
                 "Rough-conductor coefficients require every spectral lane to be finite and in "
@@ -160,7 +168,7 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
             return std::unexpected(rough_conductor_reflection_detail::invalid_rough_conductor(
                 "Rough-conductor k requires every spectral lane to be finite and non-negative."));
         }
-        const auto microfacet = GgxMicrofacetT<Scalar>::create(alpha);
+        const auto microfacet = GgxMicrofacetT<Scalar>::create(alpha_x, alpha_y);
         if (!microfacet) {
             return std::unexpected(microfacet.error());
         }
@@ -181,6 +189,14 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
 
     [[nodiscard]] constexpr Scalar alpha() const noexcept {
         return microfacet_.alpha();
+    }
+
+    [[nodiscard]] constexpr Scalar alpha_x() const noexcept {
+        return microfacet_.alpha_x();
+    }
+
+    [[nodiscard]] constexpr Scalar alpha_y() const noexcept {
+        return microfacet_.alpha_y();
     }
 
     [[nodiscard]] core::Result<spectrum_type> eval(const Vector3T<Scalar> outgoing_local,

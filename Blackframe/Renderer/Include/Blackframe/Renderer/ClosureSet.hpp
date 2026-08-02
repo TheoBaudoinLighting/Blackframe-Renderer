@@ -1,13 +1,12 @@
 #pragma once
 
+#include <Blackframe/Renderer/GgxMicrofacet.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
 #include <Blackframe/Renderer/TransportConventions.hpp>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
-#include <numbers>
 #include <span>
 #include <type_traits>
 
@@ -47,9 +46,10 @@ enum class ClosureAppendStatus : std::uint32_t {
 // Every slot is a fixed ABI record. Weight is the model's spectral coefficient. Lambertian
 // reflection leaves all ten scalar parameters zero; rough diffuse stores normalized roughness in
 // parameters[0]. Rough conductor stores spectral eta in parameters[0..3], spectral k in
-// parameters[4..7], isotropic GGX alpha in parameters[8], and leaves parameters[9] reserved. Rough
-// dielectric stores exterior eta, interior eta, and isotropic GGX alpha in parameters[0..2] and
-// leaves parameters[3..9] reserved.
+// parameters[4..7], and GGX alphaX/alphaY in parameters[8..9]. Rough dielectric stores exterior
+// eta, interior eta, and GGX alphaX/alphaY in parameters[0..3] and leaves parameters[4..9]
+// reserved. Tangent-axis rotation belongs to the caller-supplied local closure frame and is not
+// duplicated in an individual closure record.
 template <SpectrumScalar Scalar> struct alignas(8) ClosureT final {
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
 
@@ -102,16 +102,6 @@ valid_relative_k(const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& re
         }
     }
     return true;
-}
-
-template <SpectrumScalar Scalar> [[nodiscard]] bool valid_ggx_alpha(const Scalar alpha) noexcept {
-    if (!std::isfinite(alpha) || !(alpha > Scalar{0})) {
-        return false;
-    }
-    const auto maximum_alpha =
-        std::sqrt(std::numeric_limits<Scalar>::max()) * std::sqrt(std::numbers::pi_v<Scalar>);
-    const auto minimum_alpha = Scalar{1} / maximum_alpha;
-    return alpha >= minimum_alpha && alpha <= maximum_alpha;
 }
 
 } // namespace closure_set_detail
@@ -187,10 +177,17 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
     append_rough_conductor_reflection(const spectrum_type coefficient,
                                       const spectrum_type relative_eta,
                                       const spectrum_type relative_k, const Scalar alpha) noexcept {
+        return append_rough_conductor_reflection(coefficient, relative_eta, relative_k, alpha,
+                                                 alpha);
+    }
+
+    [[nodiscard]] ClosureAppendStatus append_rough_conductor_reflection(
+        const spectrum_type coefficient, const spectrum_type relative_eta,
+        const spectrum_type relative_k, const Scalar alpha_x, const Scalar alpha_y) noexcept {
         if (!closure_set_detail::valid_reflectance(coefficient) ||
             !closure_set_detail::valid_relative_eta(relative_eta) ||
             !closure_set_detail::valid_relative_k(relative_k) ||
-            !closure_set_detail::valid_ggx_alpha(alpha)) {
+            !ggx_microfacet_detail::representable_alpha_pair(alpha_x, alpha_y)) {
             return ClosureAppendStatus::invalid_payload;
         }
         if (full()) {
@@ -202,7 +199,8 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
             parameters[lane] = relative_eta[lane];
             parameters[TransportSpectrumSampleCount + lane] = relative_k[lane];
         }
-        parameters[TransportSpectrumSampleCount * 2U] = alpha;
+        parameters[TransportSpectrumSampleCount * 2U] = alpha_x;
+        parameters[TransportSpectrumSampleCount * 2U + 1U] = alpha_y;
         closures_[size_] = closure_type{
             .kind = ClosureKind::rough_conductor_reflection,
             .lobes = ScatteringLobe::glossy | ScatteringLobe::reflection,
@@ -217,10 +215,18 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
                                                               const Scalar exterior_eta,
                                                               const Scalar interior_eta,
                                                               const Scalar alpha) noexcept {
+        return append_rough_dielectric(coefficient, exterior_eta, interior_eta, alpha, alpha);
+    }
+
+    [[nodiscard]] ClosureAppendStatus append_rough_dielectric(const spectrum_type coefficient,
+                                                              const Scalar exterior_eta,
+                                                              const Scalar interior_eta,
+                                                              const Scalar alpha_x,
+                                                              const Scalar alpha_y) noexcept {
         if (!closure_set_detail::valid_reflectance(coefficient) || !std::isfinite(exterior_eta) ||
             !(exterior_eta > Scalar{0}) || !std::isfinite(interior_eta) ||
             !(interior_eta > Scalar{0}) || exterior_eta == interior_eta ||
-            !closure_set_detail::valid_ggx_alpha(alpha)) {
+            !ggx_microfacet_detail::representable_alpha_pair(alpha_x, alpha_y)) {
             return ClosureAppendStatus::invalid_payload;
         }
         if (full()) {
@@ -230,7 +236,8 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
         auto parameters = std::array<Scalar, ClosureParameterScalarCount>{};
         parameters[0] = exterior_eta;
         parameters[1] = interior_eta;
-        parameters[2] = alpha;
+        parameters[2] = alpha_x;
+        parameters[3] = alpha_y;
         closures_[size_] = closure_type{
             .kind = ClosureKind::rough_dielectric,
             .lobes =

@@ -75,7 +75,14 @@ template <SpectrumScalar Scalar> void expect_creation_contract() {
         EXPECT_EQ(reflection->relative_eta(), relative_eta);
         EXPECT_EQ(reflection->relative_k(), relative_k);
         EXPECT_EQ(reflection->alpha(), alpha);
+        EXPECT_EQ(reflection->alpha_x(), alpha);
+        EXPECT_EQ(reflection->alpha_y(), alpha);
     }
+    const auto anisotropic = ReflectionFor<Scalar>::create(coefficient, relative_eta, relative_k,
+                                                           Scalar{0.25}, Scalar{0.75});
+    ASSERT_TRUE(anisotropic.has_value()) << anisotropic.error().message;
+    EXPECT_EQ(anisotropic->alpha_x(), Scalar{0.25});
+    EXPECT_EQ(anisotropic->alpha_y(), Scalar{0.75});
 
     const auto infinity = std::numeric_limits<Scalar>::infinity();
     auto malformed_coefficient = coefficient;
@@ -111,6 +118,14 @@ template <SpectrumScalar Scalar> void expect_creation_contract() {
         expect_invalid(
             ReflectionFor<Scalar>::create(coefficient, relative_eta, relative_k, invalid_alpha));
     }
+    for (const auto invalid_alpha :
+         std::array{Scalar{0}, Scalar{-0.0}, -std::numeric_limits<Scalar>::denorm_min(),
+                    std::numeric_limits<Scalar>::quiet_NaN(), infinity, -infinity}) {
+        expect_invalid(ReflectionFor<Scalar>::create(coefficient, relative_eta, relative_k,
+                                                     invalid_alpha, Scalar{0.5}));
+        expect_invalid(ReflectionFor<Scalar>::create(coefficient, relative_eta, relative_k,
+                                                     Scalar{0.5}, invalid_alpha));
+    }
 
     auto signed_zero_k = relative_k;
     signed_zero_k[0] = Scalar{-0.0};
@@ -129,18 +144,27 @@ TEST(RoughConductorReflectionTest, CreatesOnlyFinitePhysicalParametersAndPositiv
                                    ReferenceSpectrum{}, ReferenceSpectrum{}, ReferenceSpectrum{},
                                    ReferenceScalar{})),
                                core::Result<ReferenceRoughConductorReflection>>);
+    static_assert(std::same_as<decltype(RoughConductorReflection::create(
+                                   TransportSpectrum{}, TransportSpectrum{}, TransportSpectrum{},
+                                   TransportScalar{}, TransportScalar{})),
+                               core::Result<RoughConductorReflection>>);
+    static_assert(std::same_as<decltype(ReferenceRoughConductorReflection::create(
+                                   ReferenceSpectrum{}, ReferenceSpectrum{}, ReferenceSpectrum{},
+                                   ReferenceScalar{}, ReferenceScalar{})),
+                               core::Result<ReferenceRoughConductorReflection>>);
     static_assert(!std::same_as<RoughConductorReflection, ReferenceRoughConductorReflection>);
     static_assert(!std::same_as<RoughConductorSample, ReferenceRoughConductorSample>);
     expect_creation_contract<TransportScalar>();
     expect_creation_contract<ReferenceScalar>();
 }
 
-template <SpectrumScalar Scalar> void expect_reciprocal_analytic_value(const Scalar alpha) {
+template <SpectrumScalar Scalar>
+void expect_reciprocal_analytic_value(const Scalar alpha_x, const Scalar alpha_y) {
     const auto coefficient = test_coefficient<Scalar>();
     const auto relative_eta = test_relative_eta<Scalar>();
     const auto relative_k = test_relative_k<Scalar>();
     const auto reflection =
-        ReflectionFor<Scalar>::create(coefficient, relative_eta, relative_k, alpha);
+        ReflectionFor<Scalar>::create(coefficient, relative_eta, relative_k, alpha_x, alpha_y);
     ASSERT_TRUE(reflection.has_value()) << reflection.error().message;
 
     const auto normal = Vector3T<Scalar>{.z = Scalar{1}};
@@ -148,7 +172,8 @@ template <SpectrumScalar Scalar> void expect_reciprocal_analytic_value(const Sca
     const auto normal_fresnel = conductor_fresnel(Scalar{1}, relative_eta, relative_k);
     ASSERT_TRUE(normal_value.has_value()) << normal_value.error().message;
     ASSERT_TRUE(normal_fresnel.has_value()) << normal_fresnel.error().message;
-    const auto normal_scale = Scalar{1} / (Scalar{4} * std::numbers::pi_v<Scalar> * alpha * alpha);
+    const auto normal_scale =
+        Scalar{1} / (Scalar{4} * std::numbers::pi_v<Scalar> * alpha_x * alpha_y);
     for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
         EXPECT_NEAR(static_cast<ReferenceScalar>((*normal_value)[lane]),
                     static_cast<ReferenceScalar>(coefficient[lane] * (*normal_fresnel)[lane] *
@@ -178,17 +203,22 @@ template <SpectrumScalar Scalar> void expect_reciprocal_analytic_value(const Sca
 
 TEST(RoughConductorReflectionTest, EvaluatesTheAnalyticReciprocalGgxBrdf) {
     for (const auto alpha : std::array{TransportScalar{0.5}, TransportScalar{2}}) {
-        expect_reciprocal_analytic_value<TransportScalar>(alpha);
+        expect_reciprocal_analytic_value<TransportScalar>(alpha, alpha);
     }
+    expect_reciprocal_analytic_value<TransportScalar>(TransportScalar{0.25F},
+                                                      TransportScalar{0.75F});
     for (const auto alpha : std::array{ReferenceScalar{0.5}, ReferenceScalar{2}}) {
-        expect_reciprocal_analytic_value<ReferenceScalar>(alpha);
+        expect_reciprocal_analytic_value<ReferenceScalar>(alpha, alpha);
     }
+    expect_reciprocal_analytic_value<ReferenceScalar>(ReferenceScalar{0.25}, ReferenceScalar{0.75});
 }
 
-template <SpectrumScalar Scalar> void expect_vndf_jacobian_and_replay(const Scalar alpha) {
-    const auto reflection = ReflectionFor<Scalar>::create(
-        test_coefficient<Scalar>(), test_relative_eta<Scalar>(), test_relative_k<Scalar>(), alpha);
-    const auto distribution = GgxFor<Scalar>::create(alpha);
+template <SpectrumScalar Scalar>
+void expect_vndf_jacobian_and_replay(const Scalar alpha_x, const Scalar alpha_y) {
+    const auto reflection =
+        ReflectionFor<Scalar>::create(test_coefficient<Scalar>(), test_relative_eta<Scalar>(),
+                                      test_relative_k<Scalar>(), alpha_x, alpha_y);
+    const auto distribution = GgxFor<Scalar>::create(alpha_x, alpha_y);
     ASSERT_TRUE(reflection.has_value()) << reflection.error().message;
     ASSERT_TRUE(distribution.has_value()) << distribution.error().message;
 
@@ -236,11 +266,47 @@ template <SpectrumScalar Scalar> void expect_vndf_jacobian_and_replay(const Scal
 
 TEST(RoughConductorReflectionTest, SamplesTheVndfWithMatchingJacobianAndReplay) {
     for (const auto alpha : std::array{TransportScalar{0.45}, TransportScalar{2}}) {
-        expect_vndf_jacobian_and_replay<TransportScalar>(alpha);
+        expect_vndf_jacobian_and_replay<TransportScalar>(alpha, alpha);
     }
+    expect_vndf_jacobian_and_replay<TransportScalar>(TransportScalar{0.2F}, TransportScalar{0.7F});
     for (const auto alpha : std::array{ReferenceScalar{0.45}, ReferenceScalar{2}}) {
-        expect_vndf_jacobian_and_replay<ReferenceScalar>(alpha);
+        expect_vndf_jacobian_and_replay<ReferenceScalar>(alpha, alpha);
     }
+    expect_vndf_jacobian_and_replay<ReferenceScalar>(ReferenceScalar{0.2}, ReferenceScalar{0.7});
+}
+
+template <SpectrumScalar Scalar> void expect_axis_rotation_covariance() {
+    const auto x_rough =
+        ReflectionFor<Scalar>::create(test_coefficient<Scalar>(), test_relative_eta<Scalar>(),
+                                      test_relative_k<Scalar>(), Scalar{0.2}, Scalar{0.7});
+    const auto y_rough =
+        ReflectionFor<Scalar>::create(test_coefficient<Scalar>(), test_relative_eta<Scalar>(),
+                                      test_relative_k<Scalar>(), Scalar{0.7}, Scalar{0.2});
+    ASSERT_TRUE(x_rough.has_value()) << x_rough.error().message;
+    ASSERT_TRUE(y_rough.has_value()) << y_rough.error().message;
+    const auto outgoing = Vector3T<Scalar>{
+        .x = Scalar{0.3}, .y = Scalar{0.4}, .z = static_cast<Scalar>(std::sqrt(0.75L))};
+    const auto incoming = Vector3T<Scalar>{.x = Scalar{-0.6}, .z = Scalar{0.8}};
+    const auto rotate_quarter_turn = [](const Vector3T<Scalar> value) {
+        return Vector3T<Scalar>{.x = -value.y, .y = value.x, .z = value.z};
+    };
+    const auto x_value = x_rough->eval(outgoing, incoming);
+    const auto y_value =
+        y_rough->eval(rotate_quarter_turn(outgoing), rotate_quarter_turn(incoming));
+    const auto x_pdf = x_rough->pdf(outgoing, incoming);
+    const auto y_pdf = y_rough->pdf(rotate_quarter_turn(outgoing), rotate_quarter_turn(incoming));
+    ASSERT_TRUE(x_value.has_value()) << x_value.error().message;
+    ASSERT_TRUE(y_value.has_value()) << y_value.error().message;
+    ASSERT_TRUE(x_pdf.has_value()) << x_pdf.error().message;
+    ASSERT_TRUE(y_pdf.has_value()) << y_pdf.error().message;
+    expect_spectrum_near(*x_value, *y_value);
+    EXPECT_NEAR(static_cast<ReferenceScalar>(x_pdf->value),
+                static_cast<ReferenceScalar>(y_pdf->value), AnalyticTolerance<Scalar>);
+}
+
+TEST(RoughConductorReflectionTest, RotatesAnisotropicAxesCovariantly) {
+    expect_axis_rotation_covariance<TransportScalar>();
+    expect_axis_rotation_covariance<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_support_without_fallback() {
@@ -319,10 +385,13 @@ template <SpectrumScalar Scalar> void expect_white_furnace_energy_bound() {
         Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}},
         Vector3T<Scalar>{.x = static_cast<Scalar>(std::sqrt(0.96L)), .z = Scalar{0.2}},
     };
-    for (const auto alpha : std::array{Scalar{0.25}, Scalar{0.6}, Scalar{1}, Scalar{2}}) {
-        const auto reflection = ReflectionFor<Scalar>::create(constant_spectrum<Scalar>(Scalar{1}),
-                                                              test_relative_eta<Scalar>(),
-                                                              test_relative_k<Scalar>(), alpha);
+    for (const auto [alpha_x, alpha_y] :
+         std::array{std::pair{Scalar{0.25}, Scalar{0.25}}, std::pair{Scalar{0.6}, Scalar{0.6}},
+                    std::pair{Scalar{1}, Scalar{1}}, std::pair{Scalar{2}, Scalar{2}},
+                    std::pair{Scalar{0.25}, Scalar{0.7}}, std::pair{Scalar{0.7}, Scalar{0.25}}}) {
+        const auto reflection = ReflectionFor<Scalar>::create(
+            constant_spectrum<Scalar>(Scalar{1}), test_relative_eta<Scalar>(),
+            test_relative_k<Scalar>(), alpha_x, alpha_y);
         ASSERT_TRUE(reflection.has_value()) << reflection.error().message;
         for (const auto outgoing : outgoing_directions) {
             const auto integral = integrate_white_furnace(*reflection, outgoing);

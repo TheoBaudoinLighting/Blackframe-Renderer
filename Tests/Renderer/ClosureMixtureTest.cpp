@@ -412,15 +412,16 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     const auto relative_k = SpectrumFor<Scalar>{
         .values = {Scalar{3}, Scalar{2}, Scalar{1}, Scalar{4}},
     };
-    constexpr auto alpha = Scalar{0.5};
+    constexpr auto alpha_x = Scalar{0.2};
+    constexpr auto alpha_y = Scalar{0.7};
     auto singleton_set = SetFor<Scalar>{};
     ASSERT_EQ(singleton_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
-                                                              alpha),
+                                                              alpha_x, alpha_y),
               ClosureAppendStatus::appended);
     const auto singleton_probability = std::array{Scalar{1}};
     const auto singleton = MixtureFor<Scalar>::create(singleton_set, singleton_probability);
     const auto direct =
-        RoughConductorFor<Scalar>::create(coefficient, relative_eta, relative_k, alpha);
+        RoughConductorFor<Scalar>::create(coefficient, relative_eta, relative_k, alpha_x, alpha_y);
     ASSERT_TRUE(singleton.has_value());
     ASSERT_TRUE(direct.has_value());
 
@@ -457,9 +458,9 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     auto mixed_set = SetFor<Scalar>{};
     ASSERT_EQ(mixed_set.append_lambertian_reflection(lambert_reflectance),
               ClosureAppendStatus::appended);
-    ASSERT_EQ(
-        mixed_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, alpha),
-        ClosureAppendStatus::appended);
+    ASSERT_EQ(mixed_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
+                                                          alpha_x, alpha_y),
+              ClosureAppendStatus::appended);
     const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
     const auto mixture = MixtureFor<Scalar>::create(mixed_set, probabilities);
     const auto lambert = ReflectionFor<Scalar>::create(lambert_reflectance);
@@ -509,9 +510,11 @@ template <SpectrumScalar Scalar> void expect_rough_dielectric_dispatch() {
     };
     constexpr auto exterior_eta = Scalar{1};
     constexpr auto interior_eta = Scalar{1.5};
-    constexpr auto alpha = Scalar{0.35};
+    constexpr auto alpha_x = Scalar{0.2};
+    constexpr auto alpha_y = Scalar{0.7};
     auto singleton_set = SetFor<Scalar>{};
-    ASSERT_EQ(singleton_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, alpha),
+    ASSERT_EQ(singleton_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta,
+                                                    alpha_x, alpha_y),
               ClosureAppendStatus::appended);
     const auto singleton_probability = std::array{Scalar{1}};
     const auto singleton = MixtureFor<Scalar>::create(singleton_set, singleton_probability);
@@ -550,7 +553,8 @@ template <SpectrumScalar Scalar> void expect_rough_dielectric_dispatch() {
     auto mixed_set = SetFor<Scalar>{};
     ASSERT_EQ(mixed_set.append_lambertian_reflection(lambert_reflectance),
               ClosureAppendStatus::appended);
-    ASSERT_EQ(mixed_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, alpha),
+    ASSERT_EQ(mixed_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, alpha_x,
+                                                alpha_y),
               ClosureAppendStatus::appended);
     const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
     const auto mixture = MixtureFor<Scalar>::create(mixed_set, probabilities);
@@ -640,7 +644,8 @@ template <SpectrumScalar Scalar> void expect_rough_dielectric_dispatch() {
 
     constexpr auto tir_alpha = Scalar{0.05};
     auto tir_set = SetFor<Scalar>{};
-    ASSERT_EQ(tir_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, tir_alpha),
+    ASSERT_EQ(tir_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, tir_alpha,
+                                              Scalar{0.2}),
               ClosureAppendStatus::appended);
     const auto tir = MixtureFor<Scalar>::create(tir_set, singleton_probability);
     ASSERT_TRUE(tir.has_value());
@@ -994,6 +999,18 @@ template <SpectrumScalar Scalar> void expect_corrupt_records_are_rejected() {
         rough_set, set_storage_offset + parameter_offset + sizeof(Scalar), Scalar{1});
     expect_invalid(MixtureFor<Scalar>::create(rough_nonzero_reserved, probability));
 
+    auto conductor_set = SetFor<Scalar>{};
+    ASSERT_EQ(conductor_set.append_rough_conductor_reflection(
+                  constant_spectrum<Scalar>(Scalar{0.5}), constant_spectrum<Scalar>(Scalar{1.5}),
+                  constant_spectrum<Scalar>(Scalar{2}), Scalar{0.2}, Scalar{0.7}),
+              ClosureAppendStatus::appended);
+    const auto invalid_conductor_alpha_x = overwrite_bytes(
+        conductor_set, set_storage_offset + parameter_offset + 8U * sizeof(Scalar), Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_conductor_alpha_x, probability));
+    const auto invalid_conductor_alpha_y = overwrite_bytes(
+        conductor_set, set_storage_offset + parameter_offset + 9U * sizeof(Scalar), Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_conductor_alpha_y, probability));
+
     auto dielectric_set = SetFor<Scalar>{};
     ASSERT_EQ(dielectric_set.append_rough_dielectric(constant_spectrum<Scalar>(Scalar{0.5}),
                                                      Scalar{1}, Scalar{1.5}, Scalar{0.5}),
@@ -1012,8 +1029,11 @@ template <SpectrumScalar Scalar> void expect_corrupt_records_are_rejected() {
     const auto invalid_dielectric_alpha = overwrite_bytes(
         dielectric_set, set_storage_offset + parameter_offset + 2U * sizeof(Scalar), Scalar{0});
     expect_invalid(MixtureFor<Scalar>::create(invalid_dielectric_alpha, probability));
+    const auto invalid_dielectric_alpha_y = overwrite_bytes(
+        dielectric_set, set_storage_offset + parameter_offset + 3U * sizeof(Scalar), Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_dielectric_alpha_y, probability));
     const auto dielectric_nonzero_reserved = overwrite_bytes(
-        dielectric_set, set_storage_offset + parameter_offset + 3U * sizeof(Scalar), Scalar{1});
+        dielectric_set, set_storage_offset + parameter_offset + 4U * sizeof(Scalar), Scalar{1});
     expect_invalid(MixtureFor<Scalar>::create(dielectric_nonzero_reserved, probability));
 }
 

@@ -10,6 +10,7 @@
 #include <limits>
 #include <numbers>
 #include <type_traits>
+#include <utility>
 
 namespace blackframe::renderer {
 namespace {
@@ -106,7 +107,15 @@ template <SpectrumScalar Scalar> void expect_creation_contract() {
         const auto dielectric =
             RoughDielectricT<Scalar>::create(coefficient, Scalar{1}, Scalar{1.5}, alpha);
         ASSERT_TRUE(dielectric.has_value()) << dielectric.error().message;
+        EXPECT_EQ(dielectric->alpha(), alpha);
+        EXPECT_EQ(dielectric->alpha_x(), alpha);
+        EXPECT_EQ(dielectric->alpha_y(), alpha);
     }
+    const auto anisotropic = RoughDielectricT<Scalar>::create(coefficient, Scalar{1}, Scalar{1.5},
+                                                              Scalar{0.25}, Scalar{0.75});
+    ASSERT_TRUE(anisotropic.has_value()) << anisotropic.error().message;
+    EXPECT_EQ(anisotropic->alpha_x(), Scalar{0.25});
+    EXPECT_EQ(anisotropic->alpha_y(), Scalar{0.75});
 
     const auto infinity = std::numeric_limits<Scalar>::infinity();
     const auto invalid_values = std::array{
@@ -136,6 +145,14 @@ template <SpectrumScalar Scalar> void expect_creation_contract() {
         expect_invalid(
             RoughDielectricT<Scalar>::create(coefficient, Scalar{1}, Scalar{1.5}, invalid_alpha));
     }
+    for (const auto invalid_alpha :
+         std::array{Scalar{0}, Scalar{-0.0}, -std::numeric_limits<Scalar>::denorm_min(),
+                    std::numeric_limits<Scalar>::quiet_NaN(), infinity, -infinity}) {
+        expect_invalid(RoughDielectricT<Scalar>::create(coefficient, Scalar{1}, Scalar{1.5},
+                                                        invalid_alpha, Scalar{0.5}));
+        expect_invalid(RoughDielectricT<Scalar>::create(coefficient, Scalar{1}, Scalar{1.5},
+                                                        Scalar{0.5}, invalid_alpha));
+    }
     expect_invalid(
         RoughDielectricT<Scalar>::create(coefficient, Scalar{1.5}, Scalar{1.5}, Scalar{0.5}));
 }
@@ -148,6 +165,14 @@ TEST(RoughDielectricTest, CreatesOnlyFinitePhysicalParametersAndPositiveWidth) {
     static_assert(std::same_as<decltype(ReferenceRoughDielectric::create(
                                    ReferenceSpectrum{}, ReferenceScalar{}, ReferenceScalar{},
                                    ReferenceScalar{})),
+                               core::Result<ReferenceRoughDielectric>>);
+    static_assert(std::same_as<decltype(RoughDielectric::create(
+                                   TransportSpectrum{}, TransportScalar{}, TransportScalar{},
+                                   TransportScalar{}, TransportScalar{})),
+                               core::Result<RoughDielectric>>);
+    static_assert(std::same_as<decltype(ReferenceRoughDielectric::create(
+                                   ReferenceSpectrum{}, ReferenceScalar{}, ReferenceScalar{},
+                                   ReferenceScalar{}, ReferenceScalar{})),
                                core::Result<ReferenceRoughDielectric>>);
     static_assert(!std::same_as<RoughDielectric, ReferenceRoughDielectric>);
     expect_creation_contract<TransportScalar>();
@@ -209,12 +234,13 @@ TEST(RoughDielectricTest, KeepsInvalidInputsAndUnsupportedDirectionsExplicit) {
 }
 
 template <SpectrumScalar Scalar>
-void expect_sample_replay_and_jacobian(const Scalar alpha, const bool reflection) {
+void expect_sample_replay_and_jacobian(const Scalar alpha_x, const Scalar alpha_y,
+                                       const bool reflection) {
     constexpr auto exterior_eta = Scalar{1};
     constexpr auto interior_eta = Scalar{1.5};
-    const auto dielectric = RoughDielectricT<Scalar>::create(test_coefficient<Scalar>(),
-                                                             exterior_eta, interior_eta, alpha);
-    const auto distribution = GgxFor<Scalar>::create(alpha);
+    const auto dielectric = RoughDielectricT<Scalar>::create(
+        test_coefficient<Scalar>(), exterior_eta, interior_eta, alpha_x, alpha_y);
+    const auto distribution = GgxFor<Scalar>::create(alpha_x, alpha_y);
     ASSERT_TRUE(dielectric.has_value()) << dielectric.error().message;
     ASSERT_TRUE(distribution.has_value()) << distribution.error().message;
 
@@ -279,13 +305,88 @@ void expect_sample_replay_and_jacobian(const Scalar alpha, const bool reflection
 
 TEST(RoughDielectricTest, SamplesReflectionAndTransmissionWithExactVndfJacobians) {
     for (const auto alpha : std::array{TransportScalar{0.45F}, TransportScalar{2}}) {
-        expect_sample_replay_and_jacobian<TransportScalar>(alpha, true);
-        expect_sample_replay_and_jacobian<TransportScalar>(alpha, false);
+        expect_sample_replay_and_jacobian<TransportScalar>(alpha, alpha, true);
+        expect_sample_replay_and_jacobian<TransportScalar>(alpha, alpha, false);
     }
+    expect_sample_replay_and_jacobian<TransportScalar>(TransportScalar{0.2F}, TransportScalar{0.7F},
+                                                       true);
+    expect_sample_replay_and_jacobian<TransportScalar>(TransportScalar{0.2F}, TransportScalar{0.7F},
+                                                       false);
     for (const auto alpha : std::array{ReferenceScalar{0.45}, ReferenceScalar{2}}) {
-        expect_sample_replay_and_jacobian<ReferenceScalar>(alpha, true);
-        expect_sample_replay_and_jacobian<ReferenceScalar>(alpha, false);
+        expect_sample_replay_and_jacobian<ReferenceScalar>(alpha, alpha, true);
+        expect_sample_replay_and_jacobian<ReferenceScalar>(alpha, alpha, false);
     }
+    expect_sample_replay_and_jacobian<ReferenceScalar>(ReferenceScalar{0.2}, ReferenceScalar{0.7},
+                                                       true);
+    expect_sample_replay_and_jacobian<ReferenceScalar>(ReferenceScalar{0.2}, ReferenceScalar{0.7},
+                                                       false);
+}
+
+template <SpectrumScalar Scalar> void expect_axis_rotation_covariance() {
+    const auto x_rough = RoughDielectricT<Scalar>::create(test_coefficient<Scalar>(), Scalar{1},
+                                                          Scalar{1.5}, Scalar{0.2}, Scalar{0.7});
+    const auto y_rough = RoughDielectricT<Scalar>::create(test_coefficient<Scalar>(), Scalar{1},
+                                                          Scalar{1.5}, Scalar{0.7}, Scalar{0.2});
+    ASSERT_TRUE(x_rough.has_value()) << x_rough.error().message;
+    ASSERT_TRUE(y_rough.has_value()) << y_rough.error().message;
+    const auto outgoing = Vector3T<Scalar>{
+        .x = Scalar{0.3}, .y = Scalar{0.4}, .z = static_cast<Scalar>(std::sqrt(0.75L))};
+    const auto rotate_quarter_turn = [](const Vector3T<Scalar> value) {
+        return Vector3T<Scalar>{.x = -value.y, .y = value.x, .z = value.z};
+    };
+    const auto rotated_outgoing = rotate_quarter_turn(outgoing);
+    constexpr auto canonical = Point2T<Scalar>{.x = Scalar{0.1}, .y = Scalar{0.375}};
+    for (const auto event_sample : std::array{Scalar{0}, Scalar{0.5}}) {
+        const auto x_sample =
+            x_rough->sample(outgoing, event_sample, canonical, TransportMode::importance);
+        const auto y_sample =
+            y_rough->sample(rotated_outgoing, event_sample, canonical, TransportMode::importance);
+        ASSERT_TRUE(x_sample.has_value()) << x_sample.error().message;
+        ASSERT_TRUE(x_sample->has_value());
+        ASSERT_TRUE(y_sample.has_value()) << y_sample.error().message;
+        ASSERT_TRUE(y_sample->has_value());
+        const auto& x_event = **x_sample;
+        const auto& y_event = **y_sample;
+        const auto expected_incoming = rotate_quarter_turn(x_event.incoming_local);
+        expect_scalar_near(y_event.incoming_local.x,
+                           static_cast<ReferenceScalar>(expected_incoming.x));
+        expect_scalar_near(y_event.incoming_local.y,
+                           static_cast<ReferenceScalar>(expected_incoming.y));
+        expect_scalar_near(y_event.incoming_local.z,
+                           static_cast<ReferenceScalar>(expected_incoming.z));
+        expect_spectrum_near(x_event.value, y_event.value);
+        expect_scalar_near(x_event.probability.value,
+                           static_cast<ReferenceScalar>(y_event.probability.value),
+                           static_cast<ReferenceScalar>(x_event.probability.value));
+        EXPECT_EQ(x_event.probability.measure, y_event.probability.measure);
+        EXPECT_EQ(x_event.lobes, y_event.lobes);
+        EXPECT_EQ(x_event.lobes, ScatteringLobe::glossy |
+                                     (event_sample == Scalar{0} ? ScatteringLobe::reflection
+                                                                : ScatteringLobe::transmission));
+        expect_scalar_near(x_event.eta_scale_multiplier,
+                           static_cast<ReferenceScalar>(y_event.eta_scale_multiplier));
+
+        const auto x_value =
+            x_rough->eval(outgoing, x_event.incoming_local, TransportMode::importance);
+        const auto y_value =
+            y_rough->eval(rotated_outgoing, expected_incoming, TransportMode::importance);
+        const auto x_pdf =
+            x_rough->pdf(outgoing, x_event.incoming_local, TransportMode::importance);
+        const auto y_pdf =
+            y_rough->pdf(rotated_outgoing, expected_incoming, TransportMode::importance);
+        ASSERT_TRUE(x_value.has_value()) << x_value.error().message;
+        ASSERT_TRUE(y_value.has_value()) << y_value.error().message;
+        ASSERT_TRUE(x_pdf.has_value()) << x_pdf.error().message;
+        ASSERT_TRUE(y_pdf.has_value()) << y_pdf.error().message;
+        expect_spectrum_near(*x_value, *y_value);
+        expect_scalar_near(x_pdf->value, static_cast<ReferenceScalar>(y_pdf->value),
+                           static_cast<ReferenceScalar>(x_pdf->value));
+    }
+}
+
+TEST(RoughDielectricTest, RotatesAnisotropicReflectionAndTransmissionCovariantly) {
+    expect_axis_rotation_covariance<TransportScalar>();
+    expect_axis_rotation_covariance<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_two_sided_support() {
@@ -380,8 +481,8 @@ TEST(RoughDielectricTest, SeparatesRadianceAdjointAndEtaScaleFromImportance) {
 }
 
 template <SpectrumScalar Scalar> void expect_total_internal_reflection_forces_reflection() {
-    const auto dielectric = RoughDielectricT<Scalar>::create(constant_spectrum<Scalar>(Scalar{1}),
-                                                             Scalar{1}, Scalar{1.5}, Scalar{0.05});
+    const auto dielectric = RoughDielectricT<Scalar>::create(
+        constant_spectrum<Scalar>(Scalar{1}), Scalar{1}, Scalar{1.5}, Scalar{0.05}, Scalar{0.2});
     ASSERT_TRUE(dielectric.has_value()) << dielectric.error().message;
     const auto outgoing = Vector3T<Scalar>{.x = Scalar{0.8}, .z = Scalar{-0.6}};
     const auto event_sample = std::nextafter(Scalar{1}, Scalar{0});
@@ -475,9 +576,12 @@ template <SpectrumScalar Scalar> void expect_white_furnace_energy_bound() {
         Vector3T<Scalar>{
             .x = Scalar{0.3}, .y = Scalar{0.4}, .z = -static_cast<Scalar>(std::sqrt(0.75L))},
     };
-    for (const auto alpha : std::array{Scalar{0.25}, Scalar{0.6}, Scalar{1}, Scalar{2}}) {
+    for (const auto [alpha_x, alpha_y] :
+         std::array{std::pair{Scalar{0.25}, Scalar{0.25}}, std::pair{Scalar{0.6}, Scalar{0.6}},
+                    std::pair{Scalar{1}, Scalar{1}}, std::pair{Scalar{2}, Scalar{2}},
+                    std::pair{Scalar{0.25}, Scalar{0.7}}, std::pair{Scalar{0.7}, Scalar{0.25}}}) {
         const auto dielectric = RoughDielectricT<Scalar>::create(
-            constant_spectrum<Scalar>(Scalar{1}), Scalar{1}, Scalar{1.5}, alpha);
+            constant_spectrum<Scalar>(Scalar{1}), Scalar{1}, Scalar{1.5}, alpha_x, alpha_y);
         ASSERT_TRUE(dielectric.has_value()) << dielectric.error().message;
         for (const auto outgoing : outgoing_directions) {
             const auto integral = integrate_white_furnace(*dielectric, outgoing);

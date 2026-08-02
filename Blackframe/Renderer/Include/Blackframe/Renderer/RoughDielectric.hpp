@@ -272,11 +272,13 @@ transmission_geometry(const Vector3T<Scalar> outgoing_face, const Vector3T<Scala
 
 } // namespace rough_dielectric_detail
 
-// Isotropic single-scattering GGX dielectric interface. Directions point away from the surface;
-// the exterior occupies +Z and the interior -Z in the caller's local closure frame. The same
-// spectral coefficient scales reflection and transmission while exact achromatic Fresnel selects
-// their physical split. Equal indices are rejected because their straight-through support is a
-// Dirac event owned by SpecularTransmission, not this continuous closure.
+// Anisotropic single-scattering GGX dielectric interface. Directions point away from the surface;
+// the exterior occupies +Z and the interior -Z in the caller's local closure frame. AlphaX and
+// alphaY are the mathematical slope widths along the frame's tangent and bitangent; rotating those
+// axes belongs to the caller's frame construction. The same spectral coefficient scales reflection
+// and transmission while exact achromatic Fresnel selects their physical split. Equal indices are
+// rejected because their straight-through support is a Dirac event owned by SpecularTransmission,
+// not this continuous closure.
 template <SpectrumScalar Scalar> class RoughDielectricT final {
   public:
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
@@ -287,6 +289,12 @@ template <SpectrumScalar Scalar> class RoughDielectricT final {
                                                                const Scalar exterior_eta,
                                                                const Scalar interior_eta,
                                                                const Scalar alpha) {
+        return create(coefficient, exterior_eta, interior_eta, alpha, alpha);
+    }
+
+    [[nodiscard]] static core::Result<RoughDielectricT>
+    create(const spectrum_type coefficient, const Scalar exterior_eta, const Scalar interior_eta,
+           const Scalar alpha_x, const Scalar alpha_y) {
         if (!rough_dielectric_detail::valid_coefficient(coefficient)) {
             return std::unexpected(rough_dielectric_detail::invalid_rough_dielectric(
                 "Rough-dielectric coefficients require every spectral lane to be finite and in "
@@ -301,7 +309,7 @@ template <SpectrumScalar Scalar> class RoughDielectricT final {
             return std::unexpected(rough_dielectric_detail::invalid_rough_dielectric(
                 "Equal dielectric indices have delta transmission support, not rough support."));
         }
-        const auto microfacet = GgxMicrofacetT<Scalar>::create(alpha);
+        const auto microfacet = GgxMicrofacetT<Scalar>::create(alpha_x, alpha_y);
         if (!microfacet) {
             return std::unexpected(microfacet.error());
         }
@@ -322,6 +330,14 @@ template <SpectrumScalar Scalar> class RoughDielectricT final {
 
     [[nodiscard]] constexpr Scalar alpha() const noexcept {
         return microfacet_.alpha();
+    }
+
+    [[nodiscard]] constexpr Scalar alpha_x() const noexcept {
+        return microfacet_.alpha_x();
+    }
+
+    [[nodiscard]] constexpr Scalar alpha_y() const noexcept {
+        return microfacet_.alpha_y();
     }
 
     [[nodiscard]] core::Result<spectrum_type> eval(const Vector3T<Scalar> outgoing_local,

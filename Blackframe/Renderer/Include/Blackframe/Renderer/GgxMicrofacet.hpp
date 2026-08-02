@@ -60,6 +60,51 @@ template <GeometryScalar Scalar>
 }
 
 template <GeometryScalar Scalar>
+[[nodiscard]] bool representable_alpha_pair(const Scalar alpha_x, const Scalar alpha_y) noexcept {
+    if (!std::isfinite(alpha_x) || !(alpha_x > Scalar{0}) || !std::isfinite(alpha_y) ||
+        !(alpha_y > Scalar{0})) {
+        return false;
+    }
+
+    const auto square_root_limit = std::sqrt(std::numeric_limits<Scalar>::max());
+    const auto square_root_pi = std::sqrt(std::numbers::pi_v<Scalar>);
+    const auto maximum_alpha = square_root_limit * square_root_pi;
+    const auto minimum_alpha = Scalar{1} / maximum_alpha;
+    if (alpha_x < minimum_alpha || alpha_x > maximum_alpha || alpha_y < minimum_alpha ||
+        alpha_y > maximum_alpha) {
+        return false;
+    }
+
+    // Preserve the complete historical isotropic domain, including its two exact endpoints.
+    if (alpha_x == alpha_y) {
+        return true;
+    }
+
+    // For a unit normal, q = hypot(mx/alpha_x, my/alpha_y, mz) lies between the
+    // smallest and largest of {1/alpha_x, 1/alpha_y, 1}. Since
+    // D = 1 / (pi * alpha_x * alpha_y * q^4), these two extrema prove that every
+    // orientation of the continuous distribution remains representable. Logs avoid making the
+    // validation itself overflow for otherwise valid scalar inputs.
+    using EnvelopeScalar = long double;
+    const auto wide_alpha_x = static_cast<EnvelopeScalar>(alpha_x);
+    const auto wide_alpha_y = static_cast<EnvelopeScalar>(alpha_y);
+    const auto inverse_alpha_x = EnvelopeScalar{1} / wide_alpha_x;
+    const auto inverse_alpha_y = EnvelopeScalar{1} / wide_alpha_y;
+    const auto minimum_q = std::min({EnvelopeScalar{1}, inverse_alpha_x, inverse_alpha_y});
+    const auto maximum_q = std::max({EnvelopeScalar{1}, inverse_alpha_x, inverse_alpha_y});
+    const auto log_scale = std::log(std::numbers::inv_pi_v<EnvelopeScalar>) -
+                           std::log(wide_alpha_x) - std::log(wide_alpha_y);
+    const auto maximum_log_density = log_scale - EnvelopeScalar{4} * std::log(minimum_q);
+    const auto minimum_log_density = log_scale - EnvelopeScalar{4} * std::log(maximum_q);
+    const auto scalar_maximum_log =
+        std::log(static_cast<EnvelopeScalar>(std::numeric_limits<Scalar>::max()));
+    const auto scalar_minimum_log =
+        std::log(static_cast<EnvelopeScalar>(std::numeric_limits<Scalar>::denorm_min()));
+    return std::isfinite(maximum_log_density) && std::isfinite(minimum_log_density) &&
+           maximum_log_density <= scalar_maximum_log && minimum_log_density >= scalar_minimum_log;
+}
+
+template <GeometryScalar Scalar>
 [[nodiscard]] core::Result<Vector3T<Scalar>> normalize_vector(const Vector3T<Scalar> value) {
     const auto length = std::hypot(std::hypot(value.x, value.y), value.z);
     if (!std::isfinite(length) || !(length > Scalar{0})) {
@@ -130,6 +175,35 @@ template <GeometryScalar Scalar>
 }
 
 template <GeometryScalar Scalar>
+[[nodiscard]] core::Result<SmithTerms<Scalar>>
+smith_terms(const Scalar alpha_x, const Scalar alpha_y, const Vector3T<Scalar> direction) {
+    const auto common_scale = std::max({Scalar{1}, alpha_x, alpha_y});
+    const auto normal = direction.z / common_scale;
+    const auto tangent_x = (alpha_x / common_scale) * direction.x;
+    const auto tangent_y = (alpha_y / common_scale) * direction.y;
+    const auto tangent = std::hypot(tangent_x, tangent_y);
+    const auto radius = std::hypot(normal, tangent);
+    if (!std::isfinite(normal) || !std::isfinite(tangent_x) || !std::isfinite(tangent_y) ||
+        !std::isfinite(tangent) || !std::isfinite(radius) || !(normal > Scalar{0}) ||
+        !(radius > Scalar{0})) {
+        return std::unexpected(
+            invalid_ggx("GGX Smith geometry is not representable for the supplied direction."));
+    }
+    const auto normal_over_radius = normal / radius;
+    if (!std::isfinite(normal_over_radius) || !(normal_over_radius > Scalar{0}) ||
+        normal_over_radius > Scalar{1}) {
+        return std::unexpected(
+            invalid_ggx("GGX Smith geometry is not representable for the supplied direction."));
+    }
+    return SmithTerms<Scalar>{
+        .normal = normal,
+        .tangent = tangent,
+        .radius = radius,
+        .normal_over_radius = normal_over_radius,
+    };
+}
+
+template <GeometryScalar Scalar>
 [[nodiscard]] core::Result<Scalar> nonnegative_roundoff(const Scalar value, const Scalar scale) {
     if (value >= Scalar{0}) {
         return value;
@@ -148,11 +222,13 @@ template <GeometryScalar Scalar>
 
 } // namespace ggx_microfacet_detail
 
-// Isotropic Trowbridge--Reitz (GGX) microfacet distribution. Alpha is the mathematical slope
-// width, not perceptual roughness, and is never remapped or clamped. Alpha zero changes the
-// distribution from solid angle to a Dirac mass and therefore belongs to a separate delta lobe.
-// D is normalized in projected solid angle: integral D(wm) * wm.z d_omega equals one. Directions
-// and microfacet normals use the local +Z convention and are never face-forwarded implicitly.
+// Anisotropic Trowbridge--Reitz (GGX) microfacet distribution. Alpha X and Y are mathematical
+// slope widths along the caller-supplied local tangent and bitangent, not perceptual roughness, and
+// are never remapped or clamped. Tangential rotation belongs to that local frame rather than this
+// distribution. A zero width changes the distribution from solid angle to a Dirac mass and
+// therefore belongs to a separate delta lobe. D is normalized in projected solid angle: integral
+// D(wm) * wm.z d_omega equals one. Directions and microfacet normals use the local +Z convention
+// and are never face-forwarded implicitly.
 template <GeometryScalar Scalar> class GgxMicrofacetT final {
   public:
     using probability_density_type = GgxProbabilityDensityT<Scalar>;
@@ -175,11 +251,36 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
             return std::unexpected(ggx_microfacet_detail::invalid_ggx(
                 "The continuous GGX distribution is not representable for this alpha."));
         }
-        return GgxMicrofacetT{alpha};
+        return GgxMicrofacetT{alpha, alpha};
     }
 
+    [[nodiscard]] static core::Result<GgxMicrofacetT> create(const Scalar alpha_x,
+                                                             const Scalar alpha_y) {
+        if (!std::isfinite(alpha_x) || !(alpha_x > Scalar{0}) || !std::isfinite(alpha_y) ||
+            !(alpha_y > Scalar{0})) {
+            return std::unexpected(ggx_microfacet_detail::invalid_ggx(
+                "GGX alpha X and alpha Y must be finite and strictly positive."));
+        }
+        if (!ggx_microfacet_detail::representable_alpha_pair(alpha_x, alpha_y)) {
+            return std::unexpected(ggx_microfacet_detail::invalid_ggx(
+                "The continuous anisotropic GGX distribution is not representable for these "
+                "widths."));
+        }
+        return GgxMicrofacetT{alpha_x, alpha_y};
+    }
+
+    // Legacy isotropic accessor. An anisotropic instance returns its X-axis width; new code should
+    // use alpha_x() and alpha_y() explicitly.
     [[nodiscard]] constexpr Scalar alpha() const noexcept {
-        return alpha_;
+        return alpha_x_;
+    }
+
+    [[nodiscard]] constexpr Scalar alpha_x() const noexcept {
+        return alpha_x_;
+    }
+
+    [[nodiscard]] constexpr Scalar alpha_y() const noexcept {
+        return alpha_y_;
     }
 
     // Returns D(wm), not a probability density by itself. Exact tangent and lower-hemisphere
@@ -194,19 +295,27 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
             return Scalar{0};
         }
 
-        const auto radial = std::hypot(microfacet_normal.x, microfacet_normal.y);
         auto denominator_root = Scalar{};
         auto density_root = Scalar{};
-        if (alpha_ <= Scalar{1}) {
-            denominator_root = std::hypot(radial, alpha_ * microfacet_normal.z);
-            density_root = (alpha_ / denominator_root) / denominator_root;
+        if (alpha_x_ == alpha_y_) {
+            const auto radial = std::hypot(microfacet_normal.x, microfacet_normal.y);
+            if (alpha_x_ <= Scalar{1}) {
+                denominator_root = std::hypot(radial, alpha_x_ * microfacet_normal.z);
+                density_root = (alpha_x_ / denominator_root) / denominator_root;
+            } else {
+                const auto inverse_alpha = Scalar{1} / alpha_x_;
+                denominator_root = std::hypot(radial * inverse_alpha, microfacet_normal.z);
+                density_root = (inverse_alpha / denominator_root) / denominator_root;
+            }
+            density_root *= std::sqrt(std::numbers::inv_pi_v<Scalar>);
         } else {
-            const auto inverse_alpha = Scalar{1} / alpha_;
-            denominator_root = std::hypot(radial * inverse_alpha, microfacet_normal.z);
-            density_root = (inverse_alpha / denominator_root) / denominator_root;
+            denominator_root = std::hypot(microfacet_normal.x / alpha_x_,
+                                          microfacet_normal.y / alpha_y_, microfacet_normal.z);
+            const auto normalization_root = std::sqrt(std::numbers::inv_pi_v<Scalar>) /
+                                            (std::sqrt(alpha_x_) * std::sqrt(alpha_y_));
+            density_root = (normalization_root / denominator_root) / denominator_root;
         }
-        const auto scaled_density_root = density_root * std::sqrt(std::numbers::inv_pi_v<Scalar>);
-        const auto value = scaled_density_root * scaled_density_root;
+        const auto value = density_root * density_root;
         if (!std::isfinite(denominator_root) || !(denominator_root > Scalar{0}) ||
             !std::isfinite(value) || !(value > Scalar{0})) {
             return std::unexpected(ggx_microfacet_detail::invalid_ggx(
@@ -227,7 +336,9 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
                 "GGX Lambda requires a direction in the open +Z hemisphere."));
         }
 
-        const auto terms = ggx_microfacet_detail::smith_terms(alpha_, direction);
+        const auto terms = alpha_x_ == alpha_y_
+                               ? ggx_microfacet_detail::smith_terms(alpha_x_, direction)
+                               : ggx_microfacet_detail::smith_terms(alpha_x_, alpha_y_, direction);
         if (!terms) {
             return std::unexpected(terms.error());
         }
@@ -259,7 +370,9 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
         if (!(direction.z > Scalar{0})) {
             return Scalar{0};
         }
-        const auto terms = ggx_microfacet_detail::smith_terms(alpha_, direction);
+        const auto terms = alpha_x_ == alpha_y_
+                               ? ggx_microfacet_detail::smith_terms(alpha_x_, direction)
+                               : ggx_microfacet_detail::smith_terms(alpha_x_, alpha_y_, direction);
         if (!terms) {
             return std::unexpected(terms.error());
         }
@@ -283,11 +396,17 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
         if (!(outgoing_local.z > Scalar{0}) || !(incoming_local.z > Scalar{0})) {
             return Scalar{0};
         }
-        const auto outgoing_terms = ggx_microfacet_detail::smith_terms(alpha_, outgoing_local);
+        const auto outgoing_terms =
+            alpha_x_ == alpha_y_
+                ? ggx_microfacet_detail::smith_terms(alpha_x_, outgoing_local)
+                : ggx_microfacet_detail::smith_terms(alpha_x_, alpha_y_, outgoing_local);
         if (!outgoing_terms) {
             return std::unexpected(outgoing_terms.error());
         }
-        const auto incoming_terms = ggx_microfacet_detail::smith_terms(alpha_, incoming_local);
+        const auto incoming_terms =
+            alpha_x_ == alpha_y_
+                ? ggx_microfacet_detail::smith_terms(alpha_x_, incoming_local)
+                : ggx_microfacet_detail::smith_terms(alpha_x_, alpha_y_, incoming_local);
         if (!incoming_terms) {
             return std::unexpected(incoming_terms.error());
         }
@@ -328,11 +447,15 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
         if (!distribution) {
             return std::unexpected(distribution.error());
         }
-        // Evaluate z + sqrt(z^2 + alpha^2 sin^2(theta)) directly. Unlike Lambda or G1, this
-        // finite VNDF denominator can remain representable when their normal/radius ratio does
-        // not, so the PDF must not inherit an avoidable intermediate underflow.
-        const auto outgoing_sine = std::hypot(outgoing_local.x, outgoing_local.y);
-        const auto physical_radius = std::hypot(outgoing_local.z, alpha_ * outgoing_sine);
+        // Evaluate z + hypot(z, alphaX*x, alphaY*y) directly. Unlike Lambda or G1, this finite
+        // VNDF denominator can remain representable when their normal/radius ratio does not, so
+        // the PDF must not inherit an avoidable intermediate underflow.
+        const auto physical_radius =
+            alpha_x_ == alpha_y_
+                ? std::hypot(outgoing_local.z,
+                             alpha_x_ * std::hypot(outgoing_local.x, outgoing_local.y))
+                : std::hypot(outgoing_local.z, alpha_x_ * outgoing_local.x,
+                             alpha_y_ * outgoing_local.y);
         const auto physical_denominator = outgoing_local.z + physical_radius;
         const auto visible_factor = Scalar{2} * visible_dot / physical_denominator;
         result.value = *distribution * visible_factor;
@@ -360,18 +483,34 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
             return std::optional<sample_type>{};
         }
 
-        const auto inverse_alpha = Scalar{1} / alpha_;
-        const auto stretched = alpha_ <= Scalar{1}
-                                   ? Vector3T<Scalar>{.x = alpha_ * outgoing_local.x,
-                                                      .y = alpha_ * outgoing_local.y,
-                                                      .z = outgoing_local.z}
-                                   : Vector3T<Scalar>{.x = outgoing_local.x,
-                                                      .y = outgoing_local.y,
-                                                      .z = outgoing_local.z * inverse_alpha};
-        if ((alpha_ <= Scalar{1} &&
+        const auto isotropic = alpha_x_ == alpha_y_;
+        const auto inverse_alpha = Scalar{1} / alpha_x_;
+        const auto common_scale = std::max({Scalar{1}, alpha_x_, alpha_y_});
+        const auto scaled_alpha_x = alpha_x_ / common_scale;
+        const auto scaled_alpha_y = alpha_y_ / common_scale;
+        auto stretched = Vector3T<Scalar>{};
+        if (isotropic) {
+            stretched = alpha_x_ <= Scalar{1}
+                            ? Vector3T<Scalar>{.x = alpha_x_ * outgoing_local.x,
+                                               .y = alpha_x_ * outgoing_local.y,
+                                               .z = outgoing_local.z}
+                            : Vector3T<Scalar>{.x = outgoing_local.x,
+                                               .y = outgoing_local.y,
+                                               .z = outgoing_local.z * inverse_alpha};
+        } else {
+            stretched = Vector3T<Scalar>{
+                .x = scaled_alpha_x * outgoing_local.x,
+                .y = scaled_alpha_y * outgoing_local.y,
+                .z = outgoing_local.z / common_scale,
+            };
+        }
+        if ((isotropic && alpha_x_ <= Scalar{1} &&
              ((outgoing_local.x != Scalar{0} && stretched.x == Scalar{0}) ||
               (outgoing_local.y != Scalar{0} && stretched.y == Scalar{0}))) ||
-            (alpha_ > Scalar{1} && stretched.z == Scalar{0})) {
+            (isotropic && alpha_x_ > Scalar{1} && stretched.z == Scalar{0}) ||
+            (!isotropic && ((outgoing_local.x != Scalar{0} && stretched.x == Scalar{0}) ||
+                            (outgoing_local.y != Scalar{0} && stretched.y == Scalar{0}) ||
+                            stretched.z == Scalar{0}))) {
             return std::unexpected(ggx_microfacet_detail::invalid_ggx(
                 "The GGX VNDF view stretch is not representable."));
         }
@@ -422,17 +561,29 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
                 "The GGX VNDF hemisphere sample is outside its open support."));
         }
 
-        const auto unstretched = alpha_ <= Scalar{1}
-                                     ? Normal3T<Scalar>{.x = alpha_ * hemisphere_normal.x,
-                                                        .y = alpha_ * hemisphere_normal.y,
-                                                        .z = hemisphere_normal.z}
-                                     : Normal3T<Scalar>{.x = hemisphere_normal.x,
-                                                        .y = hemisphere_normal.y,
-                                                        .z = hemisphere_normal.z * inverse_alpha};
-        if ((alpha_ <= Scalar{1} &&
+        auto unstretched = Normal3T<Scalar>{};
+        if (isotropic) {
+            unstretched = alpha_x_ <= Scalar{1}
+                              ? Normal3T<Scalar>{.x = alpha_x_ * hemisphere_normal.x,
+                                                 .y = alpha_x_ * hemisphere_normal.y,
+                                                 .z = hemisphere_normal.z}
+                              : Normal3T<Scalar>{.x = hemisphere_normal.x,
+                                                 .y = hemisphere_normal.y,
+                                                 .z = hemisphere_normal.z * inverse_alpha};
+        } else {
+            unstretched = Normal3T<Scalar>{
+                .x = scaled_alpha_x * hemisphere_normal.x,
+                .y = scaled_alpha_y * hemisphere_normal.y,
+                .z = hemisphere_normal.z / common_scale,
+            };
+        }
+        if ((isotropic && alpha_x_ <= Scalar{1} &&
              ((hemisphere_normal.x != Scalar{0} && unstretched.x == Scalar{0}) ||
               (hemisphere_normal.y != Scalar{0} && unstretched.y == Scalar{0}))) ||
-            (alpha_ > Scalar{1} && unstretched.z == Scalar{0})) {
+            (isotropic && alpha_x_ > Scalar{1} && unstretched.z == Scalar{0}) ||
+            (!isotropic && ((hemisphere_normal.x != Scalar{0} && unstretched.x == Scalar{0}) ||
+                            (hemisphere_normal.y != Scalar{0} && unstretched.y == Scalar{0}) ||
+                            unstretched.z == Scalar{0}))) {
             return std::unexpected(ggx_microfacet_detail::invalid_ggx(
                 "The GGX visible-normal unstretch is not representable."));
         }
@@ -457,9 +608,11 @@ template <GeometryScalar Scalar> class GgxMicrofacetT final {
     }
 
   private:
-    constexpr explicit GgxMicrofacetT(const Scalar alpha) noexcept : alpha_{alpha} {}
+    constexpr GgxMicrofacetT(const Scalar alpha_x, const Scalar alpha_y) noexcept
+        : alpha_x_{alpha_x}, alpha_y_{alpha_y} {}
 
-    Scalar alpha_{};
+    Scalar alpha_x_{};
+    Scalar alpha_y_{};
 };
 
 using GgxMicrofacet = GgxMicrofacetT<TransportScalar>;

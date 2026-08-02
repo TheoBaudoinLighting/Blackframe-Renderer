@@ -182,18 +182,28 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_record() {
     ASSERT_EQ(
         set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, Scalar{0.75}),
         ClosureAppendStatus::appended);
-    ASSERT_EQ(set.size(), 1U);
+    ASSERT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
+                                                    Scalar{0.25}, Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.size(), 2U);
 
-    const auto& closure = set.closures().front();
-    EXPECT_EQ(closure.kind, ClosureKind::rough_conductor_reflection);
-    EXPECT_EQ(closure.lobes, ScatteringLobe::glossy | ScatteringLobe::reflection);
-    EXPECT_EQ(closure.weight, coefficient);
+    const auto& isotropic = set.closures()[0];
+    EXPECT_EQ(isotropic.kind, ClosureKind::rough_conductor_reflection);
+    EXPECT_EQ(isotropic.lobes, ScatteringLobe::glossy | ScatteringLobe::reflection);
+    EXPECT_EQ(isotropic.weight, coefficient);
     for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
-        EXPECT_EQ(closure.parameters[lane], relative_eta[lane]);
-        EXPECT_EQ(closure.parameters[TransportSpectrumSampleCount + lane], relative_k[lane]);
+        EXPECT_EQ(isotropic.parameters[lane], relative_eta[lane]);
+        EXPECT_EQ(isotropic.parameters[TransportSpectrumSampleCount + lane], relative_k[lane]);
     }
-    EXPECT_EQ(closure.parameters[8], Scalar{0.75});
-    EXPECT_EQ(closure.parameters[9], Scalar{0});
+    EXPECT_EQ(isotropic.parameters[8], Scalar{0.75});
+    EXPECT_EQ(isotropic.parameters[9], Scalar{0.75});
+
+    const auto& anisotropic = set.closures()[1];
+    EXPECT_EQ(anisotropic.kind, ClosureKind::rough_conductor_reflection);
+    EXPECT_EQ(anisotropic.lobes, ScatteringLobe::glossy | ScatteringLobe::reflection);
+    EXPECT_EQ(anisotropic.weight, coefficient);
+    EXPECT_EQ(anisotropic.parameters[8], Scalar{0.25});
+    EXPECT_EQ(anisotropic.parameters[9], Scalar{0.75});
 }
 
 TEST(ClosureSetTest, StoresRoughConductorInTheExistingInlineAbi) {
@@ -206,18 +216,29 @@ template <SpectrumScalar Scalar> void expect_rough_dielectric_record() {
     const auto coefficient = constant_spectrum(Scalar{0.625});
     ASSERT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.75}),
               ClosureAppendStatus::appended);
-    ASSERT_EQ(set.size(), 1U);
+    ASSERT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.25},
+                                          Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.size(), 2U);
 
-    const auto& closure = set.closures().front();
-    EXPECT_EQ(closure.kind, ClosureKind::rough_dielectric);
-    EXPECT_EQ(closure.lobes,
+    const auto& isotropic = set.closures()[0];
+    EXPECT_EQ(isotropic.kind, ClosureKind::rough_dielectric);
+    EXPECT_EQ(isotropic.lobes,
               ScatteringLobe::glossy | ScatteringLobe::reflection | ScatteringLobe::transmission);
-    EXPECT_EQ(closure.weight, coefficient);
-    EXPECT_EQ(closure.parameters[0], Scalar{1});
-    EXPECT_EQ(closure.parameters[1], Scalar{1.5});
-    EXPECT_EQ(closure.parameters[2], Scalar{0.75});
-    for (auto index = std::size_t{3}; index < closure.parameters.size(); ++index) {
-        EXPECT_EQ(closure.parameters[index], Scalar{0});
+    EXPECT_EQ(isotropic.weight, coefficient);
+    EXPECT_EQ(isotropic.parameters[0], Scalar{1});
+    EXPECT_EQ(isotropic.parameters[1], Scalar{1.5});
+    EXPECT_EQ(isotropic.parameters[2], Scalar{0.75});
+    EXPECT_EQ(isotropic.parameters[3], Scalar{0.75});
+
+    const auto& anisotropic = set.closures()[1];
+    EXPECT_EQ(anisotropic.parameters[0], Scalar{1});
+    EXPECT_EQ(anisotropic.parameters[1], Scalar{1.5});
+    EXPECT_EQ(anisotropic.parameters[2], Scalar{0.25});
+    EXPECT_EQ(anisotropic.parameters[3], Scalar{0.75});
+    for (auto index = std::size_t{4}; index < anisotropic.parameters.size(); ++index) {
+        EXPECT_EQ(isotropic.parameters[index], Scalar{0});
+        EXPECT_EQ(anisotropic.parameters[index], Scalar{0});
     }
 }
 
@@ -340,6 +361,17 @@ template <SpectrumScalar Scalar> void expect_invalid_rough_conductor_payloads_ar
                   ClosureAppendStatus::invalid_payload);
         EXPECT_EQ(object_bytes(set), original);
     }
+    for (const auto invalid_alpha :
+         std::array{Scalar{0}, Scalar{-0.0}, -std::numeric_limits<Scalar>::denorm_min(),
+                    std::numeric_limits<Scalar>::quiet_NaN(), infinity, -infinity}) {
+        EXPECT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
+                                                        invalid_alpha, Scalar{0.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
+                                                        Scalar{0.5}, invalid_alpha),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
 }
 
 TEST(ClosureSetTest, RejectsMalformedRoughConductorPayloadsAtomically) {
@@ -397,6 +429,17 @@ template <SpectrumScalar Scalar> void expect_invalid_rough_dielectric_payloads_a
             ClosureAppendStatus::invalid_payload);
         EXPECT_EQ(object_bytes(set), original);
     }
+    for (const auto invalid_alpha :
+         std::array{Scalar{0}, Scalar{-0.0}, -std::numeric_limits<Scalar>::denorm_min(),
+                    std::numeric_limits<Scalar>::quiet_NaN(), infinity, -infinity}) {
+        EXPECT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, invalid_alpha,
+                                              Scalar{0.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.5},
+                                              invalid_alpha),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
 }
 
 TEST(ClosureSetTest, RejectsMalformedRoughDielectricPayloadsAtomically) {
@@ -447,12 +490,28 @@ static_assert(noexcept(std::declval<ClosureSet&>().append_rough_conductor_reflec
 static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_conductor_reflection(
     std::declval<ReferenceSpectrum>(), std::declval<ReferenceSpectrum>(),
     std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>())));
+static_assert(noexcept(std::declval<ClosureSet&>().append_rough_conductor_reflection(
+    std::declval<TransportSpectrum>(), std::declval<TransportSpectrum>(),
+    std::declval<TransportSpectrum>(), std::declval<TransportScalar>(),
+    std::declval<TransportScalar>())));
+static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_conductor_reflection(
+    std::declval<ReferenceSpectrum>(), std::declval<ReferenceSpectrum>(),
+    std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>(),
+    std::declval<ReferenceScalar>())));
 static_assert(noexcept(std::declval<ClosureSet&>().append_rough_dielectric(
     std::declval<TransportSpectrum>(), std::declval<TransportScalar>(),
     std::declval<TransportScalar>(), std::declval<TransportScalar>())));
 static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_dielectric(
     std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>(),
     std::declval<ReferenceScalar>(), std::declval<ReferenceScalar>())));
+static_assert(noexcept(std::declval<ClosureSet&>().append_rough_dielectric(
+    std::declval<TransportSpectrum>(), std::declval<TransportScalar>(),
+    std::declval<TransportScalar>(), std::declval<TransportScalar>(),
+    std::declval<TransportScalar>())));
+static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_dielectric(
+    std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>(),
+    std::declval<ReferenceScalar>(), std::declval<ReferenceScalar>(),
+    std::declval<ReferenceScalar>())));
 static_assert(noexcept(std::declval<const ClosureSet&>().closures()));
 static_assert(noexcept(std::declval<const ReferenceClosureSet&>().closures()));
 
