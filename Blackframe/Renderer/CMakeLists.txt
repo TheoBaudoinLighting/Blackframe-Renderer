@@ -1,3 +1,6 @@
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads REQUIRED)
+
 add_library(
     BlackframeRenderer
     STATIC
@@ -11,6 +14,7 @@ add_library(
         Include/Blackframe/Renderer/ClosureSet.hpp
         Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/ConvergenceMetrics.hpp
+        Include/Blackframe/Renderer/CpuWavefrontScheduler.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
         Include/Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp
         Include/Blackframe/Renderer/Detail/PacketLightSpectrum.hpp
@@ -82,6 +86,7 @@ add_library(
         Source/CapabilityRegistry.cpp
         Source/Cie1931ColorMatchingFunctions.inc
         Source/Cie1931Sensor.cpp
+        Source/CpuWavefrontScheduler.cpp
         Source/LightSampler.cpp
         Source/NumericConversion.cpp
         Source/OwenScrambling.cpp
@@ -116,6 +121,7 @@ target_link_libraries(
         Blackframe::Core
     PRIVATE
         Blackframe::ProjectOptions
+        Threads::Threads
 )
 
 target_compile_definitions(

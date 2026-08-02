@@ -2,6 +2,7 @@ target_sources(
     BlackframeRenderBenchmarks
     PRIVATE
         CornellConvergenceBenchmark.cpp
+        CpuWavefrontSchedulerBenchmark.cpp
         LightTreeBenchmark.cpp
         WavefrontCompactionBenchmark.cpp
 )

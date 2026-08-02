@@ -1,13 +1,24 @@
+#include <Blackframe/Renderer/CpuWavefrontScheduler.hpp>
+#include <Blackframe/Renderer/DisplayPsnr.hpp>
+#include <Blackframe/Renderer/Film.hpp>
+#include <Blackframe/Renderer/LinearMetrics.hpp>
+#include <Blackframe/Renderer/SampleStream.hpp>
 #include <Blackframe/Renderer/WavefrontQueues.hpp>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <gtest/gtest.h>
+#include <latch>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -934,6 +945,381 @@ TEST(WavefrontCompactionTest, CompactsOnlyTheWriteGenerationOfEveryDoubleBuffer)
         ASSERT_TRUE(empty_generation.pending_read_entries().has_value());
         EXPECT_TRUE(required_pending_read(empty_generation).empty());
     });
+}
+
+TEST(CpuWavefrontSchedulerTest, RequiresAnExplicitBoundedWorkerCount) {
+    static_assert(sizeof(CpuWavefrontSchedulerMode) == sizeof(std::uint8_t));
+    static_assert(std::is_standard_layout_v<CpuWavefrontLane>);
+    static_assert(std::is_trivially_copyable_v<CpuWavefrontLane>);
+    static_assert(std::is_standard_layout_v<CpuWavefrontStageReport>);
+    static_assert(std::is_trivially_copyable_v<CpuWavefrontStageReport>);
+    static_assert(!std::is_default_constructible_v<CpuWavefrontScheduler>);
+    static_assert(!std::is_copy_constructible_v<CpuWavefrontScheduler>);
+    static_assert(std::is_nothrow_move_constructible_v<CpuWavefrontScheduler>);
+
+    const auto zero = CpuWavefrontScheduler::create(0U);
+    ASSERT_FALSE(zero.has_value());
+    EXPECT_EQ(zero.error().code, core::StatusCode::invalid_argument);
+    const auto excessive = CpuWavefrontScheduler::create(MaxCpuWavefrontWorkerCount + 1U);
+    ASSERT_FALSE(excessive.has_value());
+    EXPECT_EQ(excessive.error().code, core::StatusCode::invalid_argument);
+
+    const auto one = CpuWavefrontScheduler::create(1U);
+    ASSERT_TRUE(one.has_value()) << one.error().message;
+    EXPECT_EQ(one->worker_count(), 1U);
+    EXPECT_EQ(one->mode(), CpuWavefrontSchedulerMode::single_thread);
+    const auto many = CpuWavefrontScheduler::create(4U);
+    ASSERT_TRUE(many.has_value()) << many.error().message;
+    EXPECT_EQ(many->worker_count(), 4U);
+    EXPECT_EQ(many->mode(), CpuWavefrontSchedulerMode::fixed_thread_count);
+
+    EXPECT_TRUE(is_known_cpu_wavefront_scheduler_mode(CpuWavefrontSchedulerMode::single_thread));
+    EXPECT_TRUE(
+        is_known_cpu_wavefront_scheduler_mode(CpuWavefrontSchedulerMode::fixed_thread_count));
+    EXPECT_FALSE(
+        is_known_cpu_wavefront_scheduler_mode(static_cast<CpuWavefrontSchedulerMode>(255U)));
+}
+
+TEST(CpuWavefrontSchedulerTest, RejectsEveryMalformedDispatchBeforeInvokingTheKernel) {
+    const auto scheduler = CpuWavefrontScheduler::create(4U).value();
+    auto invocation_count = std::atomic_uint32_t{};
+    const auto kernel = CpuWavefrontStageKernel{[&](const CpuWavefrontLane) -> core::Status {
+        invocation_count.fetch_add(1U, std::memory_order_relaxed);
+        return {};
+    }};
+    constexpr auto valid_slots =
+        std::array{WavefrontPathSlot{.value = 0U}, WavefrontPathSlot{.value = 1U}};
+
+    const auto unknown_stage = scheduler.execute_stage(static_cast<WavefrontQueueKind>(255U),
+                                                       valid_slots.size(), valid_slots, kernel);
+    ASSERT_FALSE(unknown_stage.has_value());
+    EXPECT_EQ(unknown_stage.error().code, core::StatusCode::invalid_argument);
+
+    const auto out_of_domain =
+        scheduler.execute_stage(WavefrontQueueKind::ray, 1U, valid_slots, kernel);
+    ASSERT_FALSE(out_of_domain.has_value());
+    EXPECT_EQ(out_of_domain.error().code, core::StatusCode::invalid_argument);
+
+    constexpr auto maximum_slot =
+        std::array{WavefrontPathSlot{.value = std::numeric_limits<std::uint32_t>::max()}};
+    const auto maximum_out_of_domain = scheduler.execute_stage(
+        WavefrontQueueKind::ray, std::numeric_limits<std::uint32_t>::max(), maximum_slot, kernel);
+    ASSERT_FALSE(maximum_out_of_domain.has_value());
+    EXPECT_EQ(maximum_out_of_domain.error().code, core::StatusCode::invalid_argument);
+
+    const auto empty_kernel = CpuWavefrontStageKernel{};
+    const auto missing_kernel = scheduler.execute_stage(
+        WavefrontQueueKind::ray, 0U, std::span<const WavefrontPathSlot>{}, empty_kernel);
+    ASSERT_FALSE(missing_kernel.has_value());
+    EXPECT_EQ(missing_kernel.error().code, core::StatusCode::invalid_argument);
+
+    if constexpr (sizeof(std::size_t) > sizeof(std::uint32_t)) {
+        constexpr auto excessive_domain =
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) + 2U;
+        const auto unaddressable =
+            scheduler.execute_stage(WavefrontQueueKind::ray, excessive_domain,
+                                    std::span<const WavefrontPathSlot>{}, kernel);
+        ASSERT_FALSE(unaddressable.has_value());
+        EXPECT_EQ(unaddressable.error().code, core::StatusCode::invalid_argument);
+    }
+    EXPECT_EQ(invocation_count.load(std::memory_order_relaxed), 0U);
+
+    if constexpr (sizeof(std::size_t) > sizeof(std::uint32_t)) {
+        constexpr auto complete_domain =
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
+        const auto maximum_valid =
+            scheduler.execute_stage(WavefrontQueueKind::ray, complete_domain, maximum_slot, kernel);
+        ASSERT_TRUE(maximum_valid.has_value()) << maximum_valid.error().message;
+        EXPECT_EQ(maximum_valid->path_slot_domain_size, complete_domain);
+        EXPECT_EQ(invocation_count.load(std::memory_order_relaxed), 1U);
+    }
+}
+
+TEST(CpuWavefrontSchedulerTest, RunsTheSingleThreadModeInlineAndPreservesDuplicateLanes) {
+    const auto scheduler = CpuWavefrontScheduler::create(1U).value();
+    constexpr auto slots =
+        std::array{WavefrontPathSlot{.value = 3U}, WavefrontPathSlot{.value = 1U},
+                   WavefrontPathSlot{.value = 1U}, WavefrontPathSlot{.value = 7U}};
+    auto invocations = std::array<CpuWavefrontLane, slots.size()>{};
+    const auto calling_thread = std::this_thread::get_id();
+    auto worker_thread = std::thread::id{};
+    const auto kernel = CpuWavefrontStageKernel{[&](const CpuWavefrontLane lane) -> core::Status {
+        worker_thread = std::this_thread::get_id();
+        invocations[lane.lane_index] = lane;
+        return {};
+    }};
+
+    const auto report = scheduler.execute_stage(WavefrontQueueKind::shade, 8U, slots, kernel);
+    ASSERT_TRUE(report.has_value()) << report.error().message;
+    EXPECT_EQ(*report, (CpuWavefrontStageReport{
+                           .stage = WavefrontQueueKind::shade,
+                           .mode = CpuWavefrontSchedulerMode::single_thread,
+                           .input_lanes = slots.size(),
+                           .path_slot_domain_size = 8U,
+                           .configured_workers = 1U,
+                           .workers_used = 1U,
+                       }));
+    EXPECT_EQ(worker_thread, calling_thread);
+    for (auto lane_index = std::size_t{}; lane_index < slots.size(); ++lane_index) {
+        EXPECT_EQ(invocations[lane_index], (CpuWavefrontLane{
+                                               .stage = WavefrontQueueKind::shade,
+                                               .lane_index = lane_index,
+                                               .path_slot = slots[lane_index],
+                                               .worker_index = 0U,
+                                           }));
+    }
+    EXPECT_EQ(invocations[1U].path_slot, invocations[2U].path_slot);
+
+    auto empty_invoked = false;
+    const auto empty = scheduler.execute_stage(
+        WavefrontQueueKind::shade, 0U, std::span<const WavefrontPathSlot>{},
+        CpuWavefrontStageKernel{[&](const CpuWavefrontLane) -> core::Status {
+            empty_invoked = true;
+            return {};
+        }});
+    ASSERT_TRUE(empty.has_value()) << empty.error().message;
+    EXPECT_EQ(empty->input_lanes, 0U);
+    EXPECT_EQ(empty->workers_used, 0U);
+    EXPECT_FALSE(empty_invoked);
+}
+
+TEST(CpuWavefrontSchedulerTest, CoversUnevenFixedThreadPartitionsExactlyOnceAndJoins) {
+    constexpr auto lane_count = std::size_t{257};
+    constexpr auto worker_count = std::uint32_t{4};
+    auto slots = std::array<WavefrontPathSlot, lane_count>{};
+    for (auto lane_index = std::size_t{}; lane_index < lane_count; ++lane_index) {
+        slots[lane_index].value = static_cast<std::uint32_t>(lane_index % 31U);
+    }
+    auto visits = std::array<std::atomic_uint32_t, lane_count>{};
+    auto observed_slots = std::array<std::atomic_uint32_t, lane_count>{};
+    auto worker_for_lane = std::array<std::atomic_uint32_t, lane_count>{};
+    for (auto& worker_index : worker_for_lane) {
+        worker_index.store(std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
+    }
+    auto first_worker_threads = std::array<std::thread::id, worker_count>{};
+    auto first_callbacks_completed = std::atomic_size_t{};
+    const auto calling_thread = std::this_thread::get_id();
+    const auto scheduler = CpuWavefrontScheduler::create(worker_count).value();
+    const auto kernel = CpuWavefrontStageKernel{[&](const CpuWavefrontLane lane) -> core::Status {
+        visits[lane.lane_index].fetch_add(1U, std::memory_order_relaxed);
+        observed_slots[lane.lane_index].store(lane.path_slot.value, std::memory_order_relaxed);
+        auto unclaimed = std::numeric_limits<std::uint32_t>::max();
+        worker_for_lane[lane.lane_index].compare_exchange_strong(unclaimed, lane.worker_index,
+                                                                 std::memory_order_relaxed);
+        first_worker_threads[lane.worker_index] = std::this_thread::get_id();
+        first_callbacks_completed.fetch_add(1U, std::memory_order_release);
+        return {};
+    }};
+
+    const auto report = scheduler.execute_stage(WavefrontQueueKind::hit, 31U, slots, kernel);
+    ASSERT_TRUE(report.has_value()) << report.error().message;
+    EXPECT_EQ(report->configured_workers, worker_count);
+    EXPECT_EQ(report->workers_used, worker_count);
+    EXPECT_EQ(report->input_lanes, lane_count);
+    constexpr auto partition_boundaries =
+        std::array<std::size_t, worker_count + 1U>{0U, 65U, 129U, 193U, 257U};
+    for (auto worker_index = std::uint32_t{}; worker_index < worker_count; ++worker_index) {
+        EXPECT_NE(first_worker_threads[worker_index], std::thread::id{});
+        EXPECT_NE(first_worker_threads[worker_index], calling_thread);
+        for (auto other = worker_index + 1U; other < worker_count; ++other) {
+            EXPECT_NE(first_worker_threads[worker_index], first_worker_threads[other]);
+        }
+        for (auto lane_index = partition_boundaries[worker_index];
+             lane_index < partition_boundaries[worker_index + 1U]; ++lane_index) {
+            EXPECT_EQ(worker_for_lane[lane_index].load(std::memory_order_relaxed), worker_index);
+        }
+    }
+    for (auto lane_index = std::size_t{}; lane_index < lane_count; ++lane_index) {
+        EXPECT_EQ(visits[lane_index].load(std::memory_order_relaxed), 1U);
+        EXPECT_EQ(observed_slots[lane_index].load(std::memory_order_relaxed),
+                  slots[lane_index].value);
+    }
+    EXPECT_EQ(first_callbacks_completed.load(std::memory_order_acquire), lane_count);
+
+    auto barrier_violation = std::atomic_bool{false};
+    auto second_visits = std::array<std::atomic_uint32_t, lane_count>{};
+    auto second_worker_threads = std::array<std::thread::id, worker_count>{};
+    const auto second_report = scheduler.execute_stage(
+        WavefrontQueueKind::continuation, 31U, slots,
+        CpuWavefrontStageKernel{[&](const CpuWavefrontLane lane) -> core::Status {
+            if (first_callbacks_completed.load(std::memory_order_acquire) != lane_count) {
+                barrier_violation.store(true, std::memory_order_relaxed);
+            }
+            second_worker_threads[lane.worker_index] = std::this_thread::get_id();
+            second_visits[lane.lane_index].fetch_add(1U, std::memory_order_release);
+            return {};
+        }});
+    ASSERT_TRUE(second_report.has_value()) << second_report.error().message;
+    EXPECT_FALSE(barrier_violation.load(std::memory_order_relaxed));
+    for (auto worker_index = std::uint32_t{}; worker_index < worker_count; ++worker_index) {
+        EXPECT_EQ(second_worker_threads[worker_index], first_worker_threads[worker_index]);
+    }
+    for (const auto& visit_count : second_visits) {
+        EXPECT_EQ(visit_count.load(std::memory_order_acquire), 1U);
+    }
+}
+
+TEST(CpuWavefrontSchedulerTest, ReturnsTheLowestInputLaneFailureAndTranslatesExceptions) {
+    constexpr auto lane_count = std::size_t{33};
+    auto slots = std::array<WavefrontPathSlot, lane_count>{};
+    for (auto lane_index = std::size_t{}; lane_index < lane_count; ++lane_index) {
+        slots[lane_index].value = static_cast<std::uint32_t>(lane_index);
+    }
+    const auto scheduler = CpuWavefrontScheduler::create(4U).value();
+    auto visits = std::array<std::atomic_uint32_t, lane_count>{};
+    auto later_failure_reached = std::latch{1};
+    const auto deterministic_failure = scheduler.execute_stage(
+        WavefrontQueueKind::shadow, lane_count, slots,
+        CpuWavefrontStageKernel{[&](const CpuWavefrontLane lane) -> core::Status {
+            visits[lane.lane_index].fetch_add(1U, std::memory_order_relaxed);
+            if (lane.lane_index == 2U) {
+                later_failure_reached.wait();
+                return std::unexpected(core::Error{
+                    .code = core::StatusCode::unavailable,
+                    .message = "lowest input lane failure",
+                });
+            }
+            if (lane.lane_index == 20U) {
+                later_failure_reached.count_down();
+                return std::unexpected(core::Error{
+                    .code = core::StatusCode::internal_error,
+                    .message = "later input lane failure",
+                });
+            }
+            return {};
+        }});
+    ASSERT_FALSE(deterministic_failure.has_value());
+    EXPECT_EQ(deterministic_failure.error().code, core::StatusCode::unavailable);
+    EXPECT_EQ(deterministic_failure.error().message, "lowest input lane failure");
+    for (const auto& visit_count : visits) {
+        EXPECT_EQ(visit_count.load(std::memory_order_relaxed), 1U);
+    }
+
+    const auto allocation_exception = scheduler.execute_stage(
+        WavefrontQueueKind::shadow, lane_count, slots,
+        CpuWavefrontStageKernel{[](const CpuWavefrontLane lane) -> core::Status {
+            if (lane.lane_index == 3U) {
+                throw std::bad_alloc{};
+            }
+            return {};
+        }});
+    ASSERT_FALSE(allocation_exception.has_value());
+    EXPECT_EQ(allocation_exception.error().code, core::StatusCode::resource_exhausted);
+
+    const auto standard_exception = scheduler.execute_stage(
+        WavefrontQueueKind::shadow, lane_count, slots,
+        CpuWavefrontStageKernel{[](const CpuWavefrontLane lane) -> core::Status {
+            if (lane.lane_index == 4U) {
+                throw std::runtime_error{"synthetic worker failure"};
+            }
+            return {};
+        }});
+    ASSERT_FALSE(standard_exception.has_value());
+    EXPECT_EQ(standard_exception.error().code, core::StatusCode::internal_error);
+
+    const auto unknown_exception = scheduler.execute_stage(
+        WavefrontQueueKind::shadow, lane_count, slots,
+        CpuWavefrontStageKernel{[](const CpuWavefrontLane lane) -> core::Status {
+            if (lane.lane_index == 5U) {
+                throw 17;
+            }
+            return {};
+        }});
+    ASSERT_FALSE(unknown_exception.has_value());
+    EXPECT_EQ(unknown_exception.error().code, core::StatusCode::internal_error);
+
+    auto nested_status = std::atomic_uint32_t{};
+    const auto reentrant = scheduler.execute_stage(
+        WavefrontQueueKind::shadow, lane_count, slots,
+        CpuWavefrontStageKernel{[&](const CpuWavefrontLane lane) -> core::Status {
+            if (lane.lane_index == 0U) {
+                const auto nested = scheduler.execute_stage(
+                    WavefrontQueueKind::ray, 0U, std::span<const WavefrontPathSlot>{},
+                    CpuWavefrontStageKernel{
+                        [](const CpuWavefrontLane) -> core::Status { return {}; }});
+                nested_status.store(static_cast<std::uint32_t>(nested.has_value()
+                                                                   ? core::StatusCode::success
+                                                                   : nested.error().code),
+                                    std::memory_order_relaxed);
+            }
+            return {};
+        }});
+    ASSERT_TRUE(reentrant.has_value()) << reentrant.error().message;
+    EXPECT_EQ(nested_status.load(std::memory_order_relaxed),
+              static_cast<std::uint32_t>(core::StatusCode::unavailable));
+}
+
+TEST(CpuWavefrontSchedulerTest, MatchesIndexedStageResultsWithOneAndManyThreads) {
+    constexpr auto width = std::uint32_t{16};
+    constexpr auto height = std::uint32_t{16};
+    constexpr auto lane_count = static_cast<std::size_t>(width) * height;
+    constexpr auto queue_kinds = std::array{
+        WavefrontQueueKind::camera,       WavefrontQueueKind::ray,   WavefrontQueueKind::hit,
+        WavefrontQueueKind::miss,         WavefrontQueueKind::shade, WavefrontQueueKind::shadow,
+        WavefrontQueueKind::continuation,
+    };
+    auto slots = std::array<WavefrontPathSlot, lane_count>{};
+    for (auto lane_index = std::size_t{}; lane_index < lane_count; ++lane_index) {
+        slots[lane_index].value = static_cast<std::uint32_t>((lane_index * 73U) % lane_count);
+    }
+    auto single_values = std::array<Film::Color, lane_count>{};
+    auto parallel_values = std::array<Film::Color, lane_count>{};
+    const auto single = CpuWavefrontScheduler::create(1U).value();
+    const auto parallel = CpuWavefrontScheduler::create(4U).value();
+
+    const auto execute_all_stages = [&](const CpuWavefrontScheduler& scheduler, auto& output) {
+        for (auto stage_index = std::size_t{}; stage_index < queue_kinds.size(); ++stage_index) {
+            const auto kernel = CpuWavefrontStageKernel{
+                [&, stage_index](const CpuWavefrontLane lane) -> core::Status {
+                    const auto pixel = lane.path_slot.value;
+                    const auto stream = SampleStream{SampleStreamIndex{
+                        .pixel_x = pixel % width,
+                        .pixel_y = pixel / width,
+                        .sample_index = stage_index,
+                        .seed = 0xD1B54A32D192ED03ULL,
+                    }};
+                    constexpr auto stage_scale = TransportScalar{1.0F / 7.0F};
+                    output[lane.lane_index].red += stream.sample_1d(stage_index * 3U) * stage_scale;
+                    output[lane.lane_index].green +=
+                        stream.sample_1d(stage_index * 3U + 1U) * stage_scale;
+                    output[lane.lane_index].blue +=
+                        stream.sample_1d(stage_index * 3U + 2U) * stage_scale;
+                    return {};
+                }};
+            const auto report =
+                scheduler.execute_stage(queue_kinds[stage_index], lane_count, slots, kernel);
+            EXPECT_TRUE(report.has_value())
+                << (report.has_value() ? std::string{} : report.error().message);
+            if (report.has_value()) {
+                EXPECT_EQ(report->stage, queue_kinds[stage_index]);
+                EXPECT_EQ(report->input_lanes, lane_count);
+            }
+        }
+    };
+    execute_all_stages(single, single_values);
+    execute_all_stages(parallel, parallel_values);
+    EXPECT_EQ(single_values, parallel_values);
+
+    auto single_film = Film::create(RenderExtent{.width = width, .height = height}).value();
+    auto parallel_film = Film::create(RenderExtent{.width = width, .height = height}).value();
+    for (auto lane_index = std::size_t{}; lane_index < lane_count; ++lane_index) {
+        const auto x = static_cast<std::uint32_t>(lane_index) % width;
+        const auto y = static_cast<std::uint32_t>(lane_index) / width;
+        ASSERT_TRUE(single_film.add_sample(x, y, single_values[lane_index], 1.0F).has_value());
+        ASSERT_TRUE(parallel_film.add_sample(x, y, parallel_values[lane_index], 1.0F).has_value());
+    }
+
+    const auto metrics = compute_linear_metrics(parallel_film, single_film);
+    ASSERT_TRUE(metrics.has_value()) << metrics.error().message;
+    EXPECT_LE(metrics->mse, 1.0e-12);
+    EXPECT_LE(metrics->rmse, 1.0e-6);
+    EXPECT_LE(std::abs(metrics->mean_bias), 1.0e-12);
+    EXPECT_LE(metrics->maximum_absolute_error, 1.0e-6);
+    const auto psnr = compute_display_psnr(parallel_film, single_film);
+    ASSERT_TRUE(psnr.has_value()) << psnr.error().message;
+    EXPECT_TRUE(std::isinf(psnr->psnr) || psnr->psnr >= 80.0);
+    EXPECT_TRUE(std::ranges::all_of(psnr->difference_heatmap,
+                                    [](const auto difference) { return difference == 0.0; }));
 }
 
 } // namespace

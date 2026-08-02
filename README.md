@@ -76,6 +76,15 @@ silently selecting another path.
   events separately; transmitted surface events advance both their scattering family and
   transmission counters. The current Lambertian loops consume only diffuse-reflection depth and
   support explicitly configured, compensated Russian roulette from a selected completed depth.
+- **Wavefront execution foundation:** a versioned path-state structure of arrays and seven distinct
+  bounded stage queues provide fixed-capacity storage, guarded double buffering, and stable
+  terminated-lane compaction with optional canonical path-slot ordering. A synchronous CPU
+  scheduler dispatches immutable queue snapshots over an explicit bounded worker count: one worker
+  runs inline, while a persistent multi-worker pool receives deterministic contiguous lane
+  partitions and reaches a barrier before any queue mutation or output merge. Every path slot is
+  validated against its declared state domain before dispatch; invalid stages, missing kernels,
+  worker-launch failures, and worker exceptions are reported explicitly without selecting another
+  execution mode.
 - **Shading normals:** scalar surface transport builds closure frames and evaluates their cosine and
   directional PDF from `Ns`, while `Ng` remains authoritative for sidedness, visibility, ray
   offsets, emission orientation, and area/solid-angle Jacobians. Directions on which the two normals

@@ -79,6 +79,8 @@ set(
     sample_power_sampler/16
     compact_stable_input/256
     compact_deterministic_path_slot/256
+    schedule_cpu_one_thread/256/real_time
+    schedule_cpu_four_threads/256/real_time
 )
 math(EXPR last_benchmark_index "${benchmark_count} - 1")
 foreach(benchmark_index RANGE 0 ${last_benchmark_index})
