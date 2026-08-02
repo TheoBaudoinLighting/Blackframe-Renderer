@@ -54,6 +54,7 @@ add_executable(
     TransformsTest.cpp
     TransportConventionsTest.cpp
     TriangleTest.cpp
+    WavefrontQueuesTest.cpp
     WavelengthSamplingTest.cpp
 )
 blackframe_set_target_role(BlackframeRendererTests test)

@@ -76,6 +76,7 @@ add_library(
         Include/Blackframe/Renderer/TransportConventions.hpp
         Include/Blackframe/Renderer/TransportInterfaces.hpp
         Include/Blackframe/Renderer/Triangle.hpp
+        Include/Blackframe/Renderer/WavefrontQueues.hpp
         Include/Blackframe/Renderer/WavelengthSampling.hpp
         Source/BsdfOnlyPathLoop.cpp
         Source/CapabilityRegistry.cpp
@@ -97,6 +98,7 @@ add_library(
         Source/SobolDirectionNumbers.inc
         Source/SobolSampling.cpp
         Source/TransportConventionDiagnostics.cpp
+        Source/WavefrontQueues.cpp
 )
 add_library(Blackframe::Renderer ALIAS BlackframeRenderer)
 blackframe_set_target_role(BlackframeRenderer core)
