@@ -17,6 +17,7 @@ add_executable(
     FilmTileTest.cpp
     FresnelTest.cpp
     GeometryTypesTest.cpp
+    GgxMicrofacetTest.cpp
     HdrMetricsTest.cpp
     IndependentSamplerTest.cpp
     LambertianReflectionTest.cpp

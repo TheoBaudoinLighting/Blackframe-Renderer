@@ -97,6 +97,12 @@ silently selecting another path.
   complete complex equations independently at every transported wavelength. Both paths support
   transport and reference precision; invalid or unrepresentable values fail instead of being
   clamped, face-forwarded, swapped, or replaced by a Schlick approximation.
+- **GGX microfacets:** the isotropic Trowbridge--Reitz distribution exposes projected-normal `D`,
+  stable Smith `Lambda` and `G1`, height-correlated `G2`, and exact Heitz visible-normal sampling.
+  `alpha` is the finite positive slope width with no perceptual remap; zero is rejected because it
+  changes the continuous distribution into a delta. VNDF probabilities are explicitly densities
+  over microfacet normals in solid angle. Projected and visible normalization plus deterministic
+  normal and oblique chi-square tests cover both transport and reference precision.
 - **Rough diffuse reflection:** the four-lane energy-preserving Oren--Nayar model combines the
   reciprocal Fujii single-scattering lobe with exact analytical multiple-scattering compensation.
   Its normalized roughness is explicit in `[0, 1]`, zero roughness reduces exactly to Lambert,

@@ -25,6 +25,7 @@ add_library(
         Include/Blackframe/Renderer/Fresnel.hpp
         Include/Blackframe/Renderer/GeometryOperations.hpp
         Include/Blackframe/Renderer/GeometryTypes.hpp
+        Include/Blackframe/Renderer/GgxMicrofacet.hpp
         Include/Blackframe/Renderer/HdrMetrics.hpp
         Include/Blackframe/Renderer/IndependentSampler.hpp
         Include/Blackframe/Renderer/Interval.hpp
