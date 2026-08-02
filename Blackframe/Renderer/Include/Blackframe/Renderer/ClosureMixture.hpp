@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/ClosureSet.hpp>
 #include <Blackframe/Renderer/LambertianReflection.hpp>
 #include <Blackframe/Renderer/RoughConductorReflection.hpp>
+#include <Blackframe/Renderer/RoughDielectric.hpp>
 #include <Blackframe/Renderer/RoughDiffuseReflection.hpp>
 #include <algorithm>
 #include <array>
@@ -36,6 +37,7 @@ template <SpectrumScalar Scalar> struct ClosureMixtureSampleT final {
         .value = Scalar{0},
         .measure = ContinuousBsdfProbabilityMeasure,
     };
+    Scalar eta_scale_multiplier{Scalar{1}};
 };
 
 using ClosureMixtureSample = ClosureMixtureSampleT<TransportScalar>;
@@ -402,6 +404,29 @@ rough_conductor_from_record(const ClosureT<Scalar>& closure) {
 }
 
 template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<RoughDielectricT<Scalar>>
+rough_dielectric_from_record(const ClosureT<Scalar>& closure) {
+    constexpr auto rough_dielectric_lobes =
+        ScatteringLobe::glossy | ScatteringLobe::reflection | ScatteringLobe::transmission;
+    if (closure.kind != ClosureKind::rough_dielectric) {
+        return std::unexpected(
+            invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+    }
+    if (closure.lobes != rough_dielectric_lobes) {
+        return std::unexpected(invalid_closure_mixture(
+            "A rough-dielectric closure record has an incompatible lobe mask."));
+    }
+    for (auto index = std::size_t{3}; index < closure.parameters.size(); ++index) {
+        if (closure.parameters[index] != Scalar{0}) {
+            return std::unexpected(invalid_closure_mixture(
+                "A rough-dielectric closure record has a non-zero reserved payload."));
+        }
+    }
+    return RoughDielectricT<Scalar>::create(closure.weight, closure.parameters[0],
+                                            closure.parameters[1], closure.parameters[2]);
+}
+
+template <SpectrumScalar Scalar>
 [[nodiscard]] core::Status validate_closure_record(const ClosureT<Scalar>& closure) {
     switch (closure.kind) {
     case ClosureKind::lambertian_reflection: {
@@ -425,6 +450,13 @@ template <SpectrumScalar Scalar>
         }
         return {};
     }
+    case ClosureKind::rough_dielectric: {
+        const auto model = rough_dielectric_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return {};
+    }
     case ClosureKind::none:
         break;
     }
@@ -435,7 +467,7 @@ template <SpectrumScalar Scalar>
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<SampledSpectrum<TransportSpectrumSampleCount, Scalar>>
 eval_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgoing_local,
-                    const Vector3T<Scalar> incoming_local) {
+                    const Vector3T<Scalar> incoming_local, const TransportMode mode) {
     switch (closure.kind) {
     case ClosureKind::lambertian_reflection: {
         const auto model = lambertian_from_record(closure);
@@ -457,6 +489,13 @@ eval_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outg
             return std::unexpected(model.error());
         }
         return model->eval(outgoing_local, incoming_local);
+    }
+    case ClosureKind::rough_dielectric: {
+        const auto model = rough_dielectric_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->eval(outgoing_local, incoming_local, mode);
     }
     case ClosureKind::none:
         break;
@@ -468,7 +507,7 @@ eval_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outg
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<ClosureProbabilityDensityT<Scalar>>
 pdf_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgoing_local,
-                   const Vector3T<Scalar> incoming_local) {
+                   const Vector3T<Scalar> incoming_local, const TransportMode mode) {
     switch (closure.kind) {
     case ClosureKind::lambertian_reflection: {
         const auto model = lambertian_from_record(closure);
@@ -490,6 +529,13 @@ pdf_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgo
             return std::unexpected(model.error());
         }
         return model->pdf(outgoing_local, incoming_local);
+    }
+    case ClosureKind::rough_dielectric: {
+        const auto model = rough_dielectric_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->pdf(outgoing_local, incoming_local, mode);
     }
     case ClosureKind::none:
         break;
@@ -505,13 +551,18 @@ template <SpectrumScalar Scalar> struct ClosureDirectionSampleT final {
         .value = Scalar{0},
         .measure = ContinuousBsdfProbabilityMeasure,
     };
+    ScatteringLobe lobes{ScatteringLobe::none};
+    Scalar eta_scale_multiplier{Scalar{1}};
 };
 
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<std::optional<ClosureDirectionSampleT<Scalar>>>
 sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgoing_local,
-                      const Point2T<Scalar> direction_sample) {
-    const auto convert = [](const auto& sampled) -> std::optional<ClosureDirectionSampleT<Scalar>> {
+                      const Scalar event_sample, const Point2T<Scalar> direction_sample,
+                      const TransportMode mode) {
+    const auto convert =
+        [](const auto& sampled,
+           const ScatteringLobe lobes) -> std::optional<ClosureDirectionSampleT<Scalar>> {
         if (!sampled.has_value()) {
             return {};
         }
@@ -519,6 +570,8 @@ sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> ou
             .incoming_local = sampled->incoming_local,
             .value = sampled->value,
             .probability = sampled->probability,
+            .lobes = lobes,
+            .eta_scale_multiplier = Scalar{1},
         };
     };
 
@@ -532,7 +585,7 @@ sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> ou
         if (!sampled) {
             return std::unexpected(sampled.error());
         }
-        return convert(*sampled);
+        return convert(*sampled, closure.lobes);
     }
     case ClosureKind::rough_diffuse_reflection: {
         const auto model = rough_diffuse_from_record(closure);
@@ -543,7 +596,7 @@ sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> ou
         if (!sampled) {
             return std::unexpected(sampled.error());
         }
-        return convert(*sampled);
+        return convert(*sampled, closure.lobes);
     }
     case ClosureKind::rough_conductor_reflection: {
         const auto model = rough_conductor_from_record(closure);
@@ -554,7 +607,27 @@ sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> ou
         if (!sampled) {
             return std::unexpected(sampled.error());
         }
-        return convert(*sampled);
+        return convert(*sampled, closure.lobes);
+    }
+    case ClosureKind::rough_dielectric: {
+        const auto model = rough_dielectric_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        const auto sampled = model->sample(outgoing_local, event_sample, direction_sample, mode);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        if (!sampled->has_value()) {
+            return std::optional<ClosureDirectionSampleT<Scalar>>{};
+        }
+        return std::optional<ClosureDirectionSampleT<Scalar>>{ClosureDirectionSampleT<Scalar>{
+            .incoming_local = (**sampled).incoming_local,
+            .value = (**sampled).value,
+            .probability = (**sampled).probability,
+            .lobes = (**sampled).lobes,
+            .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
+        }};
     }
     case ClosureKind::none:
         break;
@@ -630,23 +703,24 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
     }
 
     [[nodiscard]] core::Result<spectrum_type> eval(const Vector3T<Scalar> outgoing_local,
-                                                   const Vector3T<Scalar> incoming_local) const {
-        const auto direction_status = validate_directions(outgoing_local, incoming_local);
-        if (!direction_status) {
-            return std::unexpected(direction_status.error());
+                                                   const Vector3T<Scalar> incoming_local,
+                                                   const TransportMode mode) const {
+        const auto query_status = validate_query(outgoing_local, incoming_local, mode);
+        if (!query_status) {
+            return std::unexpected(query_status.error());
         }
         if (closures_.empty()) {
             return spectrum_type{};
         }
         if (closures_.size() == 1U) {
-            return closure_mixture_detail::eval_closure_record(closures_.closures().front(),
-                                                               outgoing_local, incoming_local);
+            return closure_mixture_detail::eval_closure_record(
+                closures_.closures().front(), outgoing_local, incoming_local, mode);
         }
 
         auto result = spectrum_type{};
         for (const auto& closure : closures_.closures()) {
             const auto component = closure_mixture_detail::eval_closure_record(
-                closure, outgoing_local, incoming_local);
+                closure, outgoing_local, incoming_local, mode);
             if (!component) {
                 return std::unexpected(component.error());
             }
@@ -663,11 +737,12 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
         return result;
     }
 
-    [[nodiscard]] core::Result<probability_density_type>
-    pdf(const Vector3T<Scalar> outgoing_local, const Vector3T<Scalar> incoming_local) const {
-        const auto direction_status = validate_directions(outgoing_local, incoming_local);
-        if (!direction_status) {
-            return std::unexpected(direction_status.error());
+    [[nodiscard]] core::Result<probability_density_type> pdf(const Vector3T<Scalar> outgoing_local,
+                                                             const Vector3T<Scalar> incoming_local,
+                                                             const TransportMode mode) const {
+        const auto query_status = validate_query(outgoing_local, incoming_local, mode);
+        if (!query_status) {
+            return std::unexpected(query_status.error());
         }
         if (closures_.empty()) {
             return probability_density_type{
@@ -677,14 +752,14 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
         }
         if (closures_.size() == 1U) {
             return closure_mixture_detail::pdf_closure_record(closures_.closures().front(),
-                                                              outgoing_local, incoming_local);
+                                                              outgoing_local, incoming_local, mode);
         }
 
         auto conditional_probabilities =
             std::array<probability_density_type, MaximumClosureCount>{};
         for (auto index = std::size_t{}; index < closures_.closures().size(); ++index) {
             const auto component = closure_mixture_detail::pdf_closure_record(
-                closures_.closures()[index], outgoing_local, incoming_local);
+                closures_.closures()[index], outgoing_local, incoming_local, mode);
             if (!component) {
                 return std::unexpected(component.error());
             }
@@ -702,7 +777,11 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
 
     [[nodiscard]] core::Result<std::optional<sample_type>>
     sample(const Vector3T<Scalar> outgoing_local, const Scalar component_sample,
-           const Point2T<Scalar> direction_sample) const {
+           const Point2T<Scalar> direction_sample, const TransportMode mode) const {
+        if (!is_known_transport_mode(mode)) {
+            return std::unexpected(closure_mixture_detail::invalid_closure_mixture(
+                "Closure-mixture sampling requires a supported transport mode."));
+        }
         if (!closure_mixture_detail::unit_local_direction(outgoing_local)) {
             return std::unexpected(closure_mixture_detail::invalid_closure_mixture(
                 "Closure-mixture directions must be finite unit vectors."));
@@ -724,8 +803,12 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             return std::unexpected(selected.error());
         }
         const auto& closure = closures_.closures()[*selected];
-        const auto sampled = closure_mixture_detail::sample_closure_record(closure, outgoing_local,
-                                                                           direction_sample);
+        const auto event_sample = remap_component_sample(*selected, component_sample);
+        if (!event_sample) {
+            return std::unexpected(event_sample.error());
+        }
+        const auto sampled = closure_mixture_detail::sample_closure_record(
+            closure, outgoing_local, *event_sample, direction_sample, mode);
         if (!sampled) {
             return std::unexpected(sampled.error());
         }
@@ -736,7 +819,7 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
         if (closures_.size() == 1U) {
             return std::optional<sample_type>{sample_type{
                 .selected_closure = 0U,
-                .lobes = closure.lobes,
+                .lobes = (**sampled).lobes,
                 .selection_probability =
                     {
                         .value = Scalar{1},
@@ -745,20 +828,21 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
                 .incoming_local = (**sampled).incoming_local,
                 .value = (**sampled).value,
                 .probability = (**sampled).probability,
+                .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
             }};
         }
 
-        const auto value = eval(outgoing_local, (**sampled).incoming_local);
+        const auto value = eval(outgoing_local, (**sampled).incoming_local, mode);
         if (!value) {
             return std::unexpected(value.error());
         }
-        const auto probability = pdf(outgoing_local, (**sampled).incoming_local);
+        const auto probability = pdf(outgoing_local, (**sampled).incoming_local, mode);
         if (!probability) {
             return std::unexpected(probability.error());
         }
         return std::optional<sample_type>{sample_type{
             .selected_closure = static_cast<std::uint32_t>(*selected),
-            .lobes = closure.lobes,
+            .lobes = (**sampled).lobes,
             .selection_probability =
                 {
                     .value = probabilities_[*selected],
@@ -767,6 +851,7 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             .incoming_local = (**sampled).incoming_local,
             .value = *value,
             .probability = *probability,
+            .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
         }};
     }
 
@@ -776,14 +861,31 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
                               std::array<Scalar, MaximumClosureCount + 1U> cdf) noexcept
         : closures_{std::move(closures)}, probabilities_{probabilities}, cdf_{cdf} {}
 
-    [[nodiscard]] static core::Status validate_directions(const Vector3T<Scalar> outgoing_local,
-                                                          const Vector3T<Scalar> incoming_local) {
+    [[nodiscard]] static core::Status validate_query(const Vector3T<Scalar> outgoing_local,
+                                                     const Vector3T<Scalar> incoming_local,
+                                                     const TransportMode mode) {
+        if (!is_known_transport_mode(mode)) {
+            return std::unexpected(closure_mixture_detail::invalid_closure_mixture(
+                "Closure-mixture queries require a supported transport mode."));
+        }
         if (!closure_mixture_detail::unit_local_direction(outgoing_local) ||
             !closure_mixture_detail::unit_local_direction(incoming_local)) {
             return std::unexpected(closure_mixture_detail::invalid_closure_mixture(
                 "Closure-mixture directions must be finite unit vectors."));
         }
         return {};
+    }
+
+    [[nodiscard]] core::Result<Scalar> remap_component_sample(const std::size_t selected,
+                                                              const Scalar sample) const {
+        const auto lower = cdf_[selected];
+        const auto probability = probabilities_[selected];
+        const auto local = (sample - lower) / probability;
+        if (!std::isfinite(local) || local < Scalar{0} || !(local < Scalar{1})) {
+            return std::unexpected(closure_mixture_detail::invalid_closure_mixture(
+                "The selected closure sample cannot be remapped to [0, 1)."));
+        }
+        return local;
     }
 
     [[nodiscard]] core::Result<std::size_t> select_component(const Scalar sample) const {

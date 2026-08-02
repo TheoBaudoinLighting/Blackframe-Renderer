@@ -23,6 +23,7 @@ enum class ClosureKind : std::uint32_t {
     lambertian_reflection = 1U,
     rough_diffuse_reflection = 2U,
     rough_conductor_reflection = 3U,
+    rough_dielectric = 4U,
 };
 
 [[nodiscard]] constexpr bool is_known_closure_kind(const ClosureKind kind) noexcept {
@@ -31,6 +32,7 @@ enum class ClosureKind : std::uint32_t {
     case ClosureKind::lambertian_reflection:
     case ClosureKind::rough_diffuse_reflection:
     case ClosureKind::rough_conductor_reflection:
+    case ClosureKind::rough_dielectric:
         return true;
     }
     return false;
@@ -45,7 +47,9 @@ enum class ClosureAppendStatus : std::uint32_t {
 // Every slot is a fixed ABI record. Weight is the model's spectral coefficient. Lambertian
 // reflection leaves all ten scalar parameters zero; rough diffuse stores normalized roughness in
 // parameters[0]. Rough conductor stores spectral eta in parameters[0..3], spectral k in
-// parameters[4..7], isotropic GGX alpha in parameters[8], and leaves parameters[9] reserved.
+// parameters[4..7], isotropic GGX alpha in parameters[8], and leaves parameters[9] reserved. Rough
+// dielectric stores exterior eta, interior eta, and isotropic GGX alpha in parameters[0..2] and
+// leaves parameters[3..9] reserved.
 template <SpectrumScalar Scalar> struct alignas(8) ClosureT final {
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
 
@@ -209,6 +213,35 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
         return ClosureAppendStatus::appended;
     }
 
+    [[nodiscard]] ClosureAppendStatus append_rough_dielectric(const spectrum_type coefficient,
+                                                              const Scalar exterior_eta,
+                                                              const Scalar interior_eta,
+                                                              const Scalar alpha) noexcept {
+        if (!closure_set_detail::valid_reflectance(coefficient) || !std::isfinite(exterior_eta) ||
+            !(exterior_eta > Scalar{0}) || !std::isfinite(interior_eta) ||
+            !(interior_eta > Scalar{0}) || exterior_eta == interior_eta ||
+            !closure_set_detail::valid_ggx_alpha(alpha)) {
+            return ClosureAppendStatus::invalid_payload;
+        }
+        if (full()) {
+            return ClosureAppendStatus::capacity_exhausted;
+        }
+
+        auto parameters = std::array<Scalar, ClosureParameterScalarCount>{};
+        parameters[0] = exterior_eta;
+        parameters[1] = interior_eta;
+        parameters[2] = alpha;
+        closures_[size_] = closure_type{
+            .kind = ClosureKind::rough_dielectric,
+            .lobes =
+                ScatteringLobe::glossy | ScatteringLobe::reflection | ScatteringLobe::transmission,
+            .weight = coefficient,
+            .parameters = parameters,
+        };
+        ++size_;
+        return ClosureAppendStatus::appended;
+    }
+
   private:
     friend struct closure_set_detail::ClosureSetLayoutProbe<Scalar>;
 
@@ -238,6 +271,7 @@ static_assert(static_cast<std::uint32_t>(ClosureKind::none) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::lambertian_reflection) == 1U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection) == 2U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::rough_conductor_reflection) == 3U);
+static_assert(static_cast<std::uint32_t>(ClosureKind::rough_dielectric) == 4U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::appended) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::invalid_payload) == 1U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::capacity_exhausted) == 2U);

@@ -38,6 +38,7 @@ add_executable(
     RenderSessionStateTest.cpp
     RussianRouletteTest.cpp
     RoughConductorReflectionTest.cpp
+    RoughDielectricTest.cpp
     RoughDiffuseReflectionTest.cpp
     SampleDimensionMapTest.cpp
     SampleStreamTest.cpp

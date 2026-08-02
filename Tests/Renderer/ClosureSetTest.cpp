@@ -79,11 +79,13 @@ TEST(ClosureSetTest, FreezesKindAndAppendStatusCodes) {
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::lambertian_reflection), 1U);
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection), 2U);
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_conductor_reflection), 3U);
+    EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_dielectric), 4U);
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::none));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::lambertian_reflection));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_diffuse_reflection));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_conductor_reflection));
-    EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(4U)));
+    EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_dielectric));
+    EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(5U)));
     EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(0xffffffffU)));
 
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureAppendStatus::appended), 0U);
@@ -197,6 +199,31 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_record() {
 TEST(ClosureSetTest, StoresRoughConductorInTheExistingInlineAbi) {
     expect_rough_conductor_record<TransportScalar>();
     expect_rough_conductor_record<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_rough_dielectric_record() {
+    auto set = ClosureSetFor<Scalar>{};
+    const auto coefficient = constant_spectrum(Scalar{0.625});
+    ASSERT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.75}),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.size(), 1U);
+
+    const auto& closure = set.closures().front();
+    EXPECT_EQ(closure.kind, ClosureKind::rough_dielectric);
+    EXPECT_EQ(closure.lobes,
+              ScatteringLobe::glossy | ScatteringLobe::reflection | ScatteringLobe::transmission);
+    EXPECT_EQ(closure.weight, coefficient);
+    EXPECT_EQ(closure.parameters[0], Scalar{1});
+    EXPECT_EQ(closure.parameters[1], Scalar{1.5});
+    EXPECT_EQ(closure.parameters[2], Scalar{0.75});
+    for (auto index = std::size_t{3}; index < closure.parameters.size(); ++index) {
+        EXPECT_EQ(closure.parameters[index], Scalar{0});
+    }
+}
+
+TEST(ClosureSetTest, StoresRoughDielectricInTheExistingInlineAbi) {
+    expect_rough_dielectric_record<TransportScalar>();
+    expect_rough_dielectric_record<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_invalid_payloads_are_atomic() {
@@ -320,6 +347,63 @@ TEST(ClosureSetTest, RejectsMalformedRoughConductorPayloadsAtomically) {
     expect_invalid_rough_conductor_payloads_are_atomic<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_invalid_rough_dielectric_payloads_are_atomic() {
+    auto set = ClosureSetFor<Scalar>{};
+    const auto coefficient = constant_spectrum(Scalar{0.5});
+    ASSERT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.5}),
+              ClosureAppendStatus::appended);
+    const auto original = object_bytes(set);
+    const auto infinity = std::numeric_limits<Scalar>::infinity();
+
+    auto malformed_coefficient = coefficient;
+    malformed_coefficient[0] = std::nextafter(Scalar{1}, infinity);
+    EXPECT_EQ(
+        set.append_rough_dielectric(malformed_coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.5}),
+        ClosureAppendStatus::invalid_payload);
+    EXPECT_EQ(object_bytes(set), original);
+    EXPECT_EQ(set.append_rough_dielectric(coefficient, Scalar{1.5}, Scalar{1.5}, Scalar{0.5}),
+              ClosureAppendStatus::invalid_payload);
+    EXPECT_EQ(object_bytes(set), original);
+
+    for (const auto invalid : std::array{
+             std::numeric_limits<Scalar>::quiet_NaN(),
+             infinity,
+             -infinity,
+         }) {
+        malformed_coefficient = coefficient;
+        malformed_coefficient[1] = invalid;
+        EXPECT_EQ(
+            set.append_rough_dielectric(malformed_coefficient, Scalar{1}, Scalar{1.5}, Scalar{0.5}),
+            ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_rough_dielectric(coefficient, invalid, Scalar{1.5}, Scalar{0.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, invalid, Scalar{0.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, invalid),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
+
+    for (const auto invalid_positive :
+         std::array{Scalar{0}, Scalar{-0.0}, -std::numeric_limits<Scalar>::denorm_min()}) {
+        EXPECT_EQ(
+            set.append_rough_dielectric(coefficient, invalid_positive, Scalar{1.5}, Scalar{0.5}),
+            ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(
+            set.append_rough_dielectric(coefficient, Scalar{1}, invalid_positive, Scalar{0.5}),
+            ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(
+            set.append_rough_dielectric(coefficient, Scalar{1}, Scalar{1.5}, invalid_positive),
+            ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
+}
+
+TEST(ClosureSetTest, RejectsMalformedRoughDielectricPayloadsAtomically) {
+    expect_invalid_rough_dielectric_payloads_are_atomic<TransportScalar>();
+    expect_invalid_rough_dielectric_payloads_are_atomic<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void expect_overflow_is_atomic() {
     auto set = ClosureSetFor<Scalar>{};
     for (auto index = std::uint32_t{}; index < MaximumClosureCount; ++index) {
@@ -363,6 +447,12 @@ static_assert(noexcept(std::declval<ClosureSet&>().append_rough_conductor_reflec
 static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_conductor_reflection(
     std::declval<ReferenceSpectrum>(), std::declval<ReferenceSpectrum>(),
     std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>())));
+static_assert(noexcept(std::declval<ClosureSet&>().append_rough_dielectric(
+    std::declval<TransportSpectrum>(), std::declval<TransportScalar>(),
+    std::declval<TransportScalar>(), std::declval<TransportScalar>())));
+static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_dielectric(
+    std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>(),
+    std::declval<ReferenceScalar>(), std::declval<ReferenceScalar>())));
 static_assert(noexcept(std::declval<const ClosureSet&>().closures()));
 static_assert(noexcept(std::declval<const ReferenceClosureSet&>().closures()));
 

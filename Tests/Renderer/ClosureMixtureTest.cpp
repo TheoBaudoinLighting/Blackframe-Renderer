@@ -219,8 +219,8 @@ template <SpectrumScalar Scalar> void expect_explicit_probability_validation() {
             non_dyadic->component_cdf()[index + 1U] - non_dyadic->component_cdf()[index];
         EXPECT_EQ(non_dyadic->component_probabilities()[index], effective_probability);
         canonical_total += non_dyadic->component_probabilities()[index];
-        const auto sampled =
-            non_dyadic->sample(outgoing, non_dyadic->component_cdf()[index], direction_sample);
+        const auto sampled = non_dyadic->sample(outgoing, non_dyadic->component_cdf()[index],
+                                                direction_sample, TransportMode::radiance);
         ASSERT_TRUE(sampled.has_value());
         ASSERT_TRUE(sampled->has_value());
         EXPECT_EQ((**sampled).selected_closure, index);
@@ -292,9 +292,9 @@ template <SpectrumScalar Scalar> void expect_singleton_delegation() {
 
     const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
     const auto incoming = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
-    const auto mixture_value = mixture->eval(outgoing, incoming);
+    const auto mixture_value = mixture->eval(outgoing, incoming, TransportMode::radiance);
     const auto lambertian_value = lambertian->eval(outgoing, incoming);
-    const auto mixture_pdf = mixture->pdf(outgoing, incoming);
+    const auto mixture_pdf = mixture->pdf(outgoing, incoming, TransportMode::radiance);
     const auto lambertian_pdf = lambertian->pdf(outgoing, incoming);
     ASSERT_TRUE(mixture_value.has_value());
     ASSERT_TRUE(lambertian_value.has_value());
@@ -305,7 +305,8 @@ template <SpectrumScalar Scalar> void expect_singleton_delegation() {
     EXPECT_EQ(mixture_pdf->measure, lambertian_pdf->measure);
 
     const auto direction_sample = Point2T<Scalar>{.x = Scalar{0.75}, .y = Scalar{0.5}};
-    const auto mixture_sample = mixture->sample(outgoing, Scalar{0.875}, direction_sample);
+    const auto mixture_sample =
+        mixture->sample(outgoing, Scalar{0.875}, direction_sample, TransportMode::radiance);
     const auto lambertian_sample = lambertian->sample(outgoing, direction_sample);
     ASSERT_TRUE(mixture_sample.has_value());
     ASSERT_TRUE(mixture_sample->has_value());
@@ -342,9 +343,9 @@ template <SpectrumScalar Scalar> void expect_rough_diffuse_dispatch() {
     const auto outgoing = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
     const auto incoming = Vector3T<Scalar>{
         .x = Scalar{-0.3}, .y = Scalar{0.4}, .z = static_cast<Scalar>(std::sqrt(0.75L))};
-    const auto singleton_value = singleton->eval(outgoing, incoming);
+    const auto singleton_value = singleton->eval(outgoing, incoming, TransportMode::radiance);
     const auto direct_value = direct->eval(outgoing, incoming);
-    const auto singleton_pdf = singleton->pdf(outgoing, incoming);
+    const auto singleton_pdf = singleton->pdf(outgoing, incoming, TransportMode::radiance);
     const auto direct_pdf = direct->pdf(outgoing, incoming);
     ASSERT_TRUE(singleton_value.has_value());
     ASSERT_TRUE(direct_value.has_value());
@@ -366,7 +367,7 @@ template <SpectrumScalar Scalar> void expect_rough_diffuse_dispatch() {
     ASSERT_TRUE(mixture.has_value());
     ASSERT_TRUE(lambert.has_value());
 
-    const auto mixture_value = mixture->eval(outgoing, incoming);
+    const auto mixture_value = mixture->eval(outgoing, incoming, TransportMode::radiance);
     const auto lambert_value = lambert->eval(outgoing, incoming);
     ASSERT_TRUE(mixture_value.has_value());
     ASSERT_TRUE(lambert_value.has_value());
@@ -377,8 +378,10 @@ template <SpectrumScalar Scalar> void expect_rough_diffuse_dispatch() {
     expect_spectrum_near(*mixture_value, expected_value);
 
     const auto canonical = Point2T<Scalar>{.x = Scalar{0.625}, .y = Scalar{0.25}};
-    const auto selected_lambert = mixture->sample(outgoing, Scalar{0.125}, canonical);
-    const auto selected_rough = mixture->sample(outgoing, Scalar{0.625}, canonical);
+    const auto selected_lambert =
+        mixture->sample(outgoing, Scalar{0.125}, canonical, TransportMode::radiance);
+    const auto selected_rough =
+        mixture->sample(outgoing, Scalar{0.625}, canonical, TransportMode::radiance);
     ASSERT_TRUE(selected_lambert.has_value());
     ASSERT_TRUE(selected_lambert->has_value());
     ASSERT_TRUE(selected_rough.has_value());
@@ -423,9 +426,9 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
 
     const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
     const auto incoming = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
-    const auto singleton_value = singleton->eval(outgoing, incoming);
+    const auto singleton_value = singleton->eval(outgoing, incoming, TransportMode::radiance);
     const auto direct_value = direct->eval(outgoing, incoming);
-    const auto singleton_pdf = singleton->pdf(outgoing, incoming);
+    const auto singleton_pdf = singleton->pdf(outgoing, incoming, TransportMode::radiance);
     const auto direct_pdf = direct->pdf(outgoing, incoming);
     ASSERT_TRUE(singleton_value.has_value());
     ASSERT_TRUE(direct_value.has_value());
@@ -436,7 +439,8 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     EXPECT_EQ(singleton_pdf->measure, direct_pdf->measure);
 
     const auto canonical = Point2T<Scalar>{.x = Scalar{0.2}, .y = Scalar{0.375}};
-    const auto singleton_sample = singleton->sample(outgoing, Scalar{0.5}, canonical);
+    const auto singleton_sample =
+        singleton->sample(outgoing, Scalar{0.5}, canonical, TransportMode::radiance);
     const auto direct_sample = direct->sample(outgoing, canonical);
     ASSERT_TRUE(singleton_sample.has_value());
     ASSERT_TRUE(singleton_sample->has_value());
@@ -462,9 +466,9 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     ASSERT_TRUE(mixture.has_value());
     ASSERT_TRUE(lambert.has_value());
 
-    const auto mixture_value = mixture->eval(outgoing, incoming);
+    const auto mixture_value = mixture->eval(outgoing, incoming, TransportMode::radiance);
     const auto lambert_value = lambert->eval(outgoing, incoming);
-    const auto mixture_pdf = mixture->pdf(outgoing, incoming);
+    const auto mixture_pdf = mixture->pdf(outgoing, incoming, TransportMode::radiance);
     const auto lambert_pdf = lambert->pdf(outgoing, incoming);
     ASSERT_TRUE(mixture_value.has_value());
     ASSERT_TRUE(lambert_value.has_value());
@@ -480,7 +484,8 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
         static_cast<double>(Scalar{0.25} * lambert_pdf->value + Scalar{0.75} * direct_pdf->value),
         AnalyticTolerance<Scalar>);
 
-    const auto selected_conductor = mixture->sample(outgoing, Scalar{0.625}, canonical);
+    const auto selected_conductor =
+        mixture->sample(outgoing, Scalar{0.625}, canonical, TransportMode::radiance);
     const auto lambert_sample = lambert->sample(outgoing, canonical);
     ASSERT_TRUE(selected_conductor.has_value());
     ASSERT_TRUE(selected_conductor->has_value());
@@ -498,6 +503,179 @@ TEST(ClosureMixtureTest, DispatchesRoughConductorWithoutAHiddenDiffuseOrDeltaFal
     expect_rough_conductor_dispatch<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_rough_dielectric_dispatch() {
+    const auto coefficient = SpectrumFor<Scalar>{
+        .values = {Scalar{0.25}, Scalar{0.5}, Scalar{0.75}, Scalar{1}},
+    };
+    constexpr auto exterior_eta = Scalar{1};
+    constexpr auto interior_eta = Scalar{1.5};
+    constexpr auto alpha = Scalar{0.35};
+    auto singleton_set = SetFor<Scalar>{};
+    ASSERT_EQ(singleton_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, alpha),
+              ClosureAppendStatus::appended);
+    const auto singleton_probability = std::array{Scalar{1}};
+    const auto singleton = MixtureFor<Scalar>::create(singleton_set, singleton_probability);
+    ASSERT_TRUE(singleton.has_value());
+
+    const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
+    constexpr auto direction_sample = Point2T<Scalar>{.x = Scalar{0.1}, .y = Scalar{0.375}};
+    auto reflection_event_sample = Scalar{0};
+    auto transmission_event_sample = Scalar{0};
+    auto found_reflection = false;
+    auto found_transmission = false;
+    for (auto index = std::size_t{}; index < 1024U && !(found_reflection && found_transmission);
+         ++index) {
+        const auto event_sample = (static_cast<Scalar>(index) + Scalar{0.5}) / Scalar{1024};
+        const auto sampled =
+            singleton->sample(outgoing, event_sample, direction_sample, TransportMode::radiance);
+        ASSERT_TRUE(sampled.has_value());
+        if (!sampled->has_value()) {
+            continue;
+        }
+        const auto lobes = (**sampled).lobes;
+        if (lobes == (ScatteringLobe::glossy | ScatteringLobe::reflection)) {
+            reflection_event_sample = event_sample;
+            found_reflection = true;
+        } else if (lobes == (ScatteringLobe::glossy | ScatteringLobe::transmission)) {
+            transmission_event_sample = event_sample;
+            found_transmission = true;
+        } else {
+            ADD_FAILURE() << "A rough dielectric sample exposed an unrelated lobe.";
+        }
+    }
+    ASSERT_TRUE(found_reflection);
+    ASSERT_TRUE(found_transmission);
+
+    const auto lambert_reflectance = constant_spectrum<Scalar>(Scalar{0.2});
+    auto mixed_set = SetFor<Scalar>{};
+    ASSERT_EQ(mixed_set.append_lambertian_reflection(lambert_reflectance),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(mixed_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, alpha),
+              ClosureAppendStatus::appended);
+    const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
+    const auto mixture = MixtureFor<Scalar>::create(mixed_set, probabilities);
+    const auto lambert = ReflectionFor<Scalar>::create(lambert_reflectance);
+    ASSERT_TRUE(mixture.has_value());
+    ASSERT_TRUE(lambert.has_value());
+
+    for (const auto& [event_sample, expected_lobes] : std::array{
+             std::pair{reflection_event_sample,
+                       ScatteringLobe::glossy | ScatteringLobe::reflection},
+             std::pair{transmission_event_sample,
+                       ScatteringLobe::glossy | ScatteringLobe::transmission},
+         }) {
+        const auto direct =
+            singleton->sample(outgoing, event_sample, direction_sample, TransportMode::radiance);
+        const auto component_sample = Scalar{0.25} + Scalar{0.75} * event_sample;
+        const auto selected =
+            mixture->sample(outgoing, component_sample, direction_sample, TransportMode::radiance);
+        ASSERT_TRUE(direct.has_value());
+        ASSERT_TRUE(direct->has_value());
+        ASSERT_TRUE(selected.has_value());
+        ASSERT_TRUE(selected->has_value());
+        EXPECT_EQ((**direct).lobes, expected_lobes);
+        EXPECT_EQ((**selected).selected_closure, 1U);
+        EXPECT_EQ((**selected).lobes, expected_lobes);
+        EXPECT_EQ((**selected).selection_probability.value, Scalar{0.75});
+        EXPECT_EQ((**selected).incoming_local, (**direct).incoming_local);
+        EXPECT_EQ((**selected).eta_scale_multiplier, (**direct).eta_scale_multiplier);
+
+        const auto conditional_value =
+            singleton->eval(outgoing, (**direct).incoming_local, TransportMode::radiance);
+        const auto conditional_pdf =
+            singleton->pdf(outgoing, (**direct).incoming_local, TransportMode::radiance);
+        const auto mixed_value =
+            mixture->eval(outgoing, (**direct).incoming_local, TransportMode::radiance);
+        const auto mixed_pdf =
+            mixture->pdf(outgoing, (**direct).incoming_local, TransportMode::radiance);
+        ASSERT_TRUE(conditional_value.has_value());
+        ASSERT_TRUE(conditional_pdf.has_value());
+        ASSERT_TRUE(mixed_value.has_value());
+        ASSERT_TRUE(mixed_pdf.has_value());
+        expect_spectrum_near((**direct).value, *conditional_value);
+        EXPECT_NEAR(static_cast<double>((**direct).probability.value),
+                    static_cast<double>(conditional_pdf->value), AnalyticTolerance<Scalar>);
+
+        auto expected_value = *conditional_value;
+        auto expected_pdf = Scalar{0.75} * conditional_pdf->value;
+        if (has_scattering_lobe(expected_lobes, ScatteringLobe::reflection)) {
+            const auto lambert_value = lambert->eval(outgoing, (**direct).incoming_local);
+            const auto lambert_pdf = lambert->pdf(outgoing, (**direct).incoming_local);
+            ASSERT_TRUE(lambert_value.has_value());
+            ASSERT_TRUE(lambert_pdf.has_value());
+            expected_value = expected_value + *lambert_value;
+            expected_pdf += Scalar{0.25} * lambert_pdf->value;
+            EXPECT_EQ((**direct).eta_scale_multiplier, Scalar{1});
+        } else {
+            EXPECT_NEAR(
+                static_cast<double>((**direct).eta_scale_multiplier),
+                static_cast<double>(interior_eta * interior_eta / (exterior_eta * exterior_eta)),
+                AnalyticTolerance<Scalar>);
+        }
+        expect_spectrum_near(*mixed_value, expected_value);
+        expect_spectrum_near((**selected).value, expected_value);
+        EXPECT_NEAR(static_cast<double>(mixed_pdf->value), static_cast<double>(expected_pdf),
+                    AnalyticTolerance<Scalar>);
+        EXPECT_NEAR(static_cast<double>((**selected).probability.value),
+                    static_cast<double>(mixed_pdf->value), AnalyticTolerance<Scalar>);
+    }
+
+    for (const auto event_sample :
+         std::array{Scalar{0}, Scalar{0.5}, std::nextafter(Scalar{1}, Scalar{0})}) {
+        const auto direct =
+            singleton->sample(outgoing, event_sample, direction_sample, TransportMode::importance);
+        const auto component_sample = Scalar{0.25} + Scalar{0.75} * event_sample;
+        const auto selected = mixture->sample(outgoing, component_sample, direction_sample,
+                                              TransportMode::importance);
+        ASSERT_TRUE(direct.has_value());
+        ASSERT_TRUE(selected.has_value());
+        ASSERT_EQ(direct->has_value(), selected->has_value());
+        if (!direct->has_value()) {
+            continue;
+        }
+        EXPECT_EQ((**selected).incoming_local, (**direct).incoming_local);
+        EXPECT_EQ((**selected).lobes, (**direct).lobes);
+        EXPECT_EQ((**selected).eta_scale_multiplier, Scalar{1});
+    }
+
+    constexpr auto tir_alpha = Scalar{0.05};
+    auto tir_set = SetFor<Scalar>{};
+    ASSERT_EQ(tir_set.append_rough_dielectric(coefficient, exterior_eta, interior_eta, tir_alpha),
+              ClosureAppendStatus::appended);
+    const auto tir = MixtureFor<Scalar>::create(tir_set, singleton_probability);
+    ASSERT_TRUE(tir.has_value());
+    const auto inside_outgoing = Vector3T<Scalar>{.x = Scalar{0.8}, .z = Scalar{-0.6}};
+    const auto transmission_selected = std::nextafter(Scalar{1}, Scalar{0});
+    auto found_tir = false;
+    for (auto radial = std::size_t{}; radial < 8U && !found_tir; ++radial) {
+        for (auto azimuth = std::size_t{}; azimuth < 16U && !found_tir; ++azimuth) {
+            const auto canonical = Point2T<Scalar>{
+                .x = (static_cast<Scalar>(radial) + Scalar{0.5}) / Scalar{8},
+                .y = (static_cast<Scalar>(azimuth) + Scalar{0.5}) / Scalar{16},
+            };
+            const auto tir_sample = tir->sample(inside_outgoing, transmission_selected, canonical,
+                                                TransportMode::radiance);
+            ASSERT_TRUE(tir_sample.has_value());
+            if (!tir_sample->has_value() ||
+                (**tir_sample).lobes != (ScatteringLobe::glossy | ScatteringLobe::reflection)) {
+                continue;
+            }
+            found_tir = true;
+            EXPECT_EQ((**tir_sample).eta_scale_multiplier, Scalar{1});
+            const auto probability =
+                tir->pdf(inside_outgoing, (**tir_sample).incoming_local, TransportMode::radiance);
+            ASSERT_TRUE(probability.has_value());
+            EXPECT_EQ((**tir_sample).probability.value, probability->value);
+        }
+    }
+    EXPECT_TRUE(found_tir) << "A rough dielectric mixture must preserve TIR reflection.";
+}
+
+TEST(ClosureMixtureTest, DispatchesRoughDielectricBranchesWithoutDoubleCountingFresnel) {
+    expect_rough_dielectric_dispatch<TransportScalar>();
+    expect_rough_dielectric_dispatch<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void expect_two_component_mixture() {
     const auto first = SpectrumFor<Scalar>{
         .values = {Scalar{0.125}, Scalar{0.25}, Scalar{0.375}, Scalar{0.5}},
@@ -513,8 +691,8 @@ template <SpectrumScalar Scalar> void expect_two_component_mixture() {
 
     const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
     const auto incoming = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
-    const auto value = mixture->eval(outgoing, incoming);
-    const auto probability = mixture->pdf(outgoing, incoming);
+    const auto value = mixture->eval(outgoing, incoming, TransportMode::radiance);
+    const auto probability = mixture->pdf(outgoing, incoming, TransportMode::radiance);
     ASSERT_TRUE(value.has_value());
     ASSERT_TRUE(probability.has_value());
     expect_spectrum_near(*value, expected_reflectance * std::numbers::inv_pi_v<Scalar>);
@@ -524,8 +702,10 @@ template <SpectrumScalar Scalar> void expect_two_component_mixture() {
     EXPECT_EQ(probability->measure, ProbabilityMeasure::solid_angle);
 
     const auto direction_sample = Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}};
-    const auto first_sample = mixture->sample(outgoing, Scalar{0.125}, direction_sample);
-    const auto second_sample = mixture->sample(outgoing, Scalar{0.25}, direction_sample);
+    const auto first_sample =
+        mixture->sample(outgoing, Scalar{0.125}, direction_sample, TransportMode::radiance);
+    const auto second_sample =
+        mixture->sample(outgoing, Scalar{0.25}, direction_sample, TransportMode::radiance);
     ASSERT_TRUE(first_sample.has_value());
     ASSERT_TRUE(first_sample->has_value());
     ASSERT_TRUE(second_sample.has_value());
@@ -560,8 +740,9 @@ template <SpectrumScalar Scalar> void expect_black_component_remains_selectable(
     ASSERT_TRUE(mixture.has_value());
 
     const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
-    const auto sampled = mixture->sample(outgoing, Scalar{0.25},
-                                         Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}});
+    const auto sampled =
+        mixture->sample(outgoing, Scalar{0.25}, Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}},
+                        TransportMode::radiance);
     ASSERT_TRUE(sampled.has_value());
     ASSERT_TRUE(sampled->has_value());
     EXPECT_EQ((**sampled).selected_closure, 0U);
@@ -598,15 +779,18 @@ template <SpectrumScalar Scalar> void expect_selection_boundaries_and_replay() {
         std::pair{Scalar{0.75}, 3U}, std::pair{std::nextafter(Scalar{1}, Scalar{0}), 3U},
     };
     for (const auto& [component_sample, expected_index] : boundary_cases) {
-        const auto sampled = mixture->sample(outgoing, component_sample, direction_sample);
+        const auto sampled =
+            mixture->sample(outgoing, component_sample, direction_sample, TransportMode::radiance);
         ASSERT_TRUE(sampled.has_value());
         ASSERT_TRUE(sampled->has_value());
         EXPECT_EQ((**sampled).selected_closure, expected_index);
         EXPECT_EQ((**sampled).selection_probability.value, Scalar{0.25});
     }
 
-    const auto replay_a = mixture->sample(outgoing, Scalar{0.625}, direction_sample);
-    const auto replay_b = mixture->sample(outgoing, Scalar{0.625}, direction_sample);
+    const auto replay_a =
+        mixture->sample(outgoing, Scalar{0.625}, direction_sample, TransportMode::radiance);
+    const auto replay_b =
+        mixture->sample(outgoing, Scalar{0.625}, direction_sample, TransportMode::radiance);
     ASSERT_TRUE(replay_a.has_value());
     ASSERT_TRUE(replay_a->has_value());
     ASSERT_TRUE(replay_b.has_value());
@@ -622,7 +806,8 @@ template <SpectrumScalar Scalar> void expect_selection_boundaries_and_replay() {
              std::numeric_limits<Scalar>::quiet_NaN(),
              std::numeric_limits<Scalar>::infinity(),
          }) {
-        expect_invalid(mixture->sample(outgoing, invalid, direction_sample));
+        expect_invalid(
+            mixture->sample(outgoing, invalid, direction_sample, TransportMode::radiance));
     }
 }
 
@@ -644,8 +829,8 @@ template <SpectrumScalar Scalar> void expect_full_capacity_is_not_clamped_or_ave
 
     const auto outgoing = Vector3T<Scalar>{.z = Scalar{1}};
     const auto incoming = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
-    const auto value = mixture->eval(outgoing, incoming);
-    const auto probability = mixture->pdf(outgoing, incoming);
+    const auto value = mixture->eval(outgoing, incoming, TransportMode::radiance);
+    const auto probability = mixture->pdf(outgoing, incoming, TransportMode::radiance);
     ASSERT_TRUE(value.has_value());
     ASSERT_TRUE(probability.has_value());
     const auto expected_value = Scalar{8} * std::numbers::inv_pi_v<Scalar>;
@@ -667,10 +852,11 @@ template <SpectrumScalar Scalar> void expect_empty_and_invalid_inputs_are_explic
     const auto mixture = MixtureFor<Scalar>::create(SetFor<Scalar>{}, std::span<const Scalar>{});
     ASSERT_TRUE(mixture.has_value());
     const auto normal = Vector3T<Scalar>{.z = Scalar{1}};
-    const auto value = mixture->eval(normal, normal);
-    const auto probability = mixture->pdf(normal, normal);
+    const auto value = mixture->eval(normal, normal, TransportMode::radiance);
+    const auto probability = mixture->pdf(normal, normal, TransportMode::radiance);
     const auto sampled =
-        mixture->sample(normal, Scalar{0.5}, Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}});
+        mixture->sample(normal, Scalar{0.5}, Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}},
+                        TransportMode::radiance);
     ASSERT_TRUE(value.has_value());
     ASSERT_TRUE(probability.has_value());
     ASSERT_TRUE(sampled.has_value());
@@ -680,16 +866,24 @@ template <SpectrumScalar Scalar> void expect_empty_and_invalid_inputs_are_explic
     EXPECT_FALSE(sampled->has_value());
 
     const auto invalid_direction = Vector3T<Scalar>{};
-    expect_invalid(mixture->eval(invalid_direction, normal));
-    expect_invalid(mixture->eval(normal, invalid_direction));
-    expect_invalid(mixture->pdf(invalid_direction, normal));
-    expect_invalid(mixture->pdf(normal, invalid_direction));
+    expect_invalid(mixture->eval(invalid_direction, normal, TransportMode::radiance));
+    expect_invalid(mixture->eval(normal, invalid_direction, TransportMode::radiance));
+    expect_invalid(mixture->pdf(invalid_direction, normal, TransportMode::radiance));
+    expect_invalid(mixture->pdf(normal, invalid_direction, TransportMode::radiance));
     expect_invalid(mixture->sample(invalid_direction, Scalar{0.5},
-                                   Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}}));
-    expect_invalid(
-        mixture->sample(normal, Scalar{1}, Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}}));
-    expect_invalid(
-        mixture->sample(normal, Scalar{0.5}, Point2T<Scalar>{.x = Scalar{1}, .y = Scalar{0.5}}));
+                                   Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}},
+                                   TransportMode::radiance));
+    expect_invalid(mixture->sample(normal, Scalar{1},
+                                   Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}},
+                                   TransportMode::radiance));
+    expect_invalid(mixture->sample(normal, Scalar{0.5},
+                                   Point2T<Scalar>{.x = Scalar{1}, .y = Scalar{0.5}},
+                                   TransportMode::radiance));
+    expect_invalid(mixture->eval(normal, normal, static_cast<TransportMode>(0xffU)));
+    expect_invalid(mixture->pdf(normal, normal, static_cast<TransportMode>(0xffU)));
+    expect_invalid(mixture->sample(normal, Scalar{0.5},
+                                   Point2T<Scalar>{.x = Scalar{0.5}, .y = Scalar{0.5}},
+                                   static_cast<TransportMode>(0xffU)));
 }
 
 TEST(ClosureMixtureTest, TreatsAnEmptySetAsAbsorptionWithoutHidingInvalidInputs) {
@@ -724,7 +918,7 @@ template <SpectrumScalar Scalar> void expect_mixture_pdf_integrates_to_one() {
                 .y = static_cast<Scalar>(radial * std::sin(azimuth)),
                 .z = static_cast<Scalar>(cosine),
             };
-            const auto probability = mixture->pdf(outgoing, incoming);
+            const auto probability = mixture->pdf(outgoing, incoming, TransportMode::radiance);
             ASSERT_TRUE(probability.has_value());
             EXPECT_EQ(probability->measure, ProbabilityMeasure::solid_angle);
             integral += static_cast<long double>(probability->value) * delta_cosine * delta_azimuth;
@@ -799,6 +993,28 @@ template <SpectrumScalar Scalar> void expect_corrupt_records_are_rejected() {
     const auto rough_nonzero_reserved = overwrite_bytes(
         rough_set, set_storage_offset + parameter_offset + sizeof(Scalar), Scalar{1});
     expect_invalid(MixtureFor<Scalar>::create(rough_nonzero_reserved, probability));
+
+    auto dielectric_set = SetFor<Scalar>{};
+    ASSERT_EQ(dielectric_set.append_rough_dielectric(constant_spectrum<Scalar>(Scalar{0.5}),
+                                                     Scalar{1}, Scalar{1.5}, Scalar{0.5}),
+              ClosureAppendStatus::appended);
+    const auto dielectric_incompatible_lobes =
+        overwrite_bytes(dielectric_set, set_storage_offset + std::size_t{4},
+                        ScatteringLobe::glossy | ScatteringLobe::reflection);
+    expect_invalid(MixtureFor<Scalar>::create(dielectric_incompatible_lobes, probability));
+
+    const auto invalid_exterior_eta =
+        overwrite_bytes(dielectric_set, set_storage_offset + parameter_offset, Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_exterior_eta, probability));
+    const auto invalid_interior_eta = overwrite_bytes(
+        dielectric_set, set_storage_offset + parameter_offset + sizeof(Scalar), Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_interior_eta, probability));
+    const auto invalid_dielectric_alpha = overwrite_bytes(
+        dielectric_set, set_storage_offset + parameter_offset + 2U * sizeof(Scalar), Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_dielectric_alpha, probability));
+    const auto dielectric_nonzero_reserved = overwrite_bytes(
+        dielectric_set, set_storage_offset + parameter_offset + 3U * sizeof(Scalar), Scalar{1});
+    expect_invalid(MixtureFor<Scalar>::create(dielectric_nonzero_reserved, probability));
 }
 
 TEST(ClosureMixtureTest, RejectsUnsupportedOrCorruptRecordsWithoutDispatchFallback) {
