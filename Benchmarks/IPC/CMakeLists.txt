@@ -23,7 +23,7 @@ set_target_properties(
 if(BUILD_TESTING)
     set(
         blackframe_microbenchmark_filter
-        "^(encode_ping|decode_ping|build_light_tree/.*|sample_light_tree/.*|query_light_tree_probability/.*|sample_power_sampler/.*)$"
+        "^(encode_ping|decode_ping|build_light_tree/.*|sample_light_tree/.*|query_light_tree_probability/.*|sample_power_sampler/.*|compact_stable_input/.*|compact_deterministic_path_slot/.*)$"
     )
     add_test(
         NAME Blackframe.Executables.RenderBenchmarks.Help

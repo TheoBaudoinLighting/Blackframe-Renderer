@@ -3,6 +3,7 @@ target_sources(
     PRIVATE
         CornellConvergenceBenchmark.cpp
         LightTreeBenchmark.cpp
+        WavefrontCompactionBenchmark.cpp
 )
 
 foreach(blackframe_cornell_target IN ITEMS

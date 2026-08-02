@@ -1,4 +1,5 @@
 #include <Blackframe/Renderer/WavefrontQueues.hpp>
+#include <algorithm>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,15 @@ namespace {
     return core::Error{
         .code = core::StatusCode::resource_exhausted,
         .message = "The " + std::string{wavefront_queue_kind_name(kind)} + " queue " + reason,
+    };
+}
+
+[[nodiscard]] core::Error queue_compaction_error(const WavefrontQueueKind kind,
+                                                 const char* const reason) {
+    return core::Error{
+        .code = core::StatusCode::invalid_argument,
+        .message = "The " + std::string{wavefront_queue_kind_name(kind)} +
+                   " queue cannot compact terminated lanes: " + reason,
     };
 }
 
@@ -98,6 +108,45 @@ BoundedWavefrontQueueT<Kind>::push_batch(const std::span<const WavefrontPathSlot
     }
     active_size_ += slots.size();
     return WavefrontQueuePushStatus::pushed;
+}
+
+template <WavefrontQueueKind Kind>
+core::Result<WavefrontCompactionReport> BoundedWavefrontQueueT<Kind>::compact_terminated(
+    const std::span<const WavefrontLaneState> lane_states, const WavefrontCompactionOrder order) {
+    if (!is_known_wavefront_compaction_order(order)) {
+        return std::unexpected(queue_compaction_error(Kind, "the ordering policy is unknown."));
+    }
+    if (lane_states.size() != active_size_) {
+        return std::unexpected(
+            queue_compaction_error(Kind, "the lane-state count does not match the queue size."));
+    }
+    for (const auto lane_state : lane_states) {
+        if (!is_known_wavefront_lane_state(lane_state)) {
+            return std::unexpected(queue_compaction_error(Kind, "a lane state is unknown."));
+        }
+    }
+
+    const auto input_lanes = active_size_;
+    auto active_lanes = std::size_t{};
+    for (auto input_lane = std::size_t{}; input_lane < input_lanes; ++input_lane) {
+        if (lane_states[input_lane] == WavefrontLaneState::active) {
+            storage_[active_lanes] = storage_[input_lane];
+            ++active_lanes;
+        }
+    }
+    if (order == WavefrontCompactionOrder::deterministic_path_slot) {
+        std::sort(storage_.begin(), storage_.begin() + static_cast<std::ptrdiff_t>(active_lanes),
+                  [](const WavefrontPathSlot left, const WavefrontPathSlot right) noexcept {
+                      return left.value < right.value;
+                  });
+    }
+    active_size_ = active_lanes;
+    return WavefrontCompactionReport{
+        .input_lanes = input_lanes,
+        .active_lanes = active_lanes,
+        .terminated_lanes = input_lanes - active_lanes,
+        .order = order,
+    };
 }
 
 template <WavefrontQueueKind Kind> void BoundedWavefrontQueueT<Kind>::clear() noexcept {
@@ -187,6 +236,13 @@ template <WavefrontQueueKind Kind>
 WavefrontQueuePushStatus DoubleBufferedWavefrontQueueT<Kind>::push_write_batch(
     const std::span<const WavefrontPathSlot> slots) noexcept {
     return write_queue().push_batch(slots);
+}
+
+template <WavefrontQueueKind Kind>
+core::Result<WavefrontCompactionReport>
+DoubleBufferedWavefrontQueueT<Kind>::compact_write_terminated(
+    const std::span<const WavefrontLaneState> lane_states, const WavefrontCompactionOrder order) {
+    return write_queue().compact_terminated(lane_states, order);
 }
 
 template <WavefrontQueueKind Kind>

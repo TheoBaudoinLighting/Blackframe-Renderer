@@ -660,5 +660,281 @@ TEST(WavefrontQueueDoubleBufferTest, MovePreservesBothBuffersAndCanonicalizesSou
     });
 }
 
+TEST(WavefrontCompactionTest, ExposesOnlyExplicitLaneStatesAndOrderingPolicies) {
+    static_assert(sizeof(WavefrontLaneState) == sizeof(std::uint8_t));
+    static_assert(sizeof(WavefrontCompactionOrder) == sizeof(std::uint8_t));
+    static_assert(std::is_standard_layout_v<WavefrontCompactionReport>);
+    static_assert(std::is_trivially_copyable_v<WavefrontCompactionReport>);
+
+    EXPECT_TRUE(is_known_wavefront_lane_state(WavefrontLaneState::active));
+    EXPECT_TRUE(is_known_wavefront_lane_state(WavefrontLaneState::terminated));
+    EXPECT_FALSE(is_known_wavefront_lane_state(static_cast<WavefrontLaneState>(255U)));
+    EXPECT_TRUE(is_known_wavefront_compaction_order(WavefrontCompactionOrder::stable_input));
+    EXPECT_TRUE(
+        is_known_wavefront_compaction_order(WavefrontCompactionOrder::deterministic_path_slot));
+    EXPECT_FALSE(is_known_wavefront_compaction_order(static_cast<WavefrontCompactionOrder>(255U)));
+}
+
+TEST(WavefrontCompactionTest, RemovesTerminatedLanesStablyAcrossEveryStageQueue) {
+    for_each_queue_type([]<typename Queue> {
+        auto created = Queue::create(8U);
+        ASSERT_TRUE(created.has_value());
+        auto queue = std::move(*created);
+        constexpr auto slots = std::array{
+            WavefrontPathSlot{.value = std::numeric_limits<std::uint32_t>::max()},
+            WavefrontPathSlot{.value = 6U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 5U},
+            WavefrontPathSlot{.value = 0U},
+            WavefrontPathSlot{.value = 3U},
+            WavefrontPathSlot{.value = 2U},
+        };
+        constexpr auto lane_states = std::array{
+            WavefrontLaneState::active,     WavefrontLaneState::active,
+            WavefrontLaneState::active,     WavefrontLaneState::active,
+            WavefrontLaneState::terminated, WavefrontLaneState::active,
+            WavefrontLaneState::terminated, WavefrontLaneState::active,
+        };
+        constexpr auto expected = std::array{
+            WavefrontPathSlot{.value = std::numeric_limits<std::uint32_t>::max()},
+            WavefrontPathSlot{.value = 6U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 0U},
+            WavefrontPathSlot{.value = 2U},
+        };
+        ASSERT_EQ(queue.push_batch(slots), WavefrontQueuePushStatus::pushed);
+        const auto* const storage = queue.entries().data();
+
+        const auto report =
+            queue.compact_terminated(lane_states, WavefrontCompactionOrder::stable_input);
+        ASSERT_TRUE(report.has_value()) << report.error().message;
+        EXPECT_EQ(*report, (WavefrontCompactionReport{
+                               .input_lanes = 8U,
+                               .active_lanes = 6U,
+                               .terminated_lanes = 2U,
+                               .order = WavefrontCompactionOrder::stable_input,
+                           }));
+        EXPECT_EQ(queue.entries().data(), storage);
+        EXPECT_EQ(queue.capacity(), slots.size());
+        EXPECT_EQ(queue.remaining_capacity(), 2U);
+        EXPECT_TRUE(std::ranges::equal(queue.entries(), expected));
+    });
+}
+
+TEST(WavefrontCompactionTest, OptionallyCanonicalizesSurvivorsByStablePathSlot) {
+    for_each_queue_type([]<typename Queue> {
+        constexpr auto first_slots = std::array{
+            WavefrontPathSlot{.value = std::numeric_limits<std::uint32_t>::max()},
+            WavefrontPathSlot{.value = 6U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 5U},
+            WavefrontPathSlot{.value = 0U},
+            WavefrontPathSlot{.value = 3U},
+            WavefrontPathSlot{.value = 2U},
+        };
+        constexpr auto first_states = std::array{
+            WavefrontLaneState::active,     WavefrontLaneState::active,
+            WavefrontLaneState::active,     WavefrontLaneState::active,
+            WavefrontLaneState::terminated, WavefrontLaneState::active,
+            WavefrontLaneState::terminated, WavefrontLaneState::active,
+        };
+        constexpr auto second_slots = std::array{
+            WavefrontPathSlot{.value = 2U},
+            WavefrontPathSlot{.value = 3U},
+            WavefrontPathSlot{.value = 0U},
+            WavefrontPathSlot{.value = 5U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 6U},
+            WavefrontPathSlot{.value = std::numeric_limits<std::uint32_t>::max()},
+        };
+        constexpr auto second_states = std::array{
+            WavefrontLaneState::active, WavefrontLaneState::terminated,
+            WavefrontLaneState::active, WavefrontLaneState::terminated,
+            WavefrontLaneState::active, WavefrontLaneState::active,
+            WavefrontLaneState::active, WavefrontLaneState::active,
+        };
+        constexpr auto expected = std::array{
+            WavefrontPathSlot{.value = 0U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 1U},
+            WavefrontPathSlot{.value = 2U},
+            WavefrontPathSlot{.value = 6U},
+            WavefrontPathSlot{.value = std::numeric_limits<std::uint32_t>::max()},
+        };
+        auto first_created = Queue::create(first_slots.size());
+        auto second_created = Queue::create(second_slots.size());
+        ASSERT_TRUE(first_created.has_value());
+        ASSERT_TRUE(second_created.has_value());
+        auto first = std::move(*first_created);
+        auto second = std::move(*second_created);
+        ASSERT_EQ(first.push_batch(first_slots), WavefrontQueuePushStatus::pushed);
+        ASSERT_EQ(second.push_batch(second_slots), WavefrontQueuePushStatus::pushed);
+
+        const auto first_report = first.compact_terminated(
+            first_states, WavefrontCompactionOrder::deterministic_path_slot);
+        const auto second_report = second.compact_terminated(
+            second_states, WavefrontCompactionOrder::deterministic_path_slot);
+        ASSERT_TRUE(first_report.has_value()) << first_report.error().message;
+        ASSERT_TRUE(second_report.has_value()) << second_report.error().message;
+        EXPECT_EQ(first_report->order, WavefrontCompactionOrder::deterministic_path_slot);
+        EXPECT_EQ(second_report->order, WavefrontCompactionOrder::deterministic_path_slot);
+        EXPECT_TRUE(std::ranges::equal(first.entries(), expected));
+        EXPECT_TRUE(std::ranges::equal(second.entries(), expected));
+    });
+}
+
+TEST(WavefrontCompactionTest, RejectsMalformedRequestsAtomicallyAndRecoversCapacity) {
+    for_each_queue_type([]<typename Queue> {
+        auto created = Queue::create(3U);
+        ASSERT_TRUE(created.has_value());
+        auto queue = std::move(*created);
+        constexpr auto slots = std::array{
+            WavefrontPathSlot{.value = 4U},
+            WavefrontPathSlot{.value = 2U},
+            WavefrontPathSlot{.value = 6U},
+        };
+        constexpr auto valid_states = std::array{
+            WavefrontLaneState::active, WavefrontLaneState::active, WavefrontLaneState::active};
+        constexpr auto short_states =
+            std::array{WavefrontLaneState::active, WavefrontLaneState::terminated};
+        constexpr auto long_states =
+            std::array{WavefrontLaneState::active, WavefrontLaneState::active,
+                       WavefrontLaneState::active, WavefrontLaneState::terminated};
+        ASSERT_EQ(queue.push_batch(slots), WavefrontQueuePushStatus::pushed);
+        const auto* const storage = queue.entries().data();
+
+        const auto expect_rejected_without_mutation = [&](const auto& states,
+                                                          const WavefrontCompactionOrder order) {
+            const auto result = queue.compact_terminated(states, order);
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().code, core::StatusCode::invalid_argument);
+            EXPECT_EQ(queue.entries().data(), storage);
+            EXPECT_TRUE(std::ranges::equal(queue.entries(), slots));
+        };
+        expect_rejected_without_mutation(short_states, WavefrontCompactionOrder::stable_input);
+        expect_rejected_without_mutation(long_states, WavefrontCompactionOrder::stable_input);
+        auto unknown_states = valid_states;
+        unknown_states[1U] = static_cast<WavefrontLaneState>(255U);
+        expect_rejected_without_mutation(unknown_states, WavefrontCompactionOrder::stable_input);
+        expect_rejected_without_mutation(valid_states, static_cast<WavefrontCompactionOrder>(255U));
+
+        const auto all_live =
+            queue.compact_terminated(valid_states, WavefrontCompactionOrder::stable_input);
+        ASSERT_TRUE(all_live.has_value()) << all_live.error().message;
+        EXPECT_TRUE(queue.full());
+        EXPECT_TRUE(std::ranges::equal(queue.entries(), slots));
+        constexpr auto all_terminated =
+            std::array{WavefrontLaneState::terminated, WavefrontLaneState::terminated,
+                       WavefrontLaneState::terminated};
+        const auto terminated =
+            queue.compact_terminated(all_terminated, WavefrontCompactionOrder::stable_input);
+        ASSERT_TRUE(terminated.has_value()) << terminated.error().message;
+        EXPECT_EQ(terminated->active_lanes, 0U);
+        EXPECT_EQ(terminated->terminated_lanes, slots.size());
+        EXPECT_TRUE(queue.empty());
+        EXPECT_EQ(queue.remaining_capacity(), slots.size());
+        EXPECT_EQ(queue.entries().data(), storage);
+        EXPECT_EQ(queue.push_batch(slots), WavefrontQueuePushStatus::pushed);
+        EXPECT_EQ(queue.push(WavefrontPathSlot{.value = 99U}),
+                  WavefrontQueuePushStatus::capacity_exhausted);
+
+        auto zero_created = Queue::create(0U);
+        ASSERT_TRUE(zero_created.has_value());
+        auto zero = std::move(*zero_created);
+        const auto empty = zero.compact_terminated(std::span<const WavefrontLaneState>{},
+                                                   WavefrontCompactionOrder::stable_input);
+        ASSERT_TRUE(empty.has_value()) << empty.error().message;
+        EXPECT_EQ(*empty, (WavefrontCompactionReport{
+                              .input_lanes = 0U,
+                              .active_lanes = 0U,
+                              .terminated_lanes = 0U,
+                              .order = WavefrontCompactionOrder::stable_input,
+                          }));
+    });
+}
+
+TEST(WavefrontCompactionTest, CompactsOnlyTheWriteGenerationOfEveryDoubleBuffer) {
+    for_each_double_buffer_type([]<typename Buffers> {
+        auto created = Buffers::create(4U);
+        ASSERT_TRUE(created.has_value());
+        auto buffers = std::move(*created);
+        constexpr auto published =
+            std::array{WavefrontPathSlot{.value = 91U}, WavefrontPathSlot{.value = 92U}};
+        constexpr auto staged =
+            std::array{WavefrontPathSlot{.value = 9U}, WavefrontPathSlot{.value = 1U},
+                       WavefrontPathSlot{.value = 7U}, WavefrontPathSlot{.value = 3U}};
+        constexpr auto lane_states =
+            std::array{WavefrontLaneState::active, WavefrontLaneState::terminated,
+                       WavefrontLaneState::active, WavefrontLaneState::terminated};
+        constexpr auto expected =
+            std::array{WavefrontPathSlot{.value = 9U}, WavefrontPathSlot{.value = 7U}};
+        ASSERT_EQ(buffers.push_write_batch(published), WavefrontQueuePushStatus::pushed);
+        ASSERT_EQ(buffers.publish_write_buffer(), WavefrontQueuePublishStatus::published);
+        ASSERT_EQ(buffers.push_write_batch(staged), WavefrontQueuePushStatus::pushed);
+        const auto* const read_storage = required_pending_read(buffers).data();
+        const auto* const write_storage = buffers.write_entries().data();
+
+        const auto expect_rejected_without_mutation =
+            [&](const std::span<const WavefrontLaneState> states,
+                const WavefrontCompactionOrder order) {
+                const auto rejected = buffers.compact_write_terminated(states, order);
+                ASSERT_FALSE(rejected.has_value());
+                EXPECT_EQ(rejected.error().code, core::StatusCode::invalid_argument);
+                EXPECT_TRUE(buffers.has_pending_read());
+                EXPECT_EQ(required_pending_read(buffers).data(), read_storage);
+                EXPECT_EQ(buffers.write_entries().data(), write_storage);
+                EXPECT_EQ(required_pending_read(buffers).size(), published.size());
+                EXPECT_EQ(buffers.write_size(), staged.size());
+                EXPECT_EQ(buffers.capacity(), 4U);
+                EXPECT_TRUE(std::ranges::equal(required_pending_read(buffers), published));
+                EXPECT_TRUE(std::ranges::equal(buffers.write_entries(), staged));
+            };
+        expect_rejected_without_mutation(std::span<const WavefrontLaneState>{lane_states}.first(3U),
+                                         WavefrontCompactionOrder::stable_input);
+        auto unknown_states = lane_states;
+        unknown_states[1U] = static_cast<WavefrontLaneState>(255U);
+        expect_rejected_without_mutation(unknown_states, WavefrontCompactionOrder::stable_input);
+        expect_rejected_without_mutation(lane_states, static_cast<WavefrontCompactionOrder>(255U));
+
+        const auto report =
+            buffers.compact_write_terminated(lane_states, WavefrontCompactionOrder::stable_input);
+        ASSERT_TRUE(report.has_value()) << report.error().message;
+        EXPECT_TRUE(buffers.has_pending_read());
+        EXPECT_EQ(required_pending_read(buffers).data(), read_storage);
+        EXPECT_EQ(buffers.write_entries().data(), write_storage);
+        EXPECT_TRUE(std::ranges::equal(required_pending_read(buffers), published));
+        EXPECT_TRUE(std::ranges::equal(buffers.write_entries(), expected));
+        EXPECT_EQ(buffers.publish_write_buffer(), WavefrontQueuePublishStatus::read_buffer_pending);
+
+        auto moved = std::move(buffers);
+        EXPECT_TRUE(std::ranges::equal(required_pending_read(moved), published));
+        EXPECT_TRUE(std::ranges::equal(moved.write_entries(), expected));
+        ASSERT_EQ(moved.release_read_buffer(), WavefrontQueueReleaseStatus::released);
+        ASSERT_EQ(moved.publish_write_buffer(), WavefrontQueuePublishStatus::published);
+        EXPECT_TRUE(std::ranges::equal(required_pending_read(moved), expected));
+
+        auto empty_created = Buffers::create(2U);
+        ASSERT_TRUE(empty_created.has_value());
+        auto empty_generation = std::move(*empty_created);
+        constexpr auto terminated_slots =
+            std::array{WavefrontPathSlot{.value = 1U}, WavefrontPathSlot{.value = 2U}};
+        constexpr auto terminated_states =
+            std::array{WavefrontLaneState::terminated, WavefrontLaneState::terminated};
+        ASSERT_EQ(empty_generation.push_write_batch(terminated_slots),
+                  WavefrontQueuePushStatus::pushed);
+        ASSERT_TRUE(
+            empty_generation
+                .compact_write_terminated(terminated_states, WavefrontCompactionOrder::stable_input)
+                .has_value());
+        ASSERT_EQ(empty_generation.publish_write_buffer(), WavefrontQueuePublishStatus::published);
+        ASSERT_TRUE(empty_generation.pending_read_entries().has_value());
+        EXPECT_TRUE(required_pending_read(empty_generation).empty());
+    });
+}
+
 } // namespace
 } // namespace blackframe::renderer

@@ -87,6 +87,49 @@ enum class WavefrontQueueReleaseStatus : std::uint8_t {
     no_read_buffer_pending = 1U,
 };
 
+enum class WavefrontLaneState : std::uint8_t {
+    active = 0U,
+    terminated = 1U,
+};
+
+[[nodiscard]] constexpr bool
+is_known_wavefront_lane_state(const WavefrontLaneState state) noexcept {
+    switch (state) {
+    case WavefrontLaneState::active:
+    case WavefrontLaneState::terminated:
+        return true;
+    }
+    return false;
+}
+
+// The removal pass is stable. stable_input exposes producer order exactly, while
+// deterministic_path_slot additionally canonicalizes surviving lanes by their stable path slot.
+// Callers must select a policy explicitly; an unknown value is rejected before queue mutation.
+enum class WavefrontCompactionOrder : std::uint8_t {
+    stable_input = 0U,
+    deterministic_path_slot = 1U,
+};
+
+[[nodiscard]] constexpr bool
+is_known_wavefront_compaction_order(const WavefrontCompactionOrder order) noexcept {
+    switch (order) {
+    case WavefrontCompactionOrder::stable_input:
+    case WavefrontCompactionOrder::deterministic_path_slot:
+        return true;
+    }
+    return false;
+}
+
+struct WavefrontCompactionReport final {
+    std::size_t input_lanes{};
+    std::size_t active_lanes{};
+    std::size_t terminated_lanes{};
+    WavefrontCompactionOrder order{};
+
+    [[nodiscard]] constexpr bool
+    operator==(const WavefrontCompactionReport&) const noexcept = default;
+};
+
 namespace wavefront_queue_detail {
 
 template <WavefrontQueueKind Kind> class BoundedWavefrontQueueT final {
@@ -112,9 +155,9 @@ template <WavefrontQueueKind Kind> class BoundedWavefrontQueueT final {
     [[nodiscard]] bool full() const noexcept;
 
     // The backing address remains stable from creation until move or destruction. A view's active
-    // range expires when the queue is cleared, even though a newly acquired view still uses the
-    // same preallocated storage. Rvalue access is forbidden so a temporary queue cannot produce a
-    // dangling view.
+    // range expires when the queue is cleared or compacted, even though a newly acquired view still
+    // uses the same preallocated storage. Rvalue access is forbidden so a temporary queue cannot
+    // produce a dangling view.
     [[nodiscard]] std::span<const WavefrontPathSlot> entries() const& noexcept;
     [[nodiscard]] std::span<const WavefrontPathSlot> entries() && = delete;
     [[nodiscard]] std::span<const WavefrontPathSlot> entries() const&& = delete;
@@ -122,6 +165,13 @@ template <WavefrontQueueKind Kind> class BoundedWavefrontQueueT final {
     [[nodiscard]] WavefrontQueuePushStatus push(WavefrontPathSlot slot) noexcept;
     [[nodiscard]] WavefrontQueuePushStatus
     push_batch(std::span<const WavefrontPathSlot> slots) noexcept;
+
+    // lane_states is positionally aligned with the active queue prefix. Validation is atomic:
+    // length, lane values, and ordering policy are checked before any entry is moved. Successful
+    // compaction reuses the fixed backing storage and never allocates.
+    [[nodiscard]] core::Result<WavefrontCompactionReport>
+    compact_terminated(std::span<const WavefrontLaneState> lane_states,
+                       WavefrontCompactionOrder order);
     void clear() noexcept;
 
   private:
@@ -162,9 +212,10 @@ template <WavefrontQueueKind Kind> class DoubleBufferedWavefrontQueueT final {
     [[nodiscard]] bool write_full() const noexcept;
 
     // A disengaged optional means no generation is pending; an engaged empty span is an explicitly
-    // published empty generation. Views are read-only. Write views must be reacquired after a push,
-    // and all views must be reacquired after a publish or release transition. Mutable queue objects
-    // are intentionally never exposed, preserving ownership of both allocations.
+    // published empty generation. Views are read-only. Write views must be reacquired after a push
+    // or write compaction, and all views must be reacquired after a publish or release transition.
+    // Mutable queue objects are intentionally never exposed, preserving ownership of both
+    // allocations.
     [[nodiscard]] std::optional<std::span<const WavefrontPathSlot>>
     pending_read_entries() const& noexcept;
     [[nodiscard]] std::optional<std::span<const WavefrontPathSlot>>
@@ -178,6 +229,12 @@ template <WavefrontQueueKind Kind> class DoubleBufferedWavefrontQueueT final {
     [[nodiscard]] WavefrontQueuePushStatus push_write(WavefrontPathSlot slot) noexcept;
     [[nodiscard]] WavefrontQueuePushStatus
     push_write_batch(std::span<const WavefrontPathSlot> slots) noexcept;
+
+    // Only the producer-owned write generation is compacted. A published read generation remains
+    // immutable and independently releasable throughout the operation.
+    [[nodiscard]] core::Result<WavefrontCompactionReport>
+    compact_write_terminated(std::span<const WavefrontLaneState> lane_states,
+                             WavefrontCompactionOrder order);
 
     // Publishing never clears or replaces an unreleased read generation. The producer may keep
     // filling the separate write buffer after publication, but cannot publish it until release.
@@ -246,6 +303,10 @@ static_assert(sizeof(WavefrontQueueKind) == sizeof(std::uint8_t));
 static_assert(sizeof(WavefrontQueuePushStatus) == sizeof(std::uint8_t));
 static_assert(sizeof(WavefrontQueuePublishStatus) == sizeof(std::uint8_t));
 static_assert(sizeof(WavefrontQueueReleaseStatus) == sizeof(std::uint8_t));
+static_assert(sizeof(WavefrontLaneState) == sizeof(std::uint8_t));
+static_assert(sizeof(WavefrontCompactionOrder) == sizeof(std::uint8_t));
+static_assert(std::is_standard_layout_v<WavefrontCompactionReport>);
+static_assert(std::is_trivially_copyable_v<WavefrontCompactionReport>);
 static_assert(!std::is_default_constructible_v<CameraQueue>);
 static_assert(!std::is_copy_constructible_v<CameraQueue>);
 static_assert(std::is_nothrow_move_constructible_v<CameraQueue>);

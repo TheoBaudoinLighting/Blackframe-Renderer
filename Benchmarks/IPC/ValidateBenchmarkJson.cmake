@@ -77,6 +77,8 @@ set(
     sample_light_tree/16
     query_light_tree_probability/16
     sample_power_sampler/16
+    compact_stable_input/256
+    compact_deterministic_path_slot/256
 )
 math(EXPR last_benchmark_index "${benchmark_count} - 1")
 foreach(benchmark_index RANGE 0 ${last_benchmark_index})
