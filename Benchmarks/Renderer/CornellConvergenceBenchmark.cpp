@@ -869,6 +869,154 @@ validate_preview_semantics(const renderer::Film& film) {
     return {};
 }
 
+void record_queue_statistics_counter(benchmark::State& state, const char* const prefix,
+                                     const CpuWavefrontMisQueueStatistics& statistics) {
+    const auto name = std::string{prefix};
+    state.counters[name + "_capacity"] = static_cast<double>(statistics.capacity);
+    state.counters[name + "_peak_size"] = static_cast<double>(statistics.peak_size);
+    state.counters[name + "_dispatch_count"] = static_cast<double>(statistics.dispatch_count);
+    state.counters[name + "_input_lanes"] = static_cast<double>(statistics.input_lanes);
+    state.counters[name + "_peak_occupancy"] = statistics.peak_occupancy();
+    state.counters[name + "_mean_occupancy"] = statistics.mean_occupancy();
+    state.counters[name + "_overflow_attempts"] = static_cast<double>(statistics.overflow_attempts);
+    state.counters[name + "_rejected_lanes"] = static_cast<double>(statistics.rejected_lanes);
+    state.counters[name + "_stage_wall_nanoseconds"] =
+        static_cast<double>(statistics.stage_wall_nanoseconds);
+}
+
+void cornell_wavefront_queue_statistics(benchmark::State& state) {
+    const auto scene = make_cornell_scene();
+    if (!scene) {
+        state.SkipWithError(scene.error().message);
+        return;
+    }
+    const auto scene_status = validate_cornell_scene_contract(**scene);
+    if (!scene_status) {
+        state.SkipWithError(scene_status.error().message);
+        return;
+    }
+    const auto acceleration = create_embree_accel_backend(*scene);
+    if (!acceleration) {
+        state.SkipWithError(acceleration.error().message);
+        return;
+    }
+    const auto light_sampler =
+        renderer::LightSampler::create_uniform((*scene)->mesh_area_lights().size());
+    if (!light_sampler) {
+        state.SkipWithError(light_sampler.error().message);
+        return;
+    }
+    const auto camera_frame = make_camera_frame();
+    if (!camera_frame) {
+        state.SkipWithError(camera_frame.error().message);
+        return;
+    }
+    const auto camera = renderer::PinholeCamera::create(
+        renderer::Point3{.z = 4.0F}, *camera_frame, ImageExtent, 0.70F, 0.0F,
+        std::numeric_limits<renderer::TransportScalar>::infinity(), renderer::AllRayVisibility,
+        renderer::VacuumMedium);
+    if (!camera) {
+        state.SkipWithError(camera.error().message);
+        return;
+    }
+    const auto scheduler = renderer::CpuWavefrontScheduler::create(CpuWavefrontWorkerCount);
+    if (!scheduler) {
+        state.SkipWithError(scheduler.error().message);
+        return;
+    }
+    const auto initial_state = renderer::PathState::create_initial(
+        (*scene)->spectral_environment()->wavelengths, renderer::VacuumMedium);
+    if (!initial_state) {
+        state.SkipWithError(initial_state.error().message);
+        return;
+    }
+    const auto independent_sampler = renderer::IndependentSampler{ImageSeeds.front()};
+    const auto path_count =
+        static_cast<std::size_t>(ImageExtent.width) * static_cast<std::size_t>(ImageExtent.height);
+    auto inputs = std::vector<CpuWavefrontMisPathInput>{};
+    inputs.reserve(path_count);
+    for (auto y = std::uint32_t{}; y < ImageExtent.height; ++y) {
+        for (auto x = std::uint32_t{}; x < ImageExtent.width; ++x) {
+            const auto index = renderer::PixelSampleIndex{
+                .pixel_x = x,
+                .pixel_y = y,
+                .sample_index = 0U,
+                .seed = ImageSeeds.front(),
+            };
+            const auto ray =
+                camera->generate_primary_ray(index, renderer::PixelJitterMode::uniform, PathTime);
+            if (!ray) {
+                state.SkipWithError(ray.error().message);
+                return;
+            }
+            inputs.push_back(CpuWavefrontMisPathInput{
+                .primary_ray = *ray,
+                .initial_state = *initial_state,
+                .sample = independent_sampler.make_stream(x, y, 0U).index(),
+            });
+        }
+    }
+
+    auto latest_report = std::optional<CpuWavefrontMisReport>{};
+    for (auto _ : state) {
+        static_cast<void>(_);
+        const auto traced = trace_cpu_wavefront_mis(
+            inputs, *scheduler, **acceleration, *light_sampler, renderer::MisHeuristic::power,
+            renderer::PathDepthLimits{.diffuse = 5U}, renderer::RussianRoulettePolicy::disabled());
+        if (!traced) {
+            state.SkipWithError(traced.error().message);
+            return;
+        }
+        if (traced->paths.size() != inputs.size() || traced->report.path_count != inputs.size() ||
+            traced->report.schema_version != CurrentCpuWavefrontMisReportSchemaVersion ||
+            traced->report.configured_workers != scheduler->worker_count()) {
+            state.SkipWithError(
+                "CPU wavefront queue statistics received an inconsistent transport report.");
+            return;
+        }
+        latest_report = traced->report;
+        benchmark::DoNotOptimize(traced->paths.data());
+        benchmark::ClobberMemory();
+    }
+    if (!latest_report) {
+        state.SkipWithError("CPU wavefront queue statistics produced no report.");
+        return;
+    }
+
+    const auto statistics = std::array{
+        &latest_report->queue_statistics.camera,       &latest_report->queue_statistics.ray,
+        &latest_report->queue_statistics.hit,          &latest_report->queue_statistics.miss,
+        &latest_report->queue_statistics.shade,        &latest_report->queue_statistics.shadow,
+        &latest_report->queue_statistics.continuation,
+    };
+    auto total_stage_wall_nanoseconds = std::uint64_t{};
+    for (const auto* const queue : statistics) {
+        if (queue->stage_wall_nanoseconds >
+            std::numeric_limits<std::uint64_t>::max() - total_stage_wall_nanoseconds) {
+            state.SkipWithError("CPU wavefront benchmark stage-time sum is not representable.");
+            return;
+        }
+        total_stage_wall_nanoseconds += queue->stage_wall_nanoseconds;
+    }
+
+    state.counters["report_schema_version"] = static_cast<double>(latest_report->schema_version);
+    state.counters["configured_workers"] = static_cast<double>(latest_report->configured_workers);
+    state.counters["path_count"] = static_cast<double>(latest_report->path_count);
+    state.counters["closure_samples"] = static_cast<double>(latest_report->closure_samples);
+    state.counters["light_samples"] = static_cast<double>(latest_report->light_samples);
+    state.counters["shadow_queries"] = static_cast<double>(latest_report->shadow_queries);
+    state.counters["total_stage_wall_nanoseconds"] =
+        static_cast<double>(total_stage_wall_nanoseconds);
+    record_queue_statistics_counter(state, "camera", latest_report->queue_statistics.camera);
+    record_queue_statistics_counter(state, "ray", latest_report->queue_statistics.ray);
+    record_queue_statistics_counter(state, "hit", latest_report->queue_statistics.hit);
+    record_queue_statistics_counter(state, "miss", latest_report->queue_statistics.miss);
+    record_queue_statistics_counter(state, "shade", latest_report->queue_statistics.shade);
+    record_queue_statistics_counter(state, "shadow", latest_report->queue_statistics.shadow);
+    record_queue_statistics_counter(state, "continuation",
+                                    latest_report->queue_statistics.continuation);
+}
+
 void cornell_power_mis_convergence(benchmark::State& state) {
     const auto scene = make_cornell_scene();
     if (!scene) {
@@ -1145,6 +1293,7 @@ void cornell_power_mis_convergence(benchmark::State& state) {
 }
 
 BENCHMARK(cornell_power_mis_convergence);
+BENCHMARK(cornell_wavefront_queue_statistics);
 
 } // namespace
 } // namespace blackframe::engine

@@ -339,6 +339,76 @@ trace_scalar_batch(const std::span<const CpuWavefrontMisPathInput> inputs,
     return paths;
 }
 
+struct ExpectedQueueStatistics final {
+    renderer::WavefrontQueueKind kind;
+    std::uint64_t capacity;
+    std::uint64_t peak_size;
+    std::uint64_t dispatch_count;
+    std::uint64_t input_lanes;
+};
+
+[[nodiscard]] constexpr std::array<const CpuWavefrontMisQueueStatistics*, 7U>
+queue_statistics_in_stage_order(const CpuWavefrontMisQueueStatisticsSet& statistics) noexcept {
+    return {
+        &statistics.camera, &statistics.ray,    &statistics.hit,          &statistics.miss,
+        &statistics.shade,  &statistics.shadow, &statistics.continuation,
+    };
+}
+
+[[nodiscard]] constexpr std::array<std::uint64_t, 7U>
+stage_lanes_in_stage_order(const CpuWavefrontMisStageLaneCounts& stage_lanes) noexcept {
+    return {
+        stage_lanes.camera, stage_lanes.ray,    stage_lanes.hit,          stage_lanes.miss,
+        stage_lanes.shade,  stage_lanes.shadow, stage_lanes.continuation,
+    };
+}
+
+void expect_queue_statistics(const CpuWavefrontMisReport& report,
+                             const std::array<ExpectedQueueStatistics, 7U>& expected) {
+    const auto actual = queue_statistics_in_stage_order(report.queue_statistics);
+    const auto stage_lanes = stage_lanes_in_stage_order(report.stage_lanes);
+    for (auto index = std::size_t{}; index < actual.size(); ++index) {
+        SCOPED_TRACE(std::string{renderer::wavefront_queue_kind_name(expected[index].kind)});
+        EXPECT_EQ(actual[index]->kind, expected[index].kind);
+        EXPECT_EQ(actual[index]->capacity, expected[index].capacity);
+        EXPECT_EQ(actual[index]->peak_size, expected[index].peak_size);
+        EXPECT_EQ(actual[index]->dispatch_count, expected[index].dispatch_count);
+        EXPECT_EQ(actual[index]->input_lanes, expected[index].input_lanes);
+        EXPECT_EQ(actual[index]->input_lanes, stage_lanes[index]);
+        EXPECT_EQ(actual[index]->overflow_attempts, 0U);
+        EXPECT_EQ(actual[index]->rejected_lanes, 0U);
+
+        const auto peak_occupancy = actual[index]->peak_occupancy();
+        const auto mean_occupancy = actual[index]->mean_occupancy();
+        EXPECT_TRUE(std::isfinite(peak_occupancy));
+        EXPECT_GE(peak_occupancy, 0.0);
+        EXPECT_LE(peak_occupancy, 1.0);
+        EXPECT_TRUE(std::isfinite(mean_occupancy));
+        EXPECT_GE(mean_occupancy, 0.0);
+        EXPECT_LE(mean_occupancy, 1.0);
+    }
+}
+
+void expect_queue_statistics_structurally_equal(const CpuWavefrontMisQueueStatisticsSet& expected,
+                                                const CpuWavefrontMisQueueStatisticsSet& actual) {
+    const auto expected_stages = queue_statistics_in_stage_order(expected);
+    const auto actual_stages = queue_statistics_in_stage_order(actual);
+    for (auto index = std::size_t{}; index < expected_stages.size(); ++index) {
+        SCOPED_TRACE(
+            std::string{renderer::wavefront_queue_kind_name(expected_stages[index]->kind)});
+        EXPECT_EQ(actual_stages[index]->kind, expected_stages[index]->kind);
+        EXPECT_EQ(actual_stages[index]->capacity, expected_stages[index]->capacity);
+        EXPECT_EQ(actual_stages[index]->peak_size, expected_stages[index]->peak_size);
+        EXPECT_EQ(actual_stages[index]->dispatch_count, expected_stages[index]->dispatch_count);
+        EXPECT_EQ(actual_stages[index]->input_lanes, expected_stages[index]->input_lanes);
+        EXPECT_EQ(actual_stages[index]->overflow_attempts,
+                  expected_stages[index]->overflow_attempts);
+        EXPECT_EQ(actual_stages[index]->rejected_lanes, expected_stages[index]->rejected_lanes);
+        EXPECT_EQ(actual_stages[index]->peak_occupancy(), expected_stages[index]->peak_occupancy());
+        EXPECT_EQ(actual_stages[index]->mean_occupancy(), expected_stages[index]->mean_occupancy());
+    }
+}
+
 class WavefrontMisTransportTest : public testing::TestWithParam<renderer::MisHeuristic> {};
 
 TEST_P(WavefrontMisTransportTest, MatchesAnalyticScalarAndIsIdenticalWithOneOrManyThreads) {
@@ -396,13 +466,31 @@ TEST_P(WavefrontMisTransportTest, MatchesAnalyticScalarAndIsIdenticalWithOneOrMa
         .shadow = lane_count,
         .continuation = lane_count,
     };
+    const auto expected_queue_statistics = std::array{
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::camera, lane_count, lane_count, 1U,
+                                expected_stages.camera},
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::ray, lane_count, lane_count, 2U,
+                                expected_stages.ray},
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::hit, lane_count, lane_count, 2U,
+                                expected_stages.hit},
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::miss, lane_count, 0U, 0U,
+                                expected_stages.miss},
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::shade, lane_count, lane_count, 2U,
+                                expected_stages.shade},
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::shadow, lane_count, lane_count, 1U,
+                                expected_stages.shadow},
+        ExpectedQueueStatistics{renderer::WavefrontQueueKind::continuation, lane_count, lane_count,
+                                1U, expected_stages.continuation},
+    };
     for (const auto* const report : std::array{&single->report, &parallel->report}) {
+        EXPECT_EQ(report->schema_version, 2U);
         EXPECT_EQ(report->schema_version, CurrentCpuWavefrontMisReportSchemaVersion);
         EXPECT_EQ(report->path_count, PathCount);
         EXPECT_EQ(report->stage_lanes, expected_stages);
         EXPECT_EQ(report->closure_samples, lane_count);
         EXPECT_EQ(report->light_samples, lane_count);
         EXPECT_EQ(report->shadow_queries, lane_count);
+        expect_queue_statistics(*report, expected_queue_statistics);
     }
     EXPECT_EQ(single->report.configured_workers, 1U);
     EXPECT_EQ(parallel->report.configured_workers, 4U);
@@ -410,6 +498,8 @@ TEST_P(WavefrontMisTransportTest, MatchesAnalyticScalarAndIsIdenticalWithOneOrMa
     EXPECT_EQ(single->report.closure_samples, parallel->report.closure_samples);
     EXPECT_EQ(single->report.light_samples, parallel->report.light_samples);
     EXPECT_EQ(single->report.shadow_queries, parallel->report.shadow_queries);
+    expect_queue_statistics_structurally_equal(single->report.queue_statistics,
+                                               parallel->report.queue_statistics);
 }
 
 INSTANTIATE_TEST_SUITE_P(BalanceAndPower, WavefrontMisTransportTest,
@@ -419,6 +509,79 @@ INSTANTIATE_TEST_SUITE_P(BalanceAndPower, WavefrontMisTransportTest,
                              return parameter.param == renderer::MisHeuristic::balance ? "Balance"
                                                                                        : "Power";
                          });
+
+TEST(WavefrontMisTransportQueueTest, ReportsCanonicalZeroStatisticsForAnEmptyBatch) {
+    const auto scene = make_wavefront_scene();
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    const auto sampler = renderer::LightSampler::create_uniform(1U);
+    const auto backend = create_embree_accel_backend(*scene);
+    const auto scheduler = renderer::CpuWavefrontScheduler::create(4U);
+    ASSERT_TRUE(sampler.has_value()) << sampler.error().message;
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+    ASSERT_TRUE(scheduler.has_value()) << scheduler.error().message;
+
+    const auto batch =
+        trace_cpu_wavefront_mis(std::span<const CpuWavefrontMisPathInput>{}, *scheduler, **backend,
+                                *sampler, renderer::MisHeuristic::power, OneDiffuseBounce,
+                                renderer::RussianRoulettePolicy::disabled());
+    ASSERT_TRUE(batch.has_value()) << batch.error().message;
+    EXPECT_TRUE(batch->paths.empty());
+    EXPECT_EQ(batch->report.schema_version, 2U);
+    EXPECT_EQ(batch->report.schema_version, CurrentCpuWavefrontMisReportSchemaVersion);
+    EXPECT_EQ(batch->report.configured_workers, 4U);
+    EXPECT_EQ(batch->report.path_count, 0U);
+    EXPECT_EQ(batch->report.stage_lanes, CpuWavefrontMisStageLaneCounts{});
+    EXPECT_EQ(batch->report.closure_samples, 0U);
+    EXPECT_EQ(batch->report.light_samples, 0U);
+    EXPECT_EQ(batch->report.shadow_queries, 0U);
+
+    constexpr auto expected_kinds = std::array{
+        renderer::WavefrontQueueKind::camera,       renderer::WavefrontQueueKind::ray,
+        renderer::WavefrontQueueKind::hit,          renderer::WavefrontQueueKind::miss,
+        renderer::WavefrontQueueKind::shade,        renderer::WavefrontQueueKind::shadow,
+        renderer::WavefrontQueueKind::continuation,
+    };
+    const auto statistics = queue_statistics_in_stage_order(batch->report.queue_statistics);
+    for (auto index = std::size_t{}; index < statistics.size(); ++index) {
+        SCOPED_TRACE(std::string{renderer::wavefront_queue_kind_name(expected_kinds[index])});
+        EXPECT_EQ(statistics[index]->kind, expected_kinds[index]);
+        EXPECT_EQ(statistics[index]->capacity, 0U);
+        EXPECT_EQ(statistics[index]->peak_size, 0U);
+        EXPECT_EQ(statistics[index]->dispatch_count, 0U);
+        EXPECT_EQ(statistics[index]->input_lanes, 0U);
+        EXPECT_EQ(statistics[index]->overflow_attempts, 0U);
+        EXPECT_EQ(statistics[index]->rejected_lanes, 0U);
+        EXPECT_EQ(statistics[index]->stage_wall_nanoseconds, 0U);
+        EXPECT_EQ(statistics[index]->peak_occupancy(), 0.0);
+        EXPECT_EQ(statistics[index]->mean_occupancy(), 0.0);
+    }
+}
+
+TEST(WavefrontMisTransportQueueTest, ExcludesOnlyStageTimingFromDeterministicReportEquality) {
+    auto first = CpuWavefrontMisReport{
+        .schema_version = CurrentCpuWavefrontMisReportSchemaVersion,
+        .configured_workers = 4U,
+        .path_count = 8U,
+        .queue_statistics =
+            CpuWavefrontMisQueueStatisticsSet{
+                .ray =
+                    CpuWavefrontMisQueueStatistics{
+                        .kind = renderer::WavefrontQueueKind::ray,
+                        .capacity = 8U,
+                        .peak_size = 7U,
+                        .dispatch_count = 2U,
+                        .input_lanes = 11U,
+                        .stage_wall_nanoseconds = 100U,
+                    },
+            },
+    };
+    auto replay = first;
+    replay.queue_statistics.ray.stage_wall_nanoseconds = 900U;
+    EXPECT_EQ(replay, first);
+
+    replay.queue_statistics.ray.rejected_lanes = 1U;
+    EXPECT_NE(replay, first);
+}
 
 TEST(WavefrontMisTransportQueueTest, PreservesPrimaryMissEnvironmentParityWithOneOrManyThreads) {
     constexpr auto environment_radiance = renderer::TransportScalar{0.75F};

@@ -51,6 +51,16 @@ if(BUILD_TESTING)
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/ValidateConvergenceBenchmarkJson.cmake"
     )
+    add_test(
+        NAME Blackframe.Benchmarks.CornellWavefrontQueueStatistics.Json
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DBENCHMARK_EXECUTABLE=$<TARGET_FILE:BlackframeRenderBenchmarks>"
+            "-DBINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
+            "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/wavefront_queue_statistics.json"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/ValidateWavefrontQueueStatisticsJson.cmake"
+    )
     set_tests_properties(
         Blackframe.Executables.RenderBenchmarks.Help
         PROPERTIES
@@ -68,5 +78,11 @@ if(BUILD_TESTING)
         PROPERTIES
             LABELS "regression;nightly;cpu"
             TIMEOUT 1800
+    )
+    set_tests_properties(
+        Blackframe.Benchmarks.CornellWavefrontQueueStatistics.Json
+        PROPERTIES
+            LABELS "regression;cpu"
+            TIMEOUT 120
     )
 endif()

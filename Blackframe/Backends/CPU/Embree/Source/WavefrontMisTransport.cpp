@@ -10,6 +10,7 @@
 #include <Blackframe/Renderer/ShadowRay.hpp>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
@@ -27,11 +28,29 @@
 namespace blackframe::engine {
 namespace {
 
+using StageClock = std::chrono::steady_clock;
+
+static_assert(StageClock::is_steady);
+
 [[nodiscard]] core::Error wavefront_error(const core::StatusCode code, std::string message) {
     return core::Error{
         .code = code,
         .message = std::move(message),
     };
+}
+
+[[nodiscard]] core::Error
+queue_overflow_error(const renderer::WavefrontQueueKind kind, const std::size_t size,
+                     const std::size_t requested_lanes, const std::size_t capacity,
+                     const std::uint64_t overflow_attempts, const std::uint64_t rejected_lanes) {
+    return wavefront_error(core::StatusCode::resource_exhausted,
+                           "The " + std::string{renderer::wavefront_queue_kind_name(kind)} +
+                               " CPU wavefront queue cannot append " +
+                               std::to_string(requested_lanes) + " lane(s) at size " +
+                               std::to_string(size) + " with capacity " + std::to_string(capacity) +
+                               "; overflow_attempts=" + std::to_string(overflow_attempts) +
+                               ", rejected_lanes=" + std::to_string(rejected_lanes) +
+                               ". The batch was aborted without resize or fallback.");
 }
 
 [[nodiscard]] bool is_black(const renderer::TransportSpectrum& spectrum) noexcept {
@@ -157,6 +176,103 @@ struct RuntimePath final {
     std::uint64_t light_samples{};
     std::uint64_t shadow_queries{};
 };
+
+[[nodiscard]] constexpr CpuWavefrontMisQueueStatistics
+initial_queue_statistics(const renderer::WavefrontQueueKind kind,
+                         const std::uint64_t capacity) noexcept {
+    return CpuWavefrontMisQueueStatistics{
+        .kind = kind,
+        .capacity = capacity,
+    };
+}
+
+[[nodiscard]] constexpr CpuWavefrontMisQueueStatisticsSet
+initial_queue_statistics_set(const std::uint64_t capacity) noexcept {
+    return CpuWavefrontMisQueueStatisticsSet{
+        .camera = initial_queue_statistics(renderer::WavefrontQueueKind::camera, capacity),
+        .ray = initial_queue_statistics(renderer::WavefrontQueueKind::ray, capacity),
+        .hit = initial_queue_statistics(renderer::WavefrontQueueKind::hit, capacity),
+        .miss = initial_queue_statistics(renderer::WavefrontQueueKind::miss, capacity),
+        .shade = initial_queue_statistics(renderer::WavefrontQueueKind::shade, capacity),
+        .shadow = initial_queue_statistics(renderer::WavefrontQueueKind::shadow, capacity),
+        .continuation =
+            initial_queue_statistics(renderer::WavefrontQueueKind::continuation, capacity),
+    };
+}
+
+[[nodiscard]] core::Status add_statistics_counter(std::uint64_t& destination,
+                                                  const std::uint64_t increment,
+                                                  const char* const failure) {
+    if (increment > std::numeric_limits<std::uint64_t>::max() - destination) {
+        return std::unexpected(wavefront_error(core::StatusCode::resource_exhausted, failure));
+    }
+    destination += increment;
+    return {};
+}
+
+[[nodiscard]] core::Status record_queue_size(CpuWavefrontMisQueueStatistics& statistics,
+                                             const std::size_t size) {
+    const auto measured_size = static_cast<std::uint64_t>(size);
+    if (measured_size > statistics.capacity) {
+        return std::unexpected(wavefront_error(
+            core::StatusCode::internal_error,
+            "A CPU wavefront queue size exceeded its declared statistics capacity."));
+    }
+    statistics.peak_size = std::max(statistics.peak_size, measured_size);
+    return {};
+}
+
+[[nodiscard]] core::Status record_queue_overflow(CpuWavefrontMisQueueStatistics& statistics,
+                                                 const std::size_t rejected_lanes) {
+    const auto rejected = static_cast<std::uint64_t>(rejected_lanes);
+    if (statistics.overflow_attempts == std::numeric_limits<std::uint64_t>::max() ||
+        rejected > std::numeric_limits<std::uint64_t>::max() - statistics.rejected_lanes) {
+        return std::unexpected(
+            wavefront_error(core::StatusCode::resource_exhausted,
+                            "CPU wavefront queue-overflow accounting is not representable."));
+    }
+    ++statistics.overflow_attempts;
+    statistics.rejected_lanes += rejected;
+    return {};
+}
+
+[[nodiscard]] core::Result<std::uint64_t> stage_wall_nanoseconds(const StageClock::time_point begin,
+                                                                 const StageClock::time_point end) {
+    if (end < begin) {
+        return std::unexpected(wavefront_error(
+            core::StatusCode::internal_error,
+            "The steady clock moved backwards while measuring a CPU wavefront stage."));
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count();
+    if (elapsed < 0) {
+        return std::unexpected(
+            wavefront_error(core::StatusCode::internal_error,
+                            "A CPU wavefront stage produced a negative wall-clock duration."));
+    }
+    return static_cast<std::uint64_t>(elapsed);
+}
+
+[[nodiscard]] core::Status record_stage_dispatch(CpuWavefrontMisQueueStatistics& statistics,
+                                                 const std::size_t input_lanes,
+                                                 const std::uint64_t elapsed_nanoseconds) {
+    if (auto status = record_queue_size(statistics, input_lanes); !status) {
+        return status;
+    }
+    if (auto status =
+            add_statistics_counter(statistics.dispatch_count, 1U,
+                                   "CPU wavefront queue-dispatch accounting is not representable.");
+        !status) {
+        return status;
+    }
+    if (auto status =
+            add_statistics_counter(statistics.input_lanes, static_cast<std::uint64_t>(input_lanes),
+                                   "CPU wavefront queue-size accounting is not representable.");
+        !status) {
+        return status;
+    }
+    return add_statistics_counter(statistics.stage_wall_nanoseconds, elapsed_nanoseconds,
+                                  "CPU wavefront stage-time accounting is not representable.");
+}
 
 [[nodiscard]] core::Status initialize_runtime_path(RuntimePath& runtime,
                                                    const CpuWavefrontMisPathInput& input,
@@ -941,26 +1057,105 @@ validate_inputs(const std::span<const CpuWavefrontMisPathInput> inputs,
     return {};
 }
 
-template <typename Queue>
-[[nodiscard]] core::Status push_slot(Queue& queue, const renderer::WavefrontPathSlot slot) {
-    if (queue.push(slot) != renderer::WavefrontQueuePushStatus::pushed) {
-        return std::unexpected(
-            wavefront_error(core::StatusCode::resource_exhausted,
-                            "A CPU wavefront stage queue exhausted its declared batch capacity."));
+[[nodiscard]] core::Status validate_queue_statistics(const CpuWavefrontMisReport& report) {
+    const auto expected_capacity = static_cast<std::uint64_t>(report.path_count);
+    const auto entries = std::array{
+        std::pair{&report.queue_statistics.camera, report.stage_lanes.camera},
+        std::pair{&report.queue_statistics.ray, report.stage_lanes.ray},
+        std::pair{&report.queue_statistics.hit, report.stage_lanes.hit},
+        std::pair{&report.queue_statistics.miss, report.stage_lanes.miss},
+        std::pair{&report.queue_statistics.shade, report.stage_lanes.shade},
+        std::pair{&report.queue_statistics.shadow, report.stage_lanes.shadow},
+        std::pair{&report.queue_statistics.continuation, report.stage_lanes.continuation},
+    };
+    constexpr auto expected_kinds = std::array{
+        renderer::WavefrontQueueKind::camera,       renderer::WavefrontQueueKind::ray,
+        renderer::WavefrontQueueKind::hit,          renderer::WavefrontQueueKind::miss,
+        renderer::WavefrontQueueKind::shade,        renderer::WavefrontQueueKind::shadow,
+        renderer::WavefrontQueueKind::continuation,
+    };
+    for (auto index = std::size_t{}; index < entries.size(); ++index) {
+        const auto& statistics = *entries[index].first;
+        const auto expected_lanes = entries[index].second;
+        if (statistics.kind != expected_kinds[index] || statistics.capacity != expected_capacity ||
+            statistics.peak_size > statistics.capacity ||
+            statistics.input_lanes != expected_lanes || statistics.overflow_attempts != 0U ||
+            statistics.rejected_lanes != 0U ||
+            (statistics.dispatch_count == 0U && statistics.input_lanes != 0U) ||
+            !std::isfinite(statistics.peak_occupancy()) ||
+            !std::isfinite(statistics.mean_occupancy()) || statistics.peak_occupancy() < 0.0 ||
+            statistics.peak_occupancy() > 1.0 || statistics.mean_occupancy() < 0.0 ||
+            statistics.mean_occupancy() > 1.0) {
+            return std::unexpected(wavefront_error(
+                core::StatusCode::internal_error,
+                "CPU wavefront queue statistics violate their successful-batch contract."));
+        }
     }
     return {};
 }
 
 template <typename Queue>
-[[nodiscard]] core::Status execute_queue(const renderer::CpuWavefrontScheduler& scheduler,
-                                         const std::size_t path_count, const Queue& queue,
-                                         const renderer::CpuWavefrontStageKernel& kernel,
-                                         CpuWavefrontMisStageLaneCounts& counts) {
+[[nodiscard]] core::Status push_slot(Queue& queue, CpuWavefrontMisQueueStatistics& statistics,
+                                     const renderer::WavefrontPathSlot slot) {
+    if (statistics.kind != Queue::kind()) {
+        return std::unexpected(
+            wavefront_error(core::StatusCode::internal_error,
+                            "CPU wavefront queue statistics were bound to the wrong stage."));
+    }
+    if (queue.push(slot) != renderer::WavefrontQueuePushStatus::pushed) {
+        if (auto status = record_queue_overflow(statistics, 1U); !status) {
+            return status;
+        }
+        return std::unexpected(queue_overflow_error(Queue::kind(), queue.size(), 1U,
+                                                    queue.capacity(), statistics.overflow_attempts,
+                                                    statistics.rejected_lanes));
+    }
+    return record_queue_size(statistics, queue.size());
+}
+
+template <typename Queue>
+[[nodiscard]] core::Status push_batch(Queue& queue, CpuWavefrontMisQueueStatistics& statistics,
+                                      const std::span<const renderer::WavefrontPathSlot> slots) {
+    if (statistics.kind != Queue::kind()) {
+        return std::unexpected(
+            wavefront_error(core::StatusCode::internal_error,
+                            "CPU wavefront queue statistics were bound to the wrong stage."));
+    }
+    if (queue.push_batch(slots) != renderer::WavefrontQueuePushStatus::pushed) {
+        if (auto status = record_queue_overflow(statistics, slots.size()); !status) {
+            return status;
+        }
+        return std::unexpected(queue_overflow_error(Queue::kind(), queue.size(), slots.size(),
+                                                    queue.capacity(), statistics.overflow_attempts,
+                                                    statistics.rejected_lanes));
+    }
+    return record_queue_size(statistics, queue.size());
+}
+
+template <typename Queue>
+[[nodiscard]] core::Status
+execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_t path_count,
+              const Queue& queue, const renderer::CpuWavefrontStageKernel& kernel,
+              CpuWavefrontMisStageLaneCounts& counts, CpuWavefrontMisQueueStatistics& statistics) {
+    if (statistics.kind != Queue::kind()) {
+        return std::unexpected(
+            wavefront_error(core::StatusCode::internal_error,
+                            "CPU wavefront dispatch statistics were bound to the wrong stage."));
+    }
+    const auto begin = StageClock::now();
     const auto report = scheduler.execute_stage(Queue::kind(), path_count, queue.entries(), kernel);
+    const auto end = StageClock::now();
     if (!report) {
         return std::unexpected(report.error());
     }
-    return add_stage_lanes(counts, Queue::kind(), report->input_lanes);
+    const auto elapsed = stage_wall_nanoseconds(begin, end);
+    if (!elapsed) {
+        return std::unexpected(elapsed.error());
+    }
+    if (auto status = add_stage_lanes(counts, Queue::kind(), report->input_lanes); !status) {
+        return status;
+    }
+    return record_stage_dispatch(statistics, report->input_lanes, *elapsed);
 }
 
 [[nodiscard]] core::Result<CpuWavefrontMisBatch> trace_cpu_wavefront_mis_impl(
@@ -980,8 +1175,12 @@ template <typename Queue>
         .schema_version = CurrentCpuWavefrontMisReportSchemaVersion,
         .configured_workers = scheduler.worker_count(),
         .path_count = inputs.size(),
+        .queue_statistics = initial_queue_statistics_set(static_cast<std::uint64_t>(inputs.size())),
     };
     if (inputs.empty()) {
+        if (auto status = validate_queue_statistics(report); !status) {
+            return std::unexpected(status.error());
+        }
         return CpuWavefrontMisBatch{.paths = {}, .report = report};
     }
 
@@ -1037,8 +1236,9 @@ template <typename Queue>
     auto shadow = std::move(*shadow_created);
     auto continuation = std::move(*continuation_created);
     for (auto index = std::size_t{}; index < inputs.size(); ++index) {
-        if (auto status = push_slot(
-                camera, renderer::WavefrontPathSlot{.value = static_cast<std::uint32_t>(index)});
+        if (auto status =
+                push_slot(camera, report.queue_statistics.camera,
+                          renderer::WavefrontPathSlot{.value = static_cast<std::uint32_t>(index)});
             !status) {
             return std::unexpected(status.error());
         }
@@ -1054,14 +1254,12 @@ template <typename Queue>
                 }
                 return initialize_runtime_path(runtimes[slot], inputs[slot], *state);
             }},
-            report.stage_lanes);
+            report.stage_lanes, report.queue_statistics.camera);
         !status) {
         return std::unexpected(status.error());
     }
-    if (ray.push_batch(camera.entries()) != renderer::WavefrontQueuePushStatus::pushed) {
-        return std::unexpected(
-            wavefront_error(core::StatusCode::resource_exhausted,
-                            "The CPU wavefront ray queue rejected the validated camera batch."));
+    if (auto status = push_batch(ray, report.queue_statistics.ray, camera.entries()); !status) {
+        return std::unexpected(status.error());
     }
     camera.clear();
 
@@ -1094,17 +1292,17 @@ template <typename Queue>
                     runtime.surface.reset();
                     return core::Status{};
                 }},
-                report.stage_lanes);
+                report.stage_lanes, report.queue_statistics.ray);
             !status) {
             return std::unexpected(status.error());
         }
         for (const auto slot : ray.entries()) {
             if (runtimes[slot.value].hit) {
-                if (auto status = push_slot(hit, slot); !status) {
+                if (auto status = push_slot(hit, report.queue_statistics.hit, slot); !status) {
                     return std::unexpected(status.error());
                 }
             } else {
-                if (auto status = push_slot(miss, slot); !status) {
+                if (auto status = push_slot(miss, report.queue_statistics.miss, slot); !status) {
                     return std::unexpected(status.error());
                 }
             }
@@ -1136,7 +1334,7 @@ template <typename Queue>
                                            renderer::BsdfOnlyPathTermination::escaped_environment,
                                            renderer::ScatteringLobe::none);
                     }},
-                    report.stage_lanes);
+                    report.stage_lanes, report.queue_statistics.miss);
                 !status) {
                 return std::unexpected(status.error());
             }
@@ -1163,14 +1361,13 @@ template <typename Queue>
                         runtime.surface = *resolved;
                         return core::Status{};
                     }},
-                    report.stage_lanes);
+                    report.stage_lanes, report.queue_statistics.hit);
                 !status) {
                 return std::unexpected(status.error());
             }
-            if (shade.push_batch(hit.entries()) != renderer::WavefrontQueuePushStatus::pushed) {
-                return std::unexpected(wavefront_error(
-                    core::StatusCode::resource_exhausted,
-                    "The CPU wavefront shade queue rejected a validated hit batch."));
+            if (auto status = push_batch(shade, report.queue_statistics.shade, hit.entries());
+                !status) {
+                return std::unexpected(status.error());
             }
             hit.clear();
         }
@@ -1184,18 +1381,21 @@ template <typename Queue>
                         return shade_path(runtimes[lane.path_slot.value], direct_lighting,
                                           depth_limits, roulette_policy);
                     }},
-                    report.stage_lanes);
+                    report.stage_lanes, report.queue_statistics.shade);
                 !status) {
                 return std::unexpected(status.error());
             }
             for (const auto slot : shade.entries()) {
                 auto& runtime = runtimes[slot.value];
                 if (runtime.pending_shadow) {
-                    if (auto status = push_slot(shadow, slot); !status) {
+                    if (auto status = push_slot(shadow, report.queue_statistics.shadow, slot);
+                        !status) {
                         return std::unexpected(status.error());
                     }
                 } else if (runtime.continuation_requested) {
-                    if (auto status = push_slot(continuation, slot); !status) {
+                    if (auto status =
+                            push_slot(continuation, report.queue_statistics.continuation, slot);
+                        !status) {
                         return std::unexpected(status.error());
                     }
                 } else if (runtime.pending_termination) {
@@ -1255,14 +1455,16 @@ template <typename Queue>
                         runtime.pending_shadow.reset();
                         return core::Status{};
                     }},
-                    report.stage_lanes);
+                    report.stage_lanes, report.queue_statistics.shadow);
                 !status) {
                 return std::unexpected(status.error());
             }
             for (const auto slot : shadow.entries()) {
                 auto& runtime = runtimes[slot.value];
                 if (runtime.continuation_requested) {
-                    if (auto status = push_slot(continuation, slot); !status) {
+                    if (auto status =
+                            push_slot(continuation, report.queue_statistics.continuation, slot);
+                        !status) {
                         return std::unexpected(status.error());
                     }
                 } else if (runtime.pending_termination) {
@@ -1304,15 +1506,13 @@ template <typename Queue>
                         runtime.surface.reset();
                         return core::Status{};
                     }},
-                    report.stage_lanes);
+                    report.stage_lanes, report.queue_statistics.continuation);
                 !status) {
                 return std::unexpected(status.error());
             }
-            if (ray.push_batch(continuation.entries()) !=
-                renderer::WavefrontQueuePushStatus::pushed) {
-                return std::unexpected(
-                    wavefront_error(core::StatusCode::resource_exhausted,
-                                    "The CPU wavefront ray queue rejected a continuation batch."));
+            if (auto status = push_batch(ray, report.queue_statistics.ray, continuation.entries());
+                !status) {
+                return std::unexpected(status.error());
             }
             continuation.clear();
         }
@@ -1340,6 +1540,9 @@ template <typename Queue>
         report.light_samples += runtime.light_samples;
         report.shadow_queries += runtime.shadow_queries;
         paths.push_back(std::move(*runtime.result));
+    }
+    if (auto status = validate_queue_statistics(report); !status) {
+        return std::unexpected(status.error());
     }
     return CpuWavefrontMisBatch{.paths = std::move(paths), .report = report};
 }

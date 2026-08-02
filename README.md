@@ -89,9 +89,13 @@ silently selecting another path.
   BSDF-hit contributions. Invalid path slots, queue overflow, incomplete sampling state,
   unsupported media or heuristics, worker failures, and non-Embree acceleration are explicit batch
   errors; the implementation never retries through another backend or transport loop. The scalar
-  scene path remains the independent readable oracle. Other implemented closure models that are
-  not yet representable by the FrameScene material schema remain standalone and are not substituted
-  for Lambertian scene materials.
+  scene path remains the independent readable oracle. Its versioned CPU report records, for each of
+  the seven queues, fixed capacity, peak size, dispatch and lane counts, derived peak and mean
+  occupancy, rejected overflow attempts, and accumulated wall-clock nanoseconds around scheduler
+  validation, worker execution, and the completion barrier. Timings are observational and excluded
+  from deterministic comparisons. Other implemented closure models that are not yet representable
+  by the FrameScene material schema remain standalone and are not substituted for Lambertian scene
+  materials.
 - **Shading normals:** scalar surface transport builds closure frames and evaluates their cosine and
   directional PDF from `Ns`, while `Ng` remains authoritative for sidedness, visibility, ray
   offsets, emission orientation, and area/solid-angle Jacobians. Directions on which the two normals
@@ -200,6 +204,9 @@ silently selecting another path.
   records the wavefront worker count, median and median absolute deviation for time-to-quality and
   final error, checks the worst seed against fixed MSE/PSNR targets, and validates coarse
   linear-image semantics; a missed target is an explicit benchmark failure.
+  A separate one-sample Cornell benchmark emits a machine-readable queue report for 16,384 primary
+  paths and validates all seven capacities, peaks, occupations, overflow counters, flow identities,
+  and per-stage wall times without imposing a fragile performance threshold.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
