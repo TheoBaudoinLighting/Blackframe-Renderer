@@ -177,9 +177,9 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_record() {
     const auto relative_k = SampledSpectrum<TransportSpectrumSampleCount, Scalar>{
         .values = {Scalar{3}, Scalar{2}, Scalar{1}, Scalar{4}},
     };
-    ASSERT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
-                                                    Scalar{0.75}),
-              ClosureAppendStatus::appended);
+    ASSERT_EQ(
+        set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, Scalar{0.75}),
+        ClosureAppendStatus::appended);
     ASSERT_EQ(set.size(), 1U);
 
     const auto& closure = set.closures().front();
@@ -259,9 +259,9 @@ template <SpectrumScalar Scalar> void expect_invalid_rough_conductor_payloads_ar
     const auto coefficient = constant_spectrum(Scalar{0.5});
     const auto relative_eta = constant_spectrum(Scalar{1.5});
     const auto relative_k = constant_spectrum(Scalar{2});
-    ASSERT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
-                                                    Scalar{0.5}),
-              ClosureAppendStatus::appended);
+    ASSERT_EQ(
+        set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, Scalar{0.5}),
+        ClosureAppendStatus::appended);
     const auto original = object_bytes(set);
     const auto infinity = std::numeric_limits<Scalar>::infinity();
 
@@ -273,15 +273,15 @@ template <SpectrumScalar Scalar> void expect_invalid_rough_conductor_payloads_ar
     EXPECT_EQ(object_bytes(set), original);
     auto malformed_eta = relative_eta;
     malformed_eta[1] = Scalar{0};
-    EXPECT_EQ(set.append_rough_conductor_reflection(coefficient, malformed_eta, relative_k,
-                                                    Scalar{0.5}),
-              ClosureAppendStatus::invalid_payload);
+    EXPECT_EQ(
+        set.append_rough_conductor_reflection(coefficient, malformed_eta, relative_k, Scalar{0.5}),
+        ClosureAppendStatus::invalid_payload);
     EXPECT_EQ(object_bytes(set), original);
     auto malformed_k = relative_k;
     malformed_k[2] = -std::numeric_limits<Scalar>::denorm_min();
-    EXPECT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, malformed_k,
-                                                    Scalar{0.5}),
-              ClosureAppendStatus::invalid_payload);
+    EXPECT_EQ(
+        set.append_rough_conductor_reflection(coefficient, relative_eta, malformed_k, Scalar{0.5}),
+        ClosureAppendStatus::invalid_payload);
     EXPECT_EQ(object_bytes(set), original);
 
     for (const auto invalid :
@@ -301,9 +301,9 @@ template <SpectrumScalar Scalar> void expect_invalid_rough_conductor_payloads_ar
         EXPECT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, malformed_k,
                                                         Scalar{0.5}),
                   ClosureAppendStatus::invalid_payload);
-        EXPECT_EQ(set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
-                                                        invalid),
-                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(
+            set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, invalid),
+            ClosureAppendStatus::invalid_payload);
         EXPECT_EQ(object_bytes(set), original);
     }
     for (const auto invalid_alpha :

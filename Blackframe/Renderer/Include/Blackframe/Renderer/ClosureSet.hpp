@@ -90,8 +90,8 @@ template <SpectrumScalar Scalar>
 }
 
 template <SpectrumScalar Scalar>
-[[nodiscard]] bool valid_relative_k(
-    const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& relative_k) noexcept {
+[[nodiscard]] bool
+valid_relative_k(const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& relative_k) noexcept {
     for (const auto value : relative_k.values) {
         if (!std::isfinite(value) || value < Scalar{0}) {
             return false;
@@ -100,13 +100,12 @@ template <SpectrumScalar Scalar>
     return true;
 }
 
-template <SpectrumScalar Scalar>
-[[nodiscard]] bool valid_ggx_alpha(const Scalar alpha) noexcept {
+template <SpectrumScalar Scalar> [[nodiscard]] bool valid_ggx_alpha(const Scalar alpha) noexcept {
     if (!std::isfinite(alpha) || !(alpha > Scalar{0})) {
         return false;
     }
-    const auto maximum_alpha = std::sqrt(std::numeric_limits<Scalar>::max()) *
-                               std::sqrt(std::numbers::pi_v<Scalar>);
+    const auto maximum_alpha =
+        std::sqrt(std::numeric_limits<Scalar>::max()) * std::sqrt(std::numbers::pi_v<Scalar>);
     const auto minimum_alpha = Scalar{1} / maximum_alpha;
     return alpha >= minimum_alpha && alpha <= maximum_alpha;
 }
@@ -183,8 +182,7 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
     [[nodiscard]] ClosureAppendStatus
     append_rough_conductor_reflection(const spectrum_type coefficient,
                                       const spectrum_type relative_eta,
-                                      const spectrum_type relative_k,
-                                      const Scalar alpha) noexcept {
+                                      const spectrum_type relative_k, const Scalar alpha) noexcept {
         if (!closure_set_detail::valid_reflectance(coefficient) ||
             !closure_set_detail::valid_relative_eta(relative_eta) ||
             !closure_set_detail::valid_relative_k(relative_k) ||

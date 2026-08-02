@@ -397,8 +397,8 @@ rough_conductor_from_record(const ClosureT<Scalar>& closure) {
         return std::unexpected(invalid_closure_mixture(
             "A rough-conductor closure record has a non-zero reserved payload."));
     }
-    return RoughConductorReflectionT<Scalar>::create(
-        closure.weight, relative_eta, relative_k, closure.parameters[alpha_parameter]);
+    return RoughConductorReflectionT<Scalar>::create(closure.weight, relative_eta, relative_k,
+                                                     closure.parameters[alpha_parameter]);
 }
 
 template <SpectrumScalar Scalar>

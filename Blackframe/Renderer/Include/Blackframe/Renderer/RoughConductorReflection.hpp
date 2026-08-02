@@ -64,8 +64,8 @@ template <SpectrumScalar Scalar>
 }
 
 template <SpectrumScalar Scalar>
-[[nodiscard]] bool valid_relative_k(
-    const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& relative_k) noexcept {
+[[nodiscard]] bool
+valid_relative_k(const SampledSpectrum<TransportSpectrumSampleCount, Scalar>& relative_k) noexcept {
     for (const auto value : relative_k.values) {
         if (!std::isfinite(value) || value < Scalar{0}) {
             return false;
@@ -92,8 +92,7 @@ template <SpectrumScalar Scalar> struct ReflectionGeometryT final {
 
 template <SpectrumScalar Scalar>
 [[nodiscard]] core::Result<ReflectionGeometryT<Scalar>>
-reflection_geometry(const Vector3T<Scalar> outgoing_local,
-                    const Vector3T<Scalar> incoming_local) {
+reflection_geometry(const Vector3T<Scalar> outgoing_local, const Vector3T<Scalar> incoming_local) {
     const auto half_vector = Vector3T<Scalar>{
         .x = outgoing_local.x + incoming_local.x,
         .y = outgoing_local.y + incoming_local.y,
@@ -110,9 +109,8 @@ reflection_geometry(const Vector3T<Scalar> outgoing_local,
         .y = half_vector.y / length,
         .z = half_vector.z / length,
     };
-    if (!unit_local_direction(Vector3T<Scalar>{.x = microfacet_normal.x,
-                                               .y = microfacet_normal.y,
-                                               .z = microfacet_normal.z}) ||
+    if (!unit_local_direction(Vector3T<Scalar>{
+            .x = microfacet_normal.x, .y = microfacet_normal.y, .z = microfacet_normal.z}) ||
         !(microfacet_normal.z > Scalar{0})) {
         return std::unexpected(invalid_rough_conductor(
             "The rough-conductor reflection half-vector is not representable."));
@@ -123,8 +121,8 @@ reflection_geometry(const Vector3T<Scalar> outgoing_local,
     const auto half_angle_cosine = Scalar{0.5} * length;
     if (!std::isfinite(half_angle_cosine) || !(half_angle_cosine > Scalar{0}) ||
         half_angle_cosine > Scalar{1}) {
-        return std::unexpected(invalid_rough_conductor(
-            "The rough-conductor half-angle cosine is outside [0, 1]."));
+        return std::unexpected(
+            invalid_rough_conductor("The rough-conductor half-angle cosine is outside [0, 1]."));
     }
     return ReflectionGeometryT<Scalar>{
         .microfacet_normal = microfacet_normal,
@@ -203,13 +201,12 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
             return spectrum_type{};
         }
 
-        const auto geometry = rough_conductor_reflection_detail::reflection_geometry(
-            outgoing_local, incoming_local);
+        const auto geometry =
+            rough_conductor_reflection_detail::reflection_geometry(outgoing_local, incoming_local);
         if (!geometry) {
             return std::unexpected(geometry.error());
         }
-        const auto distribution =
-            microfacet_.normal_distribution(geometry->microfacet_normal);
+        const auto distribution = microfacet_.normal_distribution(geometry->microfacet_normal);
         if (!distribution) {
             return std::unexpected(distribution.error());
         }
@@ -217,16 +214,16 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
         if (!masking) {
             return std::unexpected(masking.error());
         }
-        const auto fresnel = conductor_fresnel(geometry->half_angle_cosine, relative_eta_,
-                                               relative_k_);
+        const auto fresnel =
+            conductor_fresnel(geometry->half_angle_cosine, relative_eta_, relative_k_);
         if (!fresnel) {
             return std::unexpected(fresnel.error());
         }
 
         const auto denominator = Scalar{4} * outgoing_local.z * incoming_local.z;
         const auto scale = (*distribution * *masking) / denominator;
-        if (!std::isfinite(denominator) || !(denominator > Scalar{0}) ||
-            !std::isfinite(scale) || !(scale > Scalar{0})) {
+        if (!std::isfinite(denominator) || !(denominator > Scalar{0}) || !std::isfinite(scale) ||
+            !(scale > Scalar{0})) {
             return std::unexpected(rough_conductor_reflection_detail::invalid_rough_conductor(
                 "The rough-conductor GGX reflection value is not representable."));
         }
@@ -235,9 +232,8 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
         for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
             const auto value = coefficient_[lane] * (*fresnel)[lane] * scale;
             if (!std::isfinite(value) || value < Scalar{0}) {
-                return std::unexpected(
-                    rough_conductor_reflection_detail::invalid_rough_conductor(
-                        "A rough-conductor spectral BRDF value is not representable."));
+                return std::unexpected(rough_conductor_reflection_detail::invalid_rough_conductor(
+                    "A rough-conductor spectral BRDF value is not representable."));
             }
             result[lane] = value;
         }
@@ -259,8 +255,8 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
             return result;
         }
 
-        const auto geometry = rough_conductor_reflection_detail::reflection_geometry(
-            outgoing_local, incoming_local);
+        const auto geometry =
+            rough_conductor_reflection_detail::reflection_geometry(outgoing_local, incoming_local);
         if (!geometry) {
             return std::unexpected(geometry.error());
         }
@@ -298,8 +294,7 @@ template <SpectrumScalar Scalar> class RoughConductorReflectionT final {
             return std::optional<sample_type>{};
         }
 
-        const auto half_angle_cosine =
-            dot(outgoing_local, (**visible_normal).microfacet_normal);
+        const auto half_angle_cosine = dot(outgoing_local, (**visible_normal).microfacet_normal);
         if (!std::isfinite(half_angle_cosine) || !(half_angle_cosine > Scalar{0}) ||
             half_angle_cosine > Scalar{1}) {
             return std::unexpected(rough_conductor_reflection_detail::invalid_rough_conductor(

@@ -411,8 +411,8 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     };
     constexpr auto alpha = Scalar{0.5};
     auto singleton_set = SetFor<Scalar>{};
-    ASSERT_EQ(singleton_set.append_rough_conductor_reflection(
-                  coefficient, relative_eta, relative_k, alpha),
+    ASSERT_EQ(singleton_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
+                                                              alpha),
               ClosureAppendStatus::appended);
     const auto singleton_probability = std::array{Scalar{1}};
     const auto singleton = MixtureFor<Scalar>::create(singleton_set, singleton_probability);
@@ -453,9 +453,9 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     auto mixed_set = SetFor<Scalar>{};
     ASSERT_EQ(mixed_set.append_lambertian_reflection(lambert_reflectance),
               ClosureAppendStatus::appended);
-    ASSERT_EQ(mixed_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k,
-                                                         alpha),
-              ClosureAppendStatus::appended);
+    ASSERT_EQ(
+        mixed_set.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, alpha),
+        ClosureAppendStatus::appended);
     const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
     const auto mixture = MixtureFor<Scalar>::create(mixed_set, probabilities);
     const auto lambert = ReflectionFor<Scalar>::create(lambert_reflectance);
@@ -475,10 +475,10 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
         expected_value[lane] = (*lambert_value)[lane] + (*direct_value)[lane];
     }
     expect_spectrum_near(*mixture_value, expected_value);
-    EXPECT_NEAR(static_cast<double>(mixture_pdf->value),
-                static_cast<double>(Scalar{0.25} * lambert_pdf->value +
-                                    Scalar{0.75} * direct_pdf->value),
-                AnalyticTolerance<Scalar>);
+    EXPECT_NEAR(
+        static_cast<double>(mixture_pdf->value),
+        static_cast<double>(Scalar{0.25} * lambert_pdf->value + Scalar{0.75} * direct_pdf->value),
+        AnalyticTolerance<Scalar>);
 
     const auto selected_conductor = mixture->sample(outgoing, Scalar{0.625}, canonical);
     const auto lambert_sample = lambert->sample(outgoing, canonical);
@@ -487,8 +487,7 @@ template <SpectrumScalar Scalar> void expect_rough_conductor_dispatch() {
     ASSERT_TRUE(lambert_sample.has_value());
     ASSERT_TRUE(lambert_sample->has_value());
     EXPECT_EQ((**selected_conductor).selected_closure, 1U);
-    EXPECT_EQ((**selected_conductor).lobes,
-              ScatteringLobe::glossy | ScatteringLobe::reflection);
+    EXPECT_EQ((**selected_conductor).lobes, ScatteringLobe::glossy | ScatteringLobe::reflection);
     EXPECT_EQ((**selected_conductor).selection_probability.value, Scalar{0.75});
     EXPECT_EQ((**selected_conductor).incoming_local, (**direct_sample).incoming_local);
     EXPECT_NE((**selected_conductor).incoming_local, (**lambert_sample).incoming_local);
