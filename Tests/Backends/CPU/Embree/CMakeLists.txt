@@ -205,6 +205,7 @@ endif()
 add_executable(
     BlackframeEmbreeCornellRegressionTests
     CornellFrameSceneIntegrationTest.cpp
+    CornellWavefrontParityTest.cpp
 )
 blackframe_set_target_role(BlackframeEmbreeCornellRegressionTests test)
 
@@ -246,4 +247,27 @@ gtest_discover_tests(
     PROPERTIES
         LABELS "unit;regression;cpu"
         TIMEOUT 120
+)
+
+add_test(
+    NAME Blackframe.EmbreeScalarWavefrontParity.Json
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DBINARY_DIRECTORY=${PROJECT_BINARY_DIR}"
+        "-DSOURCE_DIRECTORY=${PROJECT_SOURCE_DIR}"
+        "-DBUILD_CONFIGURATION=$<CONFIG>"
+        "-DEMBREE_ENABLED=${BLACKFRAME_ENABLE_EMBREE}"
+        "-DCUDA_ENABLED=${BLACKFRAME_ENABLE_CUDA}"
+        "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/reports/scalar-wavefront-parity.json"
+        "-DWAVEFRONT_TEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeWavefrontMisTests>"
+        "-DNEE_TEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeNeeRegressionTests>"
+        "-DVEACH_TEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeMisRegressionTests>"
+        "-DCORNELL_TEST_EXECUTABLE=$<TARGET_FILE:BlackframeEmbreeCornellRegressionTests>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/ValidateCpuWavefrontParityJson.cmake"
+)
+set_tests_properties(
+    Blackframe.EmbreeScalarWavefrontParity.Json
+    PROPERTIES
+        LABELS "regression;cpu"
+        TIMEOUT 180
 )

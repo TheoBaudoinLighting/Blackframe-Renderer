@@ -1,3 +1,5 @@
+#include "ScalarWavefrontImageParity.hpp"
+
 #include <Blackframe/Backends/CPU/Embree/AccelBackend.hpp>
 #include <Blackframe/Backends/CPU/Embree/WavefrontMisTransport.hpp>
 #include <Blackframe/Engine/AccelBackend.hpp>
@@ -319,6 +321,62 @@ void expect_path_exact(const renderer::BsdfOnlyPathResult& expected,
     EXPECT_EQ(actual.blocked_depth_limits, expected.blocked_depth_limits);
 }
 
+void expect_image_metrics(const std::string_view scene_name, const renderer::RenderExtent extent,
+                          const std::uint32_t samples_per_pixel,
+                          const renderer::MisHeuristic heuristic,
+                          const renderer::PathDepthLimits& depth_limits,
+                          const renderer::RussianRoulettePolicy& roulette_policy,
+                          const std::span<const CpuWavefrontMisPathInput> inputs,
+                          const std::span<const renderer::BsdfOnlyPathResult> scalar_paths,
+                          const CpuWavefrontMisBatch& wavefront) {
+    ASSERT_EQ(inputs.size(), scalar_paths.size());
+    ASSERT_EQ(inputs.size(), wavefront.paths.size());
+    constexpr auto expected_worker_count = std::uint32_t{4U};
+    const auto queue_status = scalar_wavefront_parity_test::validate_queue_report(
+        wavefront.report, inputs.size(), expected_worker_count);
+    ASSERT_TRUE(queue_status.has_value()) << queue_status.error().message;
+    ASSERT_GT(wavefront.report.closure_samples, 0U);
+    ASSERT_GT(wavefront.report.light_samples, 0U);
+    ASSERT_GT(wavefront.report.shadow_queries, 0U);
+    auto scalar_film = renderer::ReferenceFilm::create(extent);
+    auto wavefront_film = renderer::Film::create(extent);
+    ASSERT_TRUE(scalar_film.has_value()) << scalar_film.error().message;
+    ASSERT_TRUE(wavefront_film.has_value()) << wavefront_film.error().message;
+    for (auto index = std::size_t{}; index < inputs.size(); ++index) {
+        const auto scalar_status = scalar_wavefront_parity_test::accumulate_path(
+            *scalar_film, inputs[index], scalar_paths[index]);
+        const auto wavefront_status = scalar_wavefront_parity_test::accumulate_path(
+            *wavefront_film, inputs[index], wavefront.paths[index]);
+        ASSERT_TRUE(scalar_status.has_value()) << scalar_status.error().message;
+        ASSERT_TRUE(wavefront_status.has_value()) << wavefront_status.error().message;
+    }
+    const auto linear = renderer::compute_linear_metrics(*wavefront_film, *scalar_film);
+    const auto display = renderer::compute_display_psnr(*wavefront_film, *scalar_film);
+    const auto maximum_path_error =
+        scalar_wavefront_parity_test::maximum_path_radiance_error(scalar_paths, wavefront.paths);
+    ASSERT_TRUE(linear.has_value()) << linear.error().message;
+    ASSERT_TRUE(display.has_value()) << display.error().message;
+    ASSERT_TRUE(maximum_path_error.has_value()) << maximum_path_error.error().message;
+    scalar_wavefront_parity_test::record_and_expect(
+        scalar_wavefront_parity_test::Configuration{
+            .scene_name = scene_name,
+            .extent = extent,
+            .samples_per_pixel = samples_per_pixel,
+            .seed = EvaluationSeed,
+            .heuristic = heuristic,
+            .depth_limits = depth_limits,
+            .roulette_policy = roulette_policy,
+            .worker_count = expected_worker_count,
+            .thresholds = scalar_wavefront_parity_test::StrictThresholds,
+        },
+        scalar_wavefront_parity_test::Result{
+            .linear = *linear,
+            .maximum_path_radiance_absolute_error = *maximum_path_error,
+            .display_psnr = display->psnr,
+            .wavefront_report = wavefront.report,
+        });
+}
+
 [[nodiscard]] core::Result<std::vector<renderer::BsdfOnlyPathResult>>
 trace_scalar_batch(const std::span<const CpuWavefrontMisPathInput> inputs,
                    const AccelBackend& acceleration, const renderer::LightSampler& sampler,
@@ -455,6 +513,10 @@ TEST_P(WavefrontMisTransportTest, MatchesAnalyticScalarAndIsIdenticalWithOneOrMa
         expect_path_exact(single->paths[index], parallel->paths[index]);
         EXPECT_EQ(single->paths[index].termination, renderer::BsdfOnlyPathTermination::depth_limit);
     }
+    expect_image_metrics(
+        GetParam() == renderer::MisHeuristic::balance ? "AreaEmitterBalance" : "AreaEmitterPower",
+        renderer::RenderExtent{.width = 6U, .height = 4U}, 1U, GetParam(), OneDiffuseBounce,
+        renderer::RussianRoulettePolicy::disabled(), *inputs, *scalar, *parallel);
 
     const auto lane_count = static_cast<std::uint64_t>(PathCount);
     const auto expected_stages = CpuWavefrontMisStageLaneCounts{
@@ -632,6 +694,9 @@ TEST(WavefrontMisTransportQueueTest, PreservesPrimaryMissEnvironmentParityWithOn
         expect_path_near((*scalar)[index], parallel->paths[index], ScalarParityTolerance);
         expect_path_exact(single->paths[index], parallel->paths[index]);
     }
+    expect_image_metrics("EnvironmentMiss", renderer::RenderExtent{.width = 6U, .height = 4U}, 1U,
+                         heuristic, OneDiffuseBounce, renderer::RussianRoulettePolicy::disabled(),
+                         *inputs, *scalar, *parallel);
     EXPECT_EQ(single->paths.front().termination,
               renderer::BsdfOnlyPathTermination::escaped_environment);
     EXPECT_EQ(single->paths.front().state.depth(), 0U);
@@ -746,6 +811,8 @@ TEST(WavefrontMisTransportRussianRouletteTest,
     }
     EXPECT_EQ(terminated, expected_terminated);
     EXPECT_EQ(survived_first_bounce, expected_survivors);
+    expect_image_metrics("RussianRoulette", renderer::RenderExtent{.width = 6U, .height = 4U}, 1U,
+                         heuristic, depth_limits, *roulette, *inputs, *scalar, *parallel);
 
     const auto expected_stages = CpuWavefrontMisStageLaneCounts{
         .camera = lane_count,
@@ -821,6 +888,9 @@ TEST(WavefrontMisTransportNumericTest,
     EXPECT_EQ(wavefront->report.closure_samples, 1U);
     EXPECT_EQ(wavefront->report.light_samples, 1U);
     EXPECT_EQ(wavefront->report.shadow_queries, 1U);
+    expect_image_metrics("SubnormalReflectance", renderer::RenderExtent{.width = 1U, .height = 1U},
+                         1U, heuristic, OneDiffuseBounce,
+                         renderer::RussianRoulettePolicy::disabled(), *inputs, *scalar, *wavefront);
 }
 
 TEST(WavefrontMisTransportNumericTest, SkipsUnrepresentableDirectRadiometryWhenTheLightIsOccluded) {
@@ -879,6 +949,9 @@ TEST(WavefrontMisTransportNumericTest, SkipsUnrepresentableDirectRadiometryWhenT
     EXPECT_EQ(wavefront->report.light_samples, 1U);
     EXPECT_EQ(wavefront->report.shadow_queries, 1U);
     EXPECT_EQ(wavefront->report.stage_lanes.shadow, 1U);
+    expect_image_metrics("OccludedPointLight", renderer::RenderExtent{.width = 1U, .height = 1U},
+                         1U, heuristic, OneDiffuseBounce,
+                         renderer::RussianRoulettePolicy::disabled(), *inputs, *scalar, *wavefront);
 }
 
 TEST(WavefrontMisTransportBackendTest, RejectsTheAnalyticOracleBeforeAnyFallbackCanRun) {

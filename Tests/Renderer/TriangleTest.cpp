@@ -121,6 +121,23 @@ TEST(TriangleIntersectionTest, RoundsNonDyadicBarycentricsBeforeClipping) {
                 1.0F, std::numeric_limits<TransportScalar>::epsilon());
 }
 
+TEST(TriangleIntersectionTest, RoundsAQuotientWithASubnormalExactResidual) {
+    auto numerator = triangle_detail::FloatingExpansion<TransportScalar, 2>{};
+    auto denominator = triangle_detail::FloatingExpansion<TransportScalar, 2>{};
+    ASSERT_TRUE(triangle_detail::add_component(numerator, 1.0F));
+    ASSERT_TRUE(triangle_detail::add_component(denominator,
+                                               std::numeric_limits<TransportScalar>::denorm_min()));
+    ASSERT_TRUE(triangle_detail::add_component(denominator, 1.0F));
+    ASSERT_EQ(denominator.size, 2U);
+    ASSERT_EQ(denominator.components[0], std::numeric_limits<TransportScalar>::denorm_min());
+    ASSERT_EQ(denominator.components[1], 1.0F);
+
+    const auto quotient = triangle_detail::correctly_rounded_quotient(
+        numerator, denominator, "The synthetic triangle quotient is not representable.");
+    ASSERT_TRUE(quotient.has_value()) << quotient.error().message;
+    EXPECT_FLOAT_EQ(*quotient, 1.0F);
+}
+
 TEST(TriangleIntersectionTest, PreservesAHugeCommonAxisTranslationAndParameterScale) {
     const auto maximum = std::numeric_limits<TransportScalar>::max();
     const auto previous = std::nextafter(maximum, 0.0F);

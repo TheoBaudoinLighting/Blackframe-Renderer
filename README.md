@@ -207,6 +207,16 @@ silently selecting another path.
   A separate one-sample Cornell benchmark emits a machine-readable queue report for 16,384 primary
   paths and validates all seven capacities, peaks, occupations, overflow counters, flow identities,
   and per-stage wall times without imposing a fragile performance threshold.
+  A versioned same-sample parity matrix compares the scalar scene loop with analytic traversal and
+  compensated double film accumulation against the four-worker CPU wavefront loop with Embree and
+  float film accumulation. Its nine-entry inventory covers balance and power area-light transport,
+  environment misses, Russian roulette, subnormal throughput, occluded extreme radiometry,
+  point-light NEE, Veach MIS, and the canonical two-sphere Cornell scene. Every entry uses float
+  transport and sends identical indexed rays, wavelengths, samples, and seed to both backends. The
+  consolidated JSON report requires linear MSE at most `1e-10`, RMSE at most `1e-5`, image and
+  per-path absolute error at most `1e-4`, and display PSNR of at least 80 dB (or positive infinity).
+  It also verifies the explicit analytic/Embree backend kinds and rejects queue overflow or rejected
+  lanes; neither side can be substituted by a fallback.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
@@ -293,6 +303,15 @@ build:
 ```powershell
 ctest --test-dir build/windows-cpu-release `
   -R '^Blackframe\.Benchmarks\.CornellPowerMisConvergence\.Json$' `
+  --output-on-failure
+```
+
+The complete scalar-to-CPU-wavefront parity inventory and its machine-readable report are validated
+with:
+
+```powershell
+ctest --test-dir build/windows-cpu-release `
+  -R '^Blackframe\.EmbreeScalarWavefrontParity\.Json$' `
   --output-on-failure
 ```
 

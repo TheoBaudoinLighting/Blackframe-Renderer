@@ -1,3 +1,5 @@
+#include "ScalarWavefrontImageParity.hpp"
+
 #include <Blackframe/Backends/CPU/Embree/AccelBackend.hpp>
 #include <Blackframe/Engine/AccelBackend.hpp>
 #include <Blackframe/Engine/FrameScene.hpp>
@@ -732,6 +734,49 @@ TEST(VeachMisIntegrationTest, ReplaysExactlyAndRejectsIncompleteDispatchState) {
     ASSERT_FALSE(missing_previous_pdf.has_value());
     EXPECT_EQ(missing_previous_pdf.error().code, core::StatusCode::incompatible);
     EXPECT_FALSE(missing_previous_pdf.error().message.empty());
+}
+
+TEST(VeachMisParityTest, MatchesScalarReferenceThroughCpuWavefront) {
+    constexpr auto extent = renderer::RenderExtent{.width = 8U, .height = 8U};
+    constexpr auto samples_per_pixel = std::uint32_t{4U};
+
+    const auto scene = make_image_scene();
+    const auto frame = image_camera_frame();
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    ASSERT_TRUE(frame.has_value()) << frame.error().message;
+    ASSERT_EQ((*scene)->mesh_area_lights().size(), 4U);
+
+    const auto camera = renderer::PinholeCamera::create(
+        renderer::Point3{.y = -7.0F, .z = 2.0F}, *frame, extent, 0.82F, 0.0F,
+        std::numeric_limits<renderer::TransportScalar>::infinity(), renderer::AllRayVisibility,
+        renderer::VacuumMedium);
+    ASSERT_TRUE(camera.has_value()) << camera.error().message;
+
+    const auto inputs = scalar_wavefront_parity_test::make_inputs(
+        extent, samples_per_pixel, EvaluationSeed, test_wavelengths(),
+        [&camera](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
+            return camera->generate_primary_ray(index, renderer::PixelJitterMode::uniform,
+                                                PathTime);
+        });
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+
+    const auto configuration = scalar_wavefront_parity_test::Configuration{
+        .scene_name = "VeachMIS",
+        .extent = extent,
+        .samples_per_pixel = samples_per_pixel,
+        .seed = EvaluationSeed,
+        .heuristic = renderer::MisHeuristic::power,
+        .depth_limits = renderer::PathDepthLimits{.diffuse = 2U},
+        .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
+        .worker_count = 4U,
+        .thresholds = scalar_wavefront_parity_test::StrictThresholds,
+    };
+    const auto parity = scalar_wavefront_parity_test::compare(*scene, *inputs, configuration);
+    ASSERT_TRUE(parity.has_value()) << parity.error().message;
+    EXPECT_GT(parity->wavefront_report.closure_samples, 0U);
+    EXPECT_GT(parity->wavefront_report.light_samples, 0U);
+    EXPECT_GT(parity->wavefront_report.shadow_queries, 0U);
+    scalar_wavefront_parity_test::record_and_expect(configuration, *parity);
 }
 
 TEST(VeachMisImageTest, WritesNeutralStablePowerHeuristicPreview) {

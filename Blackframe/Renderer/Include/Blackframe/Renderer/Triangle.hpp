@@ -480,13 +480,34 @@ template <GeometryScalar Scalar>
     };
 }
 
-template <GeometryScalar Scalar, std::size_t DestinationCapacity, std::size_t SourceCapacity>
-[[nodiscard]] bool add_scaled_expansion(FloatingExpansion<Scalar, DestinationCapacity>& destination,
-                                        const FloatingExpansion<Scalar, SourceCapacity>& source,
-                                        const Scalar scale,
-                                        const Scalar sign = Scalar{1}) noexcept {
+template <GeometryScalar Scalar>
+using QuotientComparisonScalar =
+    std::conditional_t<std::is_same_v<Scalar, TransportScalar>, ReferenceScalar, Scalar>;
+
+template <GeometryScalar DestinationScalar, std::size_t DestinationCapacity,
+          GeometryScalar SourceScalar, std::size_t SourceCapacity>
+[[nodiscard]] bool
+add_quotient_expansion(FloatingExpansion<DestinationScalar, DestinationCapacity>& destination,
+                       const FloatingExpansion<SourceScalar, SourceCapacity>& source,
+                       const DestinationScalar sign = DestinationScalar{1}) noexcept {
     for (auto index = std::size_t{0}; index < source.size; ++index) {
-        if (!add_product(destination, source.components[index], scale, sign)) {
+        if (!add_component(destination,
+                           sign * static_cast<DestinationScalar>(source.components[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <GeometryScalar DestinationScalar, std::size_t DestinationCapacity,
+          GeometryScalar SourceScalar, std::size_t SourceCapacity>
+[[nodiscard]] bool add_scaled_quotient_expansion(
+    FloatingExpansion<DestinationScalar, DestinationCapacity>& destination,
+    const FloatingExpansion<SourceScalar, SourceCapacity>& source, const DestinationScalar scale,
+    const DestinationScalar sign = DestinationScalar{1}) noexcept {
+    for (auto index = std::size_t{0}; index < source.size; ++index) {
+        if (!add_product(destination, static_cast<DestinationScalar>(source.components[index]),
+                         scale, sign)) {
             return false;
         }
     }
@@ -498,9 +519,18 @@ template <GeometryScalar Scalar, std::size_t NumeratorCapacity, std::size_t Deno
 quotient_residual_sign(const FloatingExpansion<Scalar, NumeratorCapacity>& numerator,
                        const FloatingExpansion<Scalar, DenominatorCapacity>& denominator,
                        const Scalar candidate) {
-    auto residual = FloatingExpansion<Scalar, NumeratorCapacity + 2 * DenominatorCapacity + 8>{};
-    if (!add_expansion(residual, numerator) ||
-        !add_scaled_expansion(residual, denominator, candidate, Scalar{-1})) {
+    // Exact determinant expansions may contain subnormal float components left by cancellation.
+    // Multiplying one of those components by a normal float quotient candidate can underflow even
+    // though the quotient itself is representable. Double represents every float component and
+    // float product exactly, so only the comparison expansion is promoted; the returned quotient
+    // and all geometric state remain in the requested precision.
+    using ComparisonScalar = QuotientComparisonScalar<Scalar>;
+    auto residual =
+        FloatingExpansion<ComparisonScalar, NumeratorCapacity + 2 * DenominatorCapacity + 8>{};
+    if (!add_quotient_expansion(residual, numerator) ||
+        !add_scaled_quotient_expansion(residual, denominator,
+                                       static_cast<ComparisonScalar>(candidate),
+                                       ComparisonScalar{-1})) {
         return std::unexpected(triangle_error("Triangle quotient residual is not representable."));
     }
     return expansion_sign(residual);
@@ -511,11 +541,14 @@ template <GeometryScalar Scalar, std::size_t NumeratorCapacity, std::size_t Deno
 quotient_midpoint_sign(const FloatingExpansion<Scalar, NumeratorCapacity>& numerator,
                        const FloatingExpansion<Scalar, DenominatorCapacity>& denominator,
                        const Scalar lower, const Scalar upper) {
+    using ComparisonScalar = QuotientComparisonScalar<Scalar>;
     auto comparison =
-        FloatingExpansion<Scalar, 2 * NumeratorCapacity + 4 * DenominatorCapacity + 8>{};
-    if (!add_scaled_expansion(comparison, numerator, Scalar{2}) ||
-        !add_scaled_expansion(comparison, denominator, lower, Scalar{-1}) ||
-        !add_scaled_expansion(comparison, denominator, upper, Scalar{-1})) {
+        FloatingExpansion<ComparisonScalar, 2 * NumeratorCapacity + 4 * DenominatorCapacity + 8>{};
+    if (!add_scaled_quotient_expansion(comparison, numerator, ComparisonScalar{2}) ||
+        !add_scaled_quotient_expansion(
+            comparison, denominator, static_cast<ComparisonScalar>(lower), ComparisonScalar{-1}) ||
+        !add_scaled_quotient_expansion(
+            comparison, denominator, static_cast<ComparisonScalar>(upper), ComparisonScalar{-1})) {
         return std::unexpected(
             triangle_error("Triangle quotient midpoint comparison is not representable."));
     }

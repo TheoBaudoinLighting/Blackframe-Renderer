@@ -1,3 +1,5 @@
+#include "ScalarWavefrontImageParity.hpp"
+
 #include <Blackframe/Backends/CPU/Embree/AccelBackend.hpp>
 #include <Blackframe/Engine/AccelBackend.hpp>
 #include <Blackframe/Engine/FrameScene.hpp>
@@ -625,6 +627,46 @@ TEST(NextEventEstimationIntegrationTest, ReplaysAndConvergesAgainstEnumeratedPoi
     EXPECT_EQ(replay_first->statistics.occlusion_queries,
               replay_second->statistics.occlusion_queries);
     EXPECT_EQ(replay_first->statistics.blocked_queries, replay_second->statistics.blocked_queries);
+}
+
+TEST(NextEventEstimationParityTest, MatchesScalarReferenceThroughCpuWavefront) {
+    const auto scene = make_point_light_scene();
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    ASSERT_TRUE((*scene)->spectral_environment().has_value());
+    ASSERT_EQ((*scene)->punctual_lights().size(), 4U);
+
+    constexpr auto samples_per_pixel = std::uint32_t{4U};
+    const auto inputs = scalar_wavefront_parity_test::make_inputs(
+        ReplayExtent, samples_per_pixel, EvaluationSeed,
+        (*scene)->spectral_environment()->wavelengths,
+        [](const renderer::PixelSampleIndex& index,
+           const renderer::SampleStream& stream) -> core::Result<renderer::Ray> {
+            const auto position =
+                primary_position(ReplayExtent, index.pixel_x, index.pixel_y, stream);
+            return renderer::Ray::create(
+                position + renderer::Vector3{.z = CameraHeight}, renderer::Vector3{.z = -1.0F},
+                0.0F, std::numeric_limits<renderer::TransportScalar>::infinity(), PathTime,
+                renderer::AllRayVisibility, renderer::VacuumMedium);
+        });
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+
+    const auto configuration = scalar_wavefront_parity_test::Configuration{
+        .scene_name = "PointLightNee",
+        .extent = ReplayExtent,
+        .samples_per_pixel = samples_per_pixel,
+        .seed = EvaluationSeed,
+        .heuristic = renderer::MisHeuristic::power,
+        .depth_limits = renderer::PathDepthLimits{.diffuse = 1U},
+        .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
+        .worker_count = 4U,
+        .thresholds = scalar_wavefront_parity_test::StrictThresholds,
+    };
+    const auto result = scalar_wavefront_parity_test::compare(*scene, *inputs, configuration);
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+    EXPECT_GT(result->wavefront_report.closure_samples, 0U);
+    EXPECT_GT(result->wavefront_report.light_samples, 0U);
+    EXPECT_GT(result->wavefront_report.shadow_queries, 0U);
+    scalar_wavefront_parity_test::record_and_expect(configuration, *result);
 }
 
 TEST(NextEventEstimationImageTest, WritesStableEmbreePointLightImageAt64Spp) {
