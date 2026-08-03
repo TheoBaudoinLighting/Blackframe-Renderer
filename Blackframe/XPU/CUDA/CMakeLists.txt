@@ -26,6 +26,7 @@ target_sources(
         FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportAbiProbe.hpp"
 )
 
 target_include_directories(
@@ -39,6 +40,7 @@ target_link_libraries(
     BlackframeCudaSharedHeaders
     INTERFACE
         Blackframe::ProjectOptions
+        Blackframe::XpuHostDeviceAbi
 )
 
 add_library(
@@ -46,6 +48,7 @@ add_library(
     STATIC
         Source/CudaSharedHeaderContract.cu
         Source/CudaSmokeKernel.cu
+        Source/CudaTransportAbiProbe.cu
 )
 add_library(Blackframe::CudaSmokeKernel ALIAS BlackframeCudaSmokeKernel)
 blackframe_set_target_role(BlackframeCudaSmokeKernel cuda)

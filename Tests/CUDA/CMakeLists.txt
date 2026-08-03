@@ -1,6 +1,7 @@
 add_executable(
     BlackframeCudaSmokeTests
     CudaSmokeTest.cpp
+    TransportAbiTest.cpp
 )
 blackframe_set_target_role(BlackframeCudaSmokeTests test)
 
@@ -18,5 +19,5 @@ gtest_discover_tests(
     DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 30
     PROPERTIES
-        LABELS "smoke;cuda"
+        LABELS "unit;smoke;cuda"
 )

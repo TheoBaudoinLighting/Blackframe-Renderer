@@ -40,6 +40,7 @@ set(
     BlackframeSceneTests
     BlackframeSceneTransportTests
     BlackframeXpuTests
+    BlackframeXpuHostDeviceAbiTests
 )
 if(BLACKFRAME_ENABLE_EMBREE)
     list(

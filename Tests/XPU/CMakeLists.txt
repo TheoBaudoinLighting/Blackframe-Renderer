@@ -33,3 +33,26 @@ gtest_discover_tests(
     PROPERTIES
         LABELS "smoke;regression;nightly;cpu"
 )
+
+add_executable(
+    BlackframeXpuHostDeviceAbiTests
+    HostDeviceTransportAbiTest.cpp
+)
+blackframe_set_target_role(BlackframeXpuHostDeviceAbiTests test)
+
+target_link_libraries(
+    BlackframeXpuHostDeviceAbiTests
+    PRIVATE
+        Blackframe::ProjectOptions
+        Blackframe::Renderer
+        Blackframe::XpuHostDeviceAbi
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeXpuHostDeviceAbiTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cpu"
+)

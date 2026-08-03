@@ -234,7 +234,10 @@ silently selecting another path.
 - **Host control:** bounded versioned local IPC, a C extension ABI, explicit absolute-path loading,
   XPU device discovery, a reference discovery plugin, and a headless `render` control executable.
 - **Backend integration:** explicit capability reporting and pre-dispatch checks, pinned Embree 4
-  closest-hit/occlusion queries, and an optional CUDA C++20 smoke kernel. These are narrow
+  closest-hit/occlusion queries, and an optional CUDA C++20 smoke kernel. The host/device transport
+  boundary is isolated in a versioned C++20-compatible header containing fixed-width, explicitly
+  aligned ray, hit, queue, sampler, spectrum, and path-state records. The host compiler and a CUDA
+  kernel compare every frozen size, alignment, and member offset at test time. These are narrow
   integration contracts, not complete rendering backends.
 
 ## Current boundary

@@ -1,3 +1,29 @@
+add_library(BlackframeXpuHostDeviceAbi INTERFACE)
+add_library(Blackframe::XpuHostDeviceAbi ALIAS BlackframeXpuHostDeviceAbi)
+blackframe_set_target_role(BlackframeXpuHostDeviceAbi core)
+
+target_sources(
+    BlackframeXpuHostDeviceAbi
+    INTERFACE
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include"
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/TransportAbi.hpp"
+)
+
+target_include_directories(
+    BlackframeXpuHostDeviceAbi
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include>
+        $<INSTALL_INTERFACE:Include>
+)
+
+target_link_libraries(
+    BlackframeXpuHostDeviceAbi
+    INTERFACE
+        Blackframe::ProjectOptions
+)
+
 add_library(BlackframeXpuBackendAbi INTERFACE)
 add_library(Blackframe::XpuBackendAbi ALIAS BlackframeXpuBackendAbi)
 blackframe_set_target_role(BlackframeXpuBackendAbi core)
