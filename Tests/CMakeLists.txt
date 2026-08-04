@@ -18,6 +18,7 @@ endif()
 
 if(BLACKFRAME_ENABLE_CUDA)
     add_subdirectory(CUDA)
+    add_subdirectory(Backends/GPU/CUDA)
 endif()
 
 set(
@@ -57,6 +58,7 @@ if(BLACKFRAME_ENABLE_CUDA)
         blackframe_test_targets
         BlackframeCudaMemoryMemcheckTests
         BlackframeCudaMemoryTests
+        BlackframeCudaSceneTests
         BlackframeCudaSmokeTests
     )
 endif()

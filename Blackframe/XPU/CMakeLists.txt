@@ -8,6 +8,7 @@ target_sources(
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include"
         FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/SceneSoaAbi.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/TransportAbi.hpp"
 )
 

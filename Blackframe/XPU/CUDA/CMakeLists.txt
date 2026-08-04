@@ -26,6 +26,7 @@ target_sources(
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneSoaHash.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportAbiProbe.hpp"
@@ -59,6 +60,25 @@ blackframe_configure_cuda_target(BlackframeCudaSmokeKernel)
 
 target_link_libraries(
     BlackframeCudaSmokeKernel
+    PUBLIC
+        Blackframe::CudaSharedHeaders
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)
+
+add_library(
+    BlackframeCudaSceneKernel
+    STATIC
+        Source/CudaSceneSoaHash.cu
+)
+add_library(Blackframe::CudaSceneKernel ALIAS BlackframeCudaSceneKernel)
+blackframe_set_target_role(BlackframeCudaSceneKernel cuda)
+
+blackframe_configure_cuda_target(BlackframeCudaSceneKernel)
+
+target_link_libraries(
+    BlackframeCudaSceneKernel
     PUBLIC
         Blackframe::CudaSharedHeaders
     PRIVATE

@@ -77,9 +77,12 @@ foreach(
     forbidden_target
     IN ITEMS
         BlackframeCuda
+        BlackframeCudaScene
+        BlackframeCudaSceneKernel
         BlackframeCudaSharedHeaders
         BlackframeCudaSmokeKernel
         BlackframeCudaToolkit
+        BlackframeCudaSceneTests
         BlackframeCudaSmokeTests
 )
     if(forbidden_target IN_LIST configured_targets)

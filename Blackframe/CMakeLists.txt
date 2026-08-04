@@ -5,6 +5,10 @@ add_subdirectory(Renderer)
 add_subdirectory(IPC)
 add_subdirectory(Engine)
 
+if(BLACKFRAME_ENABLE_CUDA)
+    add_subdirectory(Backends/GPU/CUDA)
+endif()
+
 if(BLACKFRAME_ENABLE_EMBREE)
     add_subdirectory(Backends/CPU/Embree)
 endif()
