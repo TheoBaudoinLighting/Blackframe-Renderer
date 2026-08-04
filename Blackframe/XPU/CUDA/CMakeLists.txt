@@ -1,6 +1,8 @@
+blackframe_find_cuda_toolkit()
+add_subdirectory(Host)
+
 enable_language(CUDA)
 blackframe_require_cuda_cxx20()
-blackframe_find_cuda_toolkit()
 
 if(WIN32 AND CMAKE_CUDA_SIMULATE_ID STREQUAL "MSVC")
     # NVCC emits MSVC librarian syntax; keep its compatible archiver local to
@@ -70,6 +72,7 @@ add_library(Blackframe::Cuda ALIAS BlackframeCuda)
 target_link_libraries(
     BlackframeCuda
     INTERFACE
+        Blackframe::CudaMemory
         Blackframe::CudaSmokeKernel
         Blackframe::ProjectOptions
 )

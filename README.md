@@ -237,8 +237,11 @@ silently selecting another path.
   closest-hit/occlusion queries, and an optional CUDA C++20 smoke kernel. The host/device transport
   boundary is isolated in a versioned C++20-compatible header containing fixed-width, explicitly
   aligned ray, hit, queue, sampler, spectrum, and path-state records. The host compiler and a CUDA
-  kernel compare every frozen size, alignment, and member offset at test time. These are narrow
-  integration contracts, not complete rendering backends.
+  kernel compare every frozen size, alignment, and member offset at test time. A separate host-only
+  C++26 layer owns typed device buffers through move-only RAII, provides explicitly bounded and
+  aligned scratch suballocation, preserves live storage when growth is refused, and reports CUDA
+  allocation exhaustion without selecting host memory. These are narrow integration contracts,
+  not complete rendering backends.
 
 ## Current boundary
 
@@ -270,7 +273,8 @@ Requirements:
 - An internet connection for the first configuration, unless the pinned FetchContent archives are
   already populated below the selected build directory.
 - CUDA Toolkit 13.3.33 only when a CUDA preset is selected. Linux expects `nvcc` in `PATH`; CUDA
-  architectures must be explicit, and the supplied presets target architecture 86.
+  architectures must be explicit, and the supplied presets target architecture 86. CUDA test
+  configurations also require the matching `compute-sanitizer` shipped by that toolkit.
 
 OpenEXR, Imath, Embree, stb, GoogleTest, and Google Benchmark are fetched at immutable revisions
 with verified hashes as required by the selected configuration. All dependency sources and build

@@ -52,7 +52,13 @@ if(BLACKFRAME_ENABLE_EMBREE)
     )
 endif()
 if(BLACKFRAME_ENABLE_CUDA)
-    list(APPEND blackframe_test_targets BlackframeCudaSmokeTests)
+    list(
+        APPEND
+        blackframe_test_targets
+        BlackframeCudaMemoryMemcheckTests
+        BlackframeCudaMemoryTests
+        BlackframeCudaSmokeTests
+    )
 endif()
 
 add_custom_target(BlackframeTests)
