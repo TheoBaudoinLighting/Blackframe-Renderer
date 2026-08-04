@@ -240,8 +240,11 @@ silently selecting another path.
   kernel compare every frozen size, alignment, and member offset at test time. A separate host-only
   C++26 layer owns typed device buffers through move-only RAII, provides explicitly bounded and
   aligned scratch suballocation, preserves live storage when growth is refused, and reports CUDA
-  allocation exhaustion without selecting host memory. These are narrow integration contracts,
-  not complete rendering backends.
+  allocation exhaustion without selecting host memory. A committed `FrameScene` serializes into a
+  deterministic pointer-free device SoA, and a separate versioned CUDA blob builds one binary BLAS
+  per geometry plus a TLAS over resolved instances with conservative finite bounds. The CUDA BVH is
+  construction data only at this stage: no GPU ray traversal or Embree substitution is hidden
+  behind it. These are narrow integration contracts, not complete rendering backends.
 
 ## Current boundary
 

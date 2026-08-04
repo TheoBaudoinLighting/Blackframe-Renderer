@@ -1,5 +1,6 @@
 add_executable(
     BlackframeCudaSceneTests
+    SceneBvhTest.cpp
     SceneSoATest.cpp
 )
 blackframe_set_target_role(BlackframeCudaSceneTests test)

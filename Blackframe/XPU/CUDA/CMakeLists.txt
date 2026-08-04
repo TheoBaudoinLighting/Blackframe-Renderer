@@ -70,6 +70,7 @@ target_link_libraries(
 add_library(
     BlackframeCudaSceneKernel
     STATIC
+        Source/CudaSceneBvhAbiContract.cu
         Source/CudaSceneSoaHash.cu
 )
 add_library(Blackframe::CudaSceneKernel ALIAS BlackframeCudaSceneKernel)
