@@ -227,7 +227,8 @@ template <SpectrumScalar Scalar> void expect_exact_mapping_and_ownership() {
     ASSERT_TRUE(soa_result.has_value());
     auto soa = std::move(*soa_result);
 
-    source.assign(source.size(), source.front());
+    const auto replacement = source.front();
+    source.assign(source.size(), replacement);
     EXPECT_EQ(soa.schema_version(), CurrentPathStateSoASchemaVersion);
     EXPECT_EQ(soa.size(), expected.size());
     EXPECT_FALSE(soa.empty());
