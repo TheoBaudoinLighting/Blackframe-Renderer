@@ -82,6 +82,9 @@ foreach(
         BlackframeCudaSharedHeaders
         BlackframeCudaSmokeKernel
         BlackframeCudaToolkit
+        BlackframeCudaWavefrontStageKernel
+        BlackframeCudaWavefrontTransport
+        BlackframeCudaCornellSmokeTests
         BlackframeCudaSceneTests
         BlackframeCudaSmokeTests
 )

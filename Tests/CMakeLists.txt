@@ -58,6 +58,7 @@ if(BLACKFRAME_ENABLE_CUDA)
         blackframe_test_targets
         BlackframeCudaMemoryMemcheckTests
         BlackframeCudaMemoryTests
+        BlackframeCudaCornellSmokeTests
         BlackframeCudaSceneTests
         BlackframeCudaSmokeTests
         BlackframeCudaWavefrontQueueTests

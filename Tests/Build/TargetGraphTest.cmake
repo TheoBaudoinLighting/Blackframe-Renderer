@@ -135,10 +135,34 @@ if(CUDA_ENABLED)
     require_target_role(BlackframeCuda cuda)
     require_target_role(BlackframeCudaScene cuda)
     require_target_role(BlackframeCudaSceneKernel cuda)
+    require_target_role(BlackframeCudaWavefrontStageKernel cuda)
+    require_target_role(BlackframeCudaWavefrontTransport cuda)
+    require_target_role(BlackframeCudaCornellSmokeTests test)
     require_target_edge(BlackframeCuda BlackframeCudaSmokeKernel link)
+    require_target_edge(BlackframeCuda BlackframeCudaWavefrontStageKernel link)
     require_target_edge(BlackframeCudaScene BlackframeCudaMemory link)
     require_target_edge(BlackframeCudaScene BlackframeCudaSceneKernel link)
     require_target_edge(BlackframeCudaScene BlackframeSceneGeometry link)
+    require_target_edge(
+        BlackframeCudaWavefrontStageKernel
+        BlackframeCudaSharedHeaders
+        link
+    )
+    require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaQueues link)
+    require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaScene link)
+    require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaWavefrontStageKernel link)
+    require_target_edge(BlackframeCudaWavefrontTransport BlackframeRenderer link)
+    require_target_edge(
+        BlackframeCudaCornellSmokeTests
+        BlackframeCudaWavefrontTransport
+        link
+    )
+    forbid_target_edge(BlackframeCudaWavefrontStageKernel BlackframeEmbree)
+    forbid_target_edge(BlackframeCudaWavefrontStageKernel BlackframeCpuEmbree)
+    forbid_target_edge(BlackframeCudaWavefrontTransport BlackframeEmbree)
+    forbid_target_edge(BlackframeCudaWavefrontTransport BlackframeCpuEmbree)
+    forbid_target_edge(BlackframeCudaCornellSmokeTests BlackframeEmbree)
+    forbid_target_edge(BlackframeCudaCornellSmokeTests BlackframeCpuEmbree)
     forbid_target_edge(BlackframeCudaScene BlackframeEmbree)
     forbid_target_edge(BlackframeCudaScene BlackframeCpuEmbree)
     forbid_target_edge(BlackframeCuda BlackframeCpuEmbree)

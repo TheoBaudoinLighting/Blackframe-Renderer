@@ -90,3 +90,46 @@ set_target_properties(
         OUTPUT_NAME BlackframeCudaQueues
         DEBUG_POSTFIX d
 )
+
+add_library(
+    BlackframeCudaWavefrontTransport
+    STATIC
+        Source/WavefrontTransport.cpp
+)
+add_library(Blackframe::CudaWavefrontTransport ALIAS BlackframeCudaWavefrontTransport)
+blackframe_set_target_role(BlackframeCudaWavefrontTransport cuda)
+
+target_sources(
+    BlackframeCudaWavefrontTransport
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/WavefrontTransport.hpp"
+)
+
+target_include_directories(
+    BlackframeCudaWavefrontTransport
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+target_link_libraries(
+    BlackframeCudaWavefrontTransport
+    PUBLIC
+        Blackframe::CudaQueues
+        Blackframe::CudaScene
+        Blackframe::Renderer
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::CudaWavefrontStageKernel
+        Blackframe::ProjectOptions
+)
+
+set_target_properties(
+    BlackframeCudaWavefrontTransport
+    PROPERTIES
+        OUTPUT_NAME BlackframeCudaWavefrontTransport
+        DEBUG_POSTFIX d
+)

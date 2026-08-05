@@ -250,17 +250,26 @@ silently selecting another path.
   data. Seven fixed-capacity CUDA queue columns now store path-slot indices for camera, ray, hit,
   miss, shade, shadow, and continuation work. Device-side CAS reservation keeps each published size
   within capacity, while saturated overflow and rejection counters make exhaustion explicit without
-  overwriting adjacent storage; reset requires an explicit overflow policy. Embree stays an
-  independent CPU oracle and is never substituted for CUDA execution. These are narrow integration
-  contracts, not complete rendering backends.
+  overwriting adjacent storage; reset requires an explicit overflow policy. Six CUDA C++20 stage
+  kernels now consume those queues for camera initialization, hit resolution, miss handling,
+  Lambertian shading, shadow visibility, and continuation. The host orchestrator dispatches the
+  existing CUDA closest-hit and any-hit kernels between stages, validates every per-lane outcome and
+  queue boundary, and reconstructs results in input path-slot order. The device shading path reads
+  four-lane reflectance, one-sided emission, constant environment radiance, and mesh-area lights
+  directly from the serialized scene. Embree stays an independent CPU oracle and is never
+  substituted for CUDA execution.
 
 ## Current boundary
 
 Blackframe does not yet provide a general production path-tracing integrator, a scene loader, a
-general material or lighting system, deformation updates, transform motion blur, or a CUDA
-wavefront renderer. The CPU wavefront transport is currently a narrow vacuum-only spectral
-Lambertian path over FrameScene and Embree, with punctual and emissive triangle-mesh lights, NEE,
-and balance or power MIS. `scalar_ref` remains a separate oracle rather than an execution fallback.
+general material or lighting system, deformation updates, or transform motion blur. The CPU
+wavefront transport is currently a narrow vacuum-only spectral Lambertian path over FrameScene and
+Embree, with punctual and emissive triangle-mesh lights, NEE, and balance or power MIS. The CUDA
+wavefront transport currently covers vacuum Lambertian paths, one-sided emissive triangle meshes,
+uniform mesh-area NEE, a constant environment, and bounded diffuse depth. It rejects punctual
+lights, participating media, unsupported scene spectra, and malformed device state explicitly;
+its current direct-light estimator avoids duplicate emissive paths without claiming MIS or Russian
+roulette support. `scalar_ref` remains a separate oracle rather than an execution fallback.
 The rough diffuse, rough conductor, specular delta, rough dielectric, and anisotropic closure
 implementations remain standalone until the FrameScene material schema can describe them.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete

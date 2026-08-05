@@ -34,6 +34,7 @@ target_sources(
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportAbiProbe.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueDevice.cuh"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueKernel.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontStageKernel.hpp"
 )
 
 target_include_directories(
@@ -114,12 +115,32 @@ target_link_libraries(
         Blackframe::ProjectOptions
 )
 
+add_library(
+    BlackframeCudaWavefrontStageKernel
+    STATIC
+        Source/CudaWavefrontStages.cu
+)
+add_library(Blackframe::CudaWavefrontStageKernel ALIAS BlackframeCudaWavefrontStageKernel)
+blackframe_set_target_role(BlackframeCudaWavefrontStageKernel cuda)
+
+blackframe_configure_cuda_target(BlackframeCudaWavefrontStageKernel)
+
+target_link_libraries(
+    BlackframeCudaWavefrontStageKernel
+    PUBLIC
+        Blackframe::CudaSharedHeaders
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)
+
 target_link_libraries(
     BlackframeCuda
     INTERFACE
         Blackframe::CudaMemory
         Blackframe::CudaQueueKernel
         Blackframe::CudaSmokeKernel
+        Blackframe::CudaWavefrontStageKernel
         Blackframe::ProjectOptions
 )
 
