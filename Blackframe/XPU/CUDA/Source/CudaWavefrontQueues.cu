@@ -15,20 +15,24 @@ static_assert(__cplusplus == 202002L);
 
 namespace {
 
-constexpr auto ThreadsPerBlock = std::uint32_t{256U};
+constexpr auto ThreadsPerBlockX = std::uint32_t{16U};
+constexpr auto ThreadsPerBlockY = std::uint32_t{16U};
+constexpr auto ThreadsPerBlock = ThreadsPerBlockX * ThreadsPerBlockY;
 
 __global__ void push_wavefront_queues_kernel(
     const blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     const blackframe::xpu::cuda::WavefrontQueueDevicePush* const requests,
     const std::uint32_t request_count,
     blackframe::xpu::cuda::WavefrontQueueDevicePushStatus* const outcomes) {
-    const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const auto thread_index = static_cast<std::uint32_t>(threadIdx.x) +
+                              static_cast<std::uint32_t>(blockDim.x) * threadIdx.y;
+    const auto index = static_cast<std::uint64_t>(blockIdx.x) * ThreadsPerBlock + thread_index;
     if (index >= request_count) {
         return;
     }
     const auto request = requests[index];
-    outcomes[index] =
-        blackframe::xpu::cuda::try_push_wavefront_queue(queues, request.queue_kind, request.slot);
+    outcomes[index] = blackframe::xpu::cuda::try_push_wavefront_queue_warp(
+        queues, request.queue_kind, request.slot);
 }
 
 } // namespace
@@ -58,7 +62,7 @@ extern "C" int blackframe_cuda_launch_wavefront_queue_pushes(
 
     const auto block_count = static_cast<std::uint32_t>(
         (static_cast<std::uint64_t>(request_count) + ThreadsPerBlock - 1U) / ThreadsPerBlock);
-    push_wavefront_queues_kernel<<<block_count, ThreadsPerBlock>>>(queues, requests, request_count,
-                                                                   outcomes);
+    push_wavefront_queues_kernel<<<block_count, dim3{ThreadsPerBlockX, ThreadsPerBlockY, 1U}>>>(
+        queues, requests, request_count, outcomes);
     return static_cast<int>(cudaGetLastError());
 }

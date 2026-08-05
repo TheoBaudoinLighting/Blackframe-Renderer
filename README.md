@@ -258,13 +258,17 @@ silently selecting another path.
   two-sided watertight triangles with explicit per-ray miss and error states. Opaque shadow queries
   apply visibility masks and exit at the first eligible crossing without reconstructing surface
   data. Seven fixed-capacity CUDA queue columns now store path-slot indices for camera, ray, hit,
-  miss, shade, shadow, and continuation work. Device-side CAS reservation keeps each published size
-  within capacity, while saturated overflow and rejection counters make exhaustion explicit without
-  overwriting adjacent storage; reset requires an explicit overflow policy. Six CUDA C++20 stage
+  miss, shade, shadow, and continuation work. Producers aggregate same-queue reservations within a
+  warp while preserving exact partial-capacity results. Published sizes remain bounded, and
+  saturated overflow and rejection counters make exhaustion explicit without overwriting adjacent
+  storage; reset requires an explicit overflow policy. Six CUDA C++20 stage
   kernels now consume those queues for camera initialization, hit resolution, miss handling,
   Lambertian shading, shadow visibility, and continuation. The host orchestrator dispatches the
-  existing CUDA closest-hit and any-hit kernels between stages, validates every per-lane outcome and
-  queue boundary, and reconstructs results in input path-slot order. The device shading path reads
+  existing CUDA closest-hit and any-hit kernels between stages, reduces every per-lane outcome into
+  a deterministic fixed-size device audit, validates each queue boundary, and reconstructs results
+  in input path-slot order. A move-only fixed-capacity workspace can retain device scratch, queues,
+  and host staging across synchronous batches; callers that omit it keep the explicit
+  allocate-per-call behavior. The device shading path reads
   four-lane reflectance, one-sided emission, constant environment radiance, point, directional,
   spot, and mesh-area lights directly from the serialized scene. It uses robust triangle-area
   evaluation for area-light CDFs and PDFs, applies balance or power MIS to NEE and complementary

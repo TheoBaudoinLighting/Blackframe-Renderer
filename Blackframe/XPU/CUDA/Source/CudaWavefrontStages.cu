@@ -34,7 +34,9 @@ using cuda::WavefrontPendingShadow;
 using cuda::WavefrontPreviousBsdfSample;
 using cuda::WavefrontQueueDevicePushStatus;
 using cuda::WavefrontQueueDeviceSoa;
+using cuda::WavefrontStageAudit;
 using cuda::WavefrontStageDeviceSoa;
+using cuda::WavefrontStageKind;
 using cuda::WavefrontStageOutcome;
 using cuda::WavefrontStageRoute;
 using cuda::WavefrontStageStatus;
@@ -595,7 +597,7 @@ finish_phase(WavefrontLaneControl& control, const WavefrontLanePhase phase,
 [[nodiscard]] __device__ WavefrontStageStatus push_route(const WavefrontQueueDeviceSoa queues,
                                                          const std::uint32_t queue_kind,
                                                          const PathSlot slot) noexcept {
-    const auto pushed = cuda::try_push_wavefront_queue(queues, queue_kind, slot);
+    const auto pushed = cuda::try_push_wavefront_queue_warp(queues, queue_kind, slot);
     if (pushed == WavefrontQueueDevicePushStatus::pushed) {
         return WavefrontStageStatus::success;
     }
@@ -2479,6 +2481,13 @@ __global__ void
 miss_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scene_size,
                   const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
                   const std::uint32_t work_count, WavefrontStageOutcome* const outcomes) {
+    __shared__ std::uint32_t scene_validation_status;
+    if (threadIdx.x == 0U) {
+        scene_validation_status =
+            static_cast<std::uint32_t>(validate_scene(scene_bytes, scene_size));
+    }
+    __syncthreads();
+
     const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= work_count) {
         return;
@@ -2496,7 +2505,7 @@ miss_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scene
                                   WavefrontStageRoute::none, slot.value, control.phase);
         return;
     }
-    const auto validation = validate_scene(scene_bytes, scene_size);
+    const auto validation = static_cast<SceneDeviceStatus>(scene_validation_status);
     if (validation != SceneDeviceStatus::valid) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] = outcome(scene_status(validation), WavefrontStageRoute::none, slot.value);
@@ -2553,6 +2562,13 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
                    const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
                    const WavefrontTransportConfig config, const std::uint32_t work_count,
                    WavefrontStageOutcome* const outcomes) {
+    __shared__ std::uint32_t scene_validation_status;
+    if (threadIdx.x == 0U) {
+        scene_validation_status =
+            static_cast<std::uint32_t>(validate_scene(scene_bytes, scene_size));
+    }
+    __syncthreads();
+
     const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= work_count) {
         return;
@@ -2570,7 +2586,7 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
                                   WavefrontStageRoute::none, slot.value, control.phase);
         return;
     }
-    const auto validation = validate_scene(scene_bytes, scene_size);
+    const auto validation = static_cast<SceneDeviceStatus>(scene_validation_status);
     if (validation != SceneDeviceStatus::valid) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] = outcome(scene_status(validation), WavefrontStageRoute::none, slot.value);
@@ -3306,6 +3322,96 @@ __global__ void continuation_stage_kernel(const WavefrontQueueDeviceSoa queues,
     outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::ray, slot.value);
 }
 
+[[nodiscard]] __device__ bool stage_outcome_failed(const WavefrontStageOutcome stage_outcome,
+                                                   const std::uint32_t allowed_route_mask,
+                                                   const std::uint32_t path_capacity) noexcept {
+    if (stage_outcome.status != value(WavefrontStageStatus::success)) {
+        return true;
+    }
+    constexpr auto LastKnownRoute = static_cast<std::uint32_t>(WavefrontStageRoute::terminated);
+    if (stage_outcome.route > LastKnownRoute) {
+        return true;
+    }
+    const auto route_bit = std::uint32_t{1U} << stage_outcome.route;
+    return (allowed_route_mask & route_bit) == 0U || stage_outcome.path_slot >= path_capacity;
+}
+
+__global__ void initialize_stage_audit_kernel(const std::uint32_t work_count,
+                                              const std::uint32_t stage_kind,
+                                              WavefrontStageAudit* const audit) {
+    if (threadIdx.x == 0U) {
+        *audit = WavefrontStageAudit{
+            .abi_major = cuda::WavefrontStageAuditAbiMajor,
+            .abi_minor = cuda::WavefrontStageAuditAbiMinor,
+            .struct_size = sizeof(WavefrontStageAudit),
+            .stage_kind = stage_kind,
+            .expected_work_count = work_count,
+            .inspected_work_count = 0U,
+            .first_failure_work_index = 0xFFFFFFFFU,
+        };
+    }
+}
+
+__global__ void
+stage_audit_kernel(const WavefrontStageOutcome* const outcomes, const std::uint32_t work_count,
+                   const std::uint32_t allowed_route_mask, const std::uint32_t path_capacity,
+                   const std::uint32_t stage_kind, WavefrontStageAudit* const audit) {
+    __shared__ std::uint32_t first_failure_indices[ThreadsPerBlock];
+    __shared__ std::uint32_t closure_sample_counts[ThreadsPerBlock];
+    __shared__ std::uint32_t light_sample_counts[ThreadsPerBlock];
+
+    const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    auto first_failure = std::uint32_t{0xFFFFFFFFU};
+    auto closure_samples = std::uint32_t{};
+    auto light_samples = std::uint32_t{};
+    const auto shade_stage = stage_kind == static_cast<std::uint32_t>(WavefrontStageKind::shade);
+    if (index < work_count) {
+        const auto stage_outcome = outcomes[index];
+        if (stage_outcome_failed(stage_outcome, allowed_route_mask, path_capacity)) {
+            first_failure = static_cast<std::uint32_t>(index);
+        }
+        if (shade_stage) {
+            closure_samples +=
+                (stage_outcome.detail & cuda::WavefrontShadeDetailClosureSampled) != 0U ? 1U : 0U;
+            light_samples +=
+                (stage_outcome.detail & cuda::WavefrontShadeDetailLightSampled) != 0U ? 1U : 0U;
+        }
+    }
+
+    first_failure_indices[threadIdx.x] = first_failure;
+    closure_sample_counts[threadIdx.x] = closure_samples;
+    light_sample_counts[threadIdx.x] = light_samples;
+    __syncthreads();
+    for (auto stride = ThreadsPerBlock / 2U; stride != 0U; stride /= 2U) {
+        if (threadIdx.x < stride) {
+            const auto right_failure = first_failure_indices[threadIdx.x + stride];
+            first_failure_indices[threadIdx.x] = right_failure < first_failure_indices[threadIdx.x]
+                                                     ? right_failure
+                                                     : first_failure_indices[threadIdx.x];
+            closure_sample_counts[threadIdx.x] += closure_sample_counts[threadIdx.x + stride];
+            light_sample_counts[threadIdx.x] += light_sample_counts[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0U) {
+        atomicMin(&audit->first_failure_work_index, first_failure_indices[0U]);
+        if (shade_stage) {
+            atomicAdd(&audit->closure_samples, closure_sample_counts[0U]);
+            atomicAdd(&audit->light_samples, light_sample_counts[0U]);
+        }
+        __threadfence();
+        const auto completed_block = atomicAdd(&audit->reserved[0U], 1U);
+        if (completed_block + 1U == gridDim.x) {
+            audit->inspected_work_count = work_count;
+            if (audit->first_failure_work_index < work_count) {
+                audit->first_failure = outcomes[audit->first_failure_work_index];
+            }
+            audit->reserved[0U] = 0U;
+        }
+    }
+}
+
 [[nodiscard]] bool host_queue_view_is_valid(const WavefrontQueueDeviceSoa queues) noexcept {
     return queues.headers != nullptr && queues.queue_count == cuda::CudaWavefrontQueueCount &&
            (queues.slot_stride == 0U || queues.path_slots != nullptr);
@@ -3507,5 +3613,24 @@ extern "C" int blackframe_cuda_launch_wavefront_continuation_stage(
     }
     continuation_stage_kernel<<<block_count(work_count), ThreadsPerBlock>>>(queues, streams,
                                                                             work_count, outcomes);
+    return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int blackframe_cuda_launch_wavefront_audit_stage(
+    const WavefrontStageOutcome* const outcomes, const std::uint32_t work_count,
+    const std::uint32_t allowed_route_mask, const std::uint32_t path_capacity,
+    const std::uint32_t stage_kind, WavefrontStageAudit* const audit) noexcept {
+    if (audit == nullptr || (work_count != 0U && outcomes == nullptr) ||
+        stage_kind > static_cast<std::uint32_t>(WavefrontStageKind::continuation)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+
+    initialize_stage_audit_kernel<<<1U, 1U>>>(work_count, stage_kind, audit);
+    auto status = cudaGetLastError();
+    if (status != cudaSuccess || work_count == 0U) {
+        return static_cast<int>(status);
+    }
+    stage_audit_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
+        outcomes, work_count, allowed_route_mask, path_capacity, stage_kind, audit);
     return static_cast<int>(cudaGetLastError());
 }

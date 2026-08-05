@@ -309,6 +309,36 @@ void add_report(CudaWavefrontTransportReport& destination,
                                [](const auto value) { return std::isfinite(value) && value >= 0; });
 }
 
+void expect_transport_batches_exact(const CudaWavefrontTransportBatch& expected,
+                                    const CudaWavefrontTransportBatch& actual) {
+    EXPECT_EQ(actual.report, expected.report);
+    ASSERT_EQ(actual.paths.size(), expected.paths.size());
+    for (auto index = std::size_t{}; index < expected.paths.size(); ++index) {
+        SCOPED_TRACE(testing::Message{} << "path " << index);
+        const auto& expected_path = expected.paths[index];
+        const auto& actual_path = actual.paths[index];
+        EXPECT_EQ(actual_path.termination, expected_path.termination);
+        EXPECT_EQ(actual_path.blocked_depth_limits, expected_path.blocked_depth_limits);
+        EXPECT_EQ(actual_path.state.beta(), expected_path.state.beta());
+        EXPECT_EQ(actual_path.state.accumulated_radiance(),
+                  expected_path.state.accumulated_radiance());
+        EXPECT_EQ(actual_path.state.depth(), expected_path.state.depth());
+        EXPECT_EQ(actual_path.state.depth_counters(), expected_path.state.depth_counters());
+        EXPECT_EQ(actual_path.state.eta_scale(), expected_path.state.eta_scale());
+        EXPECT_EQ(actual_path.state.wavelengths(), expected_path.state.wavelengths());
+        EXPECT_EQ(actual_path.state.delta_flags(), expected_path.state.delta_flags());
+        EXPECT_EQ(actual_path.state.current_medium(), expected_path.state.current_medium());
+        EXPECT_EQ(actual_path.terminal_ray.origin(), expected_path.terminal_ray.origin());
+        EXPECT_EQ(actual_path.terminal_ray.direction(), expected_path.terminal_ray.direction());
+        EXPECT_EQ(actual_path.terminal_ray.t_min(), expected_path.terminal_ray.t_min());
+        EXPECT_EQ(actual_path.terminal_ray.t_max(), expected_path.terminal_ray.t_max());
+        EXPECT_EQ(actual_path.terminal_ray.time(), expected_path.terminal_ray.time());
+        EXPECT_EQ(actual_path.terminal_ray.mask(), expected_path.terminal_ray.mask());
+        EXPECT_EQ(actual_path.terminal_ray.current_medium(),
+                  expected_path.terminal_ray.current_medium());
+    }
+}
+
 class CudaCornellWavefrontSmokeTest : public testing::Test {
   protected:
     void SetUp() override {
@@ -374,6 +404,10 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
     auto film = renderer::Film::create(extent);
     ASSERT_TRUE(film.has_value()) << film.error().message;
+    const auto workspace_capacity = static_cast<std::size_t>(extent.width) * extent.height *
+                                    static_cast<std::size_t>(samples_per_batch);
+    auto workspace = CudaWavefrontTransportWorkspace::create(workspace_capacity);
+    ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
 
     auto aggregate_report = CudaWavefrontTransportReport{
         .schema_version = CurrentCudaWavefrontTransportReportSchemaVersion,
@@ -393,8 +427,9 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
             make_inputs(*camera, wavelengths(), extent, first_sample, batch_sample_count);
         ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 
-        const auto traced = trace_cuda_wavefront_transport(
-            *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options());
+        const auto traced =
+            trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                           std::cref(*light_sampler_), transport_options());
         ASSERT_TRUE(traced.has_value()) << traced.error().message;
         ASSERT_EQ(traced->paths.size(), inputs->size());
 
@@ -526,6 +561,8 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
         testing::Test::RecordProperty("cuda_cornell_output", diagnostic_output->string());
     }
 #endif
+    const auto workspace_close = workspace->close();
+    EXPECT_TRUE(workspace_close.has_value()) << workspace_close.error().message;
 }
 
 TEST_F(CudaCornellWavefrontSmokeTest, AccumulatesConstantEnvironmentOnPrimaryMiss) {
@@ -776,6 +813,114 @@ TEST_F(CudaCornellWavefrontSmokeTest, TerminatesZeroThroughputBeforeSampling) {
     EXPECT_EQ(traced->report.stage_lanes.continuation, 0U);
 }
 
+TEST_F(CudaCornellWavefrontSmokeTest, ReusesWorkspaceForFullAndSmallerBatchesExactly) {
+    const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
+    ASSERT_TRUE(camera.has_value()) << camera.error().message;
+    const auto full_inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 8U);
+    ASSERT_TRUE(full_inputs.has_value()) << full_inputs.error().message;
+    const auto smaller_inputs = make_pixel_inputs(*camera, wavelengths(), 31U, 33U, 97U, 3U);
+    ASSERT_TRUE(smaller_inputs.has_value()) << smaller_inputs.error().message;
+    const auto options = transport_options();
+    const auto full_baseline = trace_cuda_wavefront_transport(
+        *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_), options);
+    ASSERT_TRUE(full_baseline.has_value()) << full_baseline.error().message;
+    const auto smaller_baseline = trace_cuda_wavefront_transport(
+        *scene_soa_, *scene_bvh_, *smaller_inputs, std::cref(*light_sampler_), options);
+    ASSERT_TRUE(smaller_baseline.has_value()) << smaller_baseline.error().message;
+
+    auto workspace = CudaWavefrontTransportWorkspace::create(8U);
+    ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
+    const auto initial_capacity = workspace->capacity();
+    const auto initial_device_bytes = workspace->device_size_bytes();
+    const auto initial_device = workspace->device_ordinal();
+    EXPECT_EQ(initial_capacity, 8U);
+    EXPECT_GT(initial_device_bytes, 0U);
+    EXPECT_EQ(initial_device, scene_soa_->device_ordinal());
+
+    const auto first = trace_cuda_wavefront_transport(
+        *workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_), options);
+    ASSERT_TRUE(first.has_value()) << first.error().message;
+    const auto second = trace_cuda_wavefront_transport(
+        *workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_), options);
+    ASSERT_TRUE(second.has_value()) << second.error().message;
+    const auto smaller = trace_cuda_wavefront_transport(
+        *workspace, *scene_soa_, *scene_bvh_, *smaller_inputs, std::cref(*light_sampler_), options);
+    ASSERT_TRUE(smaller.has_value()) << smaller.error().message;
+
+    expect_transport_batches_exact(*full_baseline, *first);
+    expect_transport_batches_exact(*full_baseline, *second);
+    expect_transport_batches_exact(*smaller_baseline, *smaller);
+    EXPECT_EQ(workspace->capacity(), initial_capacity);
+    EXPECT_EQ(workspace->device_size_bytes(), initial_device_bytes);
+    EXPECT_EQ(workspace->device_ordinal(), initial_device);
+    EXPECT_TRUE(workspace->close().has_value());
+}
+
+TEST_F(CudaCornellWavefrontSmokeTest, CapacityAndBudgetRejectionsDoNotPoisonWorkspace) {
+    const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
+    ASSERT_TRUE(camera.has_value()) << camera.error().message;
+    const auto inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 5U);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+    const auto valid_inputs =
+        std::span<const CudaWavefrontPathInput>{inputs->data(), std::size_t{4U}};
+    const auto options = transport_options();
+    const auto baseline = trace_cuda_wavefront_transport(*scene_soa_, *scene_bvh_, valid_inputs,
+                                                         std::cref(*light_sampler_), options);
+    ASSERT_TRUE(baseline.has_value()) << baseline.error().message;
+
+    auto workspace = CudaWavefrontTransportWorkspace::create(4U);
+    ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
+    const auto initial_device_bytes = workspace->device_size_bytes();
+    ASSERT_GT(initial_device_bytes, 0U);
+    const auto over_capacity = trace_cuda_wavefront_transport(
+        *workspace, *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), options);
+    ASSERT_FALSE(over_capacity.has_value());
+    EXPECT_EQ(over_capacity.error().code, core::StatusCode::resource_exhausted);
+
+    auto insufficient_budget = options;
+    insufficient_budget.device_memory_budget =
+        xpu::cuda::DeviceMemoryBudget{.maximum_bytes = initial_device_bytes - 1U};
+    const auto budget_rejected =
+        trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, valid_inputs,
+                                       std::cref(*light_sampler_), insufficient_budget);
+    ASSERT_FALSE(budget_rejected.has_value());
+    EXPECT_EQ(budget_rejected.error().code, core::StatusCode::resource_exhausted);
+
+    const auto recovered = trace_cuda_wavefront_transport(
+        *workspace, *scene_soa_, *scene_bvh_, valid_inputs, std::cref(*light_sampler_), options);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().message;
+    expect_transport_batches_exact(*baseline, *recovered);
+    EXPECT_EQ(workspace->capacity(), 4U);
+    EXPECT_EQ(workspace->device_size_bytes(), initial_device_bytes);
+    EXPECT_EQ(workspace->device_ordinal(), scene_soa_->device_ordinal());
+    EXPECT_TRUE(workspace->close().has_value());
+}
+
+TEST_F(CudaCornellWavefrontSmokeTest, CloseIsIdempotentAndClosedWorkspaceRefusesTrace) {
+    const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
+    ASSERT_TRUE(camera.has_value()) << camera.error().message;
+    const auto inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 2U);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+    auto workspace = CudaWavefrontTransportWorkspace::create(2U);
+    ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
+    const auto traced =
+        trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), transport_options());
+    ASSERT_TRUE(traced.has_value()) << traced.error().message;
+
+    EXPECT_TRUE(workspace->close().has_value());
+    EXPECT_TRUE(workspace->close().has_value());
+    EXPECT_FALSE(static_cast<bool>(*workspace));
+    EXPECT_EQ(workspace->capacity(), 0U);
+    EXPECT_EQ(workspace->device_size_bytes(), 0U);
+    EXPECT_EQ(workspace->device_ordinal(), -1);
+    const auto rejected =
+        trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), transport_options());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, core::StatusCode::invalid_argument);
+}
+
 TEST_F(CudaCornellWavefrontSmokeTest, RejectsInsufficientDeviceBudgetWithoutFallback) {
     const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
@@ -789,6 +934,30 @@ TEST_F(CudaCornellWavefrontSmokeTest, RejectsInsufficientDeviceBudgetWithoutFall
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, core::StatusCode::resource_exhausted);
     EXPECT_FALSE(rejected.error().message.empty());
+
+    const auto workspace_rejected = CudaWavefrontTransportWorkspace::create(
+        1U, xpu::cuda::DeviceMemoryBudget{.maximum_bytes = 1U});
+    ASSERT_FALSE(workspace_rejected.has_value());
+    EXPECT_EQ(workspace_rejected.error().code, core::StatusCode::resource_exhausted);
+
+    auto sized_workspace = CudaWavefrontTransportWorkspace::create(1U);
+    ASSERT_TRUE(sized_workspace.has_value()) << sized_workspace.error().message;
+    const auto exact_workspace_budget = sized_workspace->device_size_bytes();
+    ASSERT_GT(exact_workspace_budget, 1U);
+    ASSERT_TRUE(sized_workspace->close().has_value());
+
+    const auto aggregate_rejected = CudaWavefrontTransportWorkspace::create(
+        1U, xpu::cuda::DeviceMemoryBudget{.maximum_bytes = exact_workspace_budget - 1U});
+    ASSERT_FALSE(aggregate_rejected.has_value());
+    EXPECT_EQ(aggregate_rejected.error().code, core::StatusCode::resource_exhausted);
+    EXPECT_NE(aggregate_rejected.error().message.find("aggregate device-memory budget"),
+              std::string::npos);
+
+    auto exact_workspace = CudaWavefrontTransportWorkspace::create(
+        1U, xpu::cuda::DeviceMemoryBudget{.maximum_bytes = exact_workspace_budget});
+    ASSERT_TRUE(exact_workspace.has_value()) << exact_workspace.error().message;
+    EXPECT_EQ(exact_workspace->device_size_bytes(), exact_workspace_budget);
+    EXPECT_TRUE(exact_workspace->close().has_value());
 }
 
 } // namespace

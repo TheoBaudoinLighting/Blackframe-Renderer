@@ -186,6 +186,22 @@ pushed_values(const std::span<const WavefrontQueueDevicePush> requests,
 }
 
 [[nodiscard]] std::vector<std::uint32_t>
+pushed_values_for_queue(const std::span<const WavefrontQueueDevicePush> requests,
+                        const std::span<const WavefrontQueueDevicePushStatus> outcomes,
+                        const std::uint32_t queue_kind) {
+    EXPECT_EQ(requests.size(), outcomes.size());
+    auto values = std::vector<std::uint32_t>{};
+    for (auto index = std::size_t{}; index < std::min(requests.size(), outcomes.size()); ++index) {
+        if (requests[index].queue_kind == queue_kind &&
+            outcomes[index] == WavefrontQueueDevicePushStatus::pushed) {
+            values.push_back(requests[index].slot.value);
+        }
+    }
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+[[nodiscard]] std::vector<std::uint32_t>
 column_values(const std::span<const shared::PathSlot> slots, const std::uint32_t queue_kind,
               const std::uint32_t capacity) {
     const auto first = static_cast<std::size_t>(queue_kind) * capacity;
@@ -277,6 +293,101 @@ TEST(CudaWavefrontQueuesTest, KeepsSevenSoaColumnsIndependentDuringForcedOverflo
         }
         std::sort(values.begin(), values.end());
         EXPECT_EQ(values, column_values(expected_slots, queue_kind, capacity));
+    }
+}
+
+TEST(CudaWavefrontQueuesTest, InterleavedWarpGroupsReservePartialCapacityExactly) {
+    ASSERT_TRUE(select_test_device());
+    constexpr auto capacity = std::uint32_t{5U};
+    constexpr auto participating_queue_count = std::uint32_t{3U};
+    constexpr auto request_count = std::uint32_t{32U};
+    constexpr auto invalid_request_period = participating_queue_count + 1U;
+
+    auto created = CudaWavefrontQueues::create(capacity);
+    ASSERT_TRUE(created.has_value()) << created.error().message;
+    auto queues = std::move(*created);
+    const auto view = queues.device_view();
+
+    auto requests = std::vector<WavefrontQueueDevicePush>{};
+    requests.reserve(request_count);
+    auto request_counts = std::array<std::uint32_t, QueueCount>{};
+    auto invalid_request_count = std::uint32_t{};
+    for (auto lane = std::uint32_t{}; lane < request_count; ++lane) {
+        const auto selector = lane % invalid_request_period;
+        const auto queue_kind =
+            selector < participating_queue_count ? selector : cuda::CudaWavefrontQueueCount;
+        if (queue_kind < cuda::CudaWavefrontQueueCount) {
+            ++request_counts[queue_kind];
+        } else {
+            ++invalid_request_count;
+        }
+        requests.push_back(WavefrontQueueDevicePush{
+            .queue_kind = queue_kind,
+            .slot = shared::PathSlot{.value = encoded_slot(queue_kind, lane)},
+        });
+    }
+
+    auto outcomes = std::vector<WavefrontQueueDevicePushStatus>{};
+    launch_pushes(view, requests, outcomes);
+    EXPECT_EQ(count_status(outcomes, WavefrontQueueDevicePushStatus::pushed),
+              participating_queue_count * capacity);
+    EXPECT_EQ(count_status(outcomes, WavefrontQueueDevicePushStatus::capacity_exhausted),
+              request_count - invalid_request_count - participating_queue_count * capacity);
+    EXPECT_EQ(count_status(outcomes, WavefrontQueueDevicePushStatus::invalid_contract),
+              invalid_request_count);
+
+    const auto headers = download_headers(view);
+    const auto slots = download_slots(view);
+    for (auto queue_kind = std::uint32_t{}; queue_kind < QueueCount; ++queue_kind) {
+        const auto participates = queue_kind < participating_queue_count;
+        const auto expected_size = participates ? capacity : 0U;
+        const auto expected_rejections = participates ? request_counts[queue_kind] - capacity : 0U;
+        expect_header(headers[queue_kind], queue_kind, capacity, expected_size, expected_rejections,
+                      expected_rejections);
+        if (participates) {
+            EXPECT_EQ(column_values(slots, queue_kind, capacity),
+                      pushed_values_for_queue(requests, outcomes, queue_kind));
+        }
+    }
+}
+
+TEST(CudaWavefrontQueuesTest, HandlesSixtyFourKInterleavedRequestsExactly) {
+    ASSERT_TRUE(select_test_device());
+    constexpr auto capacity = std::uint32_t{1'001U};
+    constexpr auto request_count = std::uint32_t{65'536U};
+
+    auto created = CudaWavefrontQueues::create(capacity);
+    ASSERT_TRUE(created.has_value()) << created.error().message;
+    auto queues = std::move(*created);
+    const auto view = queues.device_view();
+
+    auto requests = std::vector<WavefrontQueueDevicePush>{};
+    requests.reserve(request_count);
+    auto request_counts = std::array<std::uint32_t, QueueCount>{};
+    for (auto index = std::uint32_t{}; index < request_count; ++index) {
+        const auto queue_kind = index % static_cast<std::uint32_t>(QueueCount);
+        ++request_counts[queue_kind];
+        requests.push_back(WavefrontQueueDevicePush{
+            .queue_kind = queue_kind,
+            .slot = shared::PathSlot{.value = encoded_slot(queue_kind, index)},
+        });
+    }
+
+    auto outcomes = std::vector<WavefrontQueueDevicePushStatus>{};
+    launch_pushes(view, requests, outcomes);
+    constexpr auto pushed_count = static_cast<std::uint32_t>(QueueCount) * capacity;
+    EXPECT_EQ(count_status(outcomes, WavefrontQueueDevicePushStatus::pushed), pushed_count);
+    EXPECT_EQ(count_status(outcomes, WavefrontQueueDevicePushStatus::capacity_exhausted),
+              request_count - pushed_count);
+    EXPECT_EQ(count_status(outcomes, WavefrontQueueDevicePushStatus::invalid_contract), 0U);
+
+    const auto headers = download_headers(view);
+    const auto slots = download_slots(view);
+    for (auto queue_kind = std::uint32_t{}; queue_kind < QueueCount; ++queue_kind) {
+        const auto rejected = request_counts[queue_kind] - capacity;
+        expect_header(headers[queue_kind], queue_kind, capacity, capacity, rejected, rejected);
+        EXPECT_EQ(column_values(slots, queue_kind, capacity),
+                  pushed_values_for_queue(requests, outcomes, queue_kind));
     }
 }
 

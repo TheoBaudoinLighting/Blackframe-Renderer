@@ -55,8 +55,23 @@ enum class WavefrontTermination : std::uint32_t {
     russian_roulette = 5U,
 };
 
+enum class WavefrontStageKind : std::uint32_t {
+    camera_seed = 0U,
+    camera = 1U,
+    intersection_gather = 2U,
+    intersection_classify = 3U,
+    hit = 4U,
+    miss = 5U,
+    shade = 6U,
+    shadow_gather = 7U,
+    shadow_process = 8U,
+    continuation = 9U,
+};
+
 inline constexpr std::uint16_t WavefrontTransportConfigAbiMajor = 1U;
 inline constexpr std::uint16_t WavefrontTransportConfigAbiMinor = 0U;
+inline constexpr std::uint16_t WavefrontStageAuditAbiMajor = 1U;
+inline constexpr std::uint16_t WavefrontStageAuditAbiMinor = 0U;
 inline constexpr std::uint32_t WavefrontLaneContinuationPending = 1U << 0U;
 inline constexpr std::uint32_t WavefrontLaneShadowPending = 1U << 1U;
 inline constexpr std::uint32_t WavefrontShadeDetailClosureSampled = 1U << 30U;
@@ -89,6 +104,24 @@ struct alignas(16) WavefrontStageOutcome final {
     std::uint32_t route{};
     std::uint32_t path_slot{};
     std::uint32_t detail{};
+};
+
+// Fixed-size summary produced on the device after a stage. The first failure is the outcome with
+// the smallest failing work-item index, matching the deterministic order of the former host scan.
+// UINT32_MAX denotes a successful stage. Per-stage sample counts remain 32-bit because work_count
+// is itself bounded to the same domain; the host report accumulates them in 64-bit counters.
+struct alignas(16) WavefrontStageAudit final {
+    std::uint16_t abi_major{};
+    std::uint16_t abi_minor{};
+    std::uint32_t struct_size{};
+    std::uint32_t stage_kind{};
+    std::uint32_t expected_work_count{};
+    std::uint32_t inspected_work_count{};
+    std::uint32_t first_failure_work_index{};
+    std::uint32_t closure_samples{};
+    std::uint32_t light_samples{};
+    WavefrontStageOutcome first_failure{};
+    std::uint32_t reserved[4U]{};
 };
 
 struct alignas(16) WavefrontLaneControl final {
@@ -157,6 +190,7 @@ struct alignas(16) WavefrontCameraInputDeviceSoa final {
     static_assert(std::is_trivially_destructible_v<record>)
 
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageOutcome);
+BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageAudit);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontTransportConfig);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontLaneControl);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontPendingShadow);
@@ -170,6 +204,7 @@ static_assert(sizeof(WavefrontStageStatus) == 4U);
 static_assert(sizeof(WavefrontStageRoute) == 4U);
 static_assert(sizeof(WavefrontLanePhase) == 4U);
 static_assert(sizeof(WavefrontTermination) == 4U);
+static_assert(sizeof(WavefrontStageKind) == 4U);
 static_assert(sizeof(WavefrontTransportConfig) == 64U);
 static_assert(alignof(WavefrontTransportConfig) == 16U);
 static_assert(offsetof(WavefrontTransportConfig, abi_major) == 0U);
@@ -194,6 +229,19 @@ static_assert(offsetof(WavefrontStageOutcome, status) == 0U);
 static_assert(offsetof(WavefrontStageOutcome, route) == 4U);
 static_assert(offsetof(WavefrontStageOutcome, path_slot) == 8U);
 static_assert(offsetof(WavefrontStageOutcome, detail) == 12U);
+static_assert(sizeof(WavefrontStageAudit) == 64U);
+static_assert(alignof(WavefrontStageAudit) == 16U);
+static_assert(offsetof(WavefrontStageAudit, abi_major) == 0U);
+static_assert(offsetof(WavefrontStageAudit, abi_minor) == 2U);
+static_assert(offsetof(WavefrontStageAudit, struct_size) == 4U);
+static_assert(offsetof(WavefrontStageAudit, stage_kind) == 8U);
+static_assert(offsetof(WavefrontStageAudit, expected_work_count) == 12U);
+static_assert(offsetof(WavefrontStageAudit, inspected_work_count) == 16U);
+static_assert(offsetof(WavefrontStageAudit, first_failure_work_index) == 20U);
+static_assert(offsetof(WavefrontStageAudit, closure_samples) == 24U);
+static_assert(offsetof(WavefrontStageAudit, light_samples) == 28U);
+static_assert(offsetof(WavefrontStageAudit, first_failure) == 32U);
+static_assert(offsetof(WavefrontStageAudit, reserved) == 48U);
 static_assert(sizeof(WavefrontLaneControl) == 16U);
 static_assert(alignof(WavefrontLaneControl) == 16U);
 static_assert(offsetof(WavefrontLaneControl, phase) == 0U);
@@ -313,3 +361,8 @@ extern "C" int blackframe_cuda_launch_wavefront_continuation_stage(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
     blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+
+extern "C" int blackframe_cuda_launch_wavefront_audit_stage(
+    const blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, std::uint32_t work_count,
+    std::uint32_t allowed_route_mask, std::uint32_t path_capacity, std::uint32_t stage_kind,
+    blackframe::xpu::cuda::WavefrontStageAudit* audit) noexcept;
