@@ -27,6 +27,7 @@ target_sources(
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneClosestHit.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneOcclusion.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneSoaHash.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"

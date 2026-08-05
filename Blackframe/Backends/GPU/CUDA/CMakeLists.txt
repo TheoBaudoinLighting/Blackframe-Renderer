@@ -2,7 +2,9 @@ add_library(
     BlackframeCudaScene
     STATIC
         Source/ClosestHit.cpp
+        Source/Occlusion.cpp
         Source/SceneBvh.cpp
+        Source/SceneQuery.cpp
         Source/SceneSoA.cpp
 )
 add_library(Blackframe::CudaScene ALIAS BlackframeCudaScene)
@@ -15,6 +17,7 @@ target_sources(
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/ClosestHit.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/Occlusion.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/SceneBvh.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/SceneSoA.hpp"
 )

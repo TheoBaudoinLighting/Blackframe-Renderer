@@ -1,11 +1,14 @@
 #include <Blackframe/Backends/GPU/CUDA/ClosestHit.hpp>
+#include <Blackframe/Backends/GPU/CUDA/Occlusion.hpp>
 #include <Blackframe/Engine/FrameScene.hpp>
 #include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/XPU/CUDA/SceneClosestHit.hpp>
+#include <Blackframe/XPU/CUDA/SceneOcclusion.hpp>
 #include <Blackframe/XPU/Shared/SceneBvhAbi.hpp>
 #include <Blackframe/XPU/Shared/SceneTraversalAbi.hpp>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -94,7 +97,8 @@ namespace {
 }
 
 [[nodiscard]] FrameSceneHandle make_two_instance_closest_hit_scene(
-    const float second_z = 2.0F, const std::array<std::uint32_t, 2> instance_ids = {401U, 402U}) {
+    const float second_z = 2.0F, const std::array<std::uint32_t, 2> instance_ids = {401U, 402U},
+    const std::array<std::uint32_t, 2> visibility_masks = {0x4U, 0x4U}) {
     const auto source = make_closest_hit_scene();
     auto scene = FrameScene::create(FrameSceneDescription{
         .objects = {SceneObject{.id = {.value = 101U}}},
@@ -115,7 +119,7 @@ namespace {
                     .geometry = {.value = 201U},
                     .material = {.value = 301U},
                     .local_to_parent = translated_matrix(0.0F),
-                    .visibility_mask = 0x4U,
+                    .visibility_mask = visibility_masks[0],
                 },
                 SceneInstance{
                     .id = {.value = instance_ids[1]},
@@ -124,7 +128,7 @@ namespace {
                     .geometry = {.value = 201U},
                     .material = {.value = 301U},
                     .local_to_parent = translated_matrix(second_z),
-                    .visibility_mask = 0x4U,
+                    .visibility_mask = visibility_masks[1],
                 },
             },
     });
@@ -243,6 +247,34 @@ TEST(CudaClosestHit, TracesOneTriangleAndPreservesTheFrozenHitContract) {
     EXPECT_FALSE(masked->has_value());
 }
 
+TEST(CudaOcclusion, TracesOpaqueShadowSegmentsMasksAndCoplanarMisses) {
+    ASSERT_TRUE(select_closest_hit_device());
+    const auto frame = make_closest_hit_scene();
+    auto device = upload_closest_hit_scene(*frame);
+
+    const auto occluded =
+        trace_cuda_occlusion(device.scene, device.bvh, make_closest_hit_ray(0x4U));
+    ASSERT_TRUE(occluded.has_value()) << occluded.error().message;
+    EXPECT_TRUE(*occluded);
+
+    const auto masked = trace_cuda_occlusion(device.scene, device.bvh, make_closest_hit_ray(0x8U));
+    ASSERT_TRUE(masked.has_value()) << masked.error().message;
+    EXPECT_FALSE(*masked);
+
+    auto coplanar_ray = renderer::Ray::create(renderer::Point3{.x = 0.25F, .y = 0.25F},
+                                              renderer::Vector3{.x = 1.0F}, 0.0F,
+                                              std::numeric_limits<float>::infinity(), 0.0F,
+                                              renderer::RayMask{0x4U}, renderer::VacuumMedium);
+    ASSERT_TRUE(coplanar_ray.has_value()) << coplanar_ray.error().message;
+    const auto coplanar = trace_cuda_occlusion(device.scene, device.bvh, *coplanar_ray);
+    ASSERT_TRUE(coplanar.has_value()) << coplanar.error().message;
+    EXPECT_FALSE(*coplanar);
+
+    const auto empty_batch = trace_cuda_occlusions(device.scene, device.bvh, {});
+    ASSERT_TRUE(empty_batch.has_value()) << empty_batch.error().message;
+    EXPECT_TRUE(empty_batch->empty());
+}
+
 TEST(CudaClosestHit, RepresentsEmptyWorkAndEmptyScenesWithoutSyntheticHits) {
     ASSERT_TRUE(select_closest_hit_device());
     const auto frame = make_closest_hit_scene();
@@ -258,6 +290,43 @@ TEST(CudaClosestHit, RepresentsEmptyWorkAndEmptyScenesWithoutSyntheticHits) {
         trace_cuda_closest_hit(empty_device.scene, empty_device.bvh, make_closest_hit_ray());
     ASSERT_TRUE(miss.has_value()) << miss.error().message;
     EXPECT_FALSE(miss->has_value());
+}
+
+TEST(CudaOcclusion, RepresentsEmptyScenesAndRejectsInvalidInputsExplicitly) {
+    ASSERT_TRUE(select_closest_hit_device());
+    const auto first_frame = make_closest_hit_scene();
+    const auto second_frame = make_closest_hit_scene(2.0F);
+    auto first = upload_closest_hit_scene(*first_frame);
+    auto second = upload_closest_hit_scene(*second_frame);
+    const auto ray = make_closest_hit_ray();
+
+    const auto mismatch = trace_cuda_occlusion(second.scene, first.bvh, ray);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(mismatch.error().code, core::StatusCode::incompatible);
+
+    const auto invalid_time =
+        trace_cuda_occlusion(first.scene, first.bvh, make_closest_hit_ray(0x4U, 1.25F));
+    ASSERT_FALSE(invalid_time.has_value());
+    EXPECT_EQ(invalid_time.error().code, core::StatusCode::invalid_argument);
+
+    constexpr auto required_query_bytes =
+        sizeof(xpu::shared::TransportRay) + sizeof(xpu::shared::SceneOcclusionResult);
+    const auto exhausted = trace_cuda_occlusion(
+        first.scene, first.bvh, ray,
+        CudaOcclusionQueryOptions{
+            .device_memory_budget =
+                xpu::cuda::DeviceMemoryBudget{.maximum_bytes = required_query_bytes - 1U},
+        });
+    ASSERT_FALSE(exhausted.has_value());
+    EXPECT_EQ(exhausted.error().code, core::StatusCode::resource_exhausted);
+    EXPECT_NE(exhausted.error().message.find("explicit device-memory budget"), std::string::npos);
+
+    const auto empty_frame = FrameScene::create(FrameSceneDescription{});
+    ASSERT_TRUE(empty_frame.has_value()) << empty_frame.error().message;
+    auto empty_device = upload_closest_hit_scene(**empty_frame);
+    const auto visible = trace_cuda_occlusion(empty_device.scene, empty_device.bvh, ray);
+    ASSERT_TRUE(visible.has_value()) << visible.error().message;
+    EXPECT_FALSE(*visible);
 }
 
 TEST(CudaClosestHit, RejectsMismatchedScenesInvalidTimeAndInsufficientQueryMemory) {
@@ -296,6 +365,108 @@ TEST(CudaClosestHit, LowLevelLauncherRejectsMissingStorageExplicitly) {
     EXPECT_EQ(
         blackframe_cuda_launch_scene_closest_hit(nullptr, 0U, nullptr, 0U, nullptr, 1U, nullptr),
         static_cast<int>(cudaErrorInvalidValue));
+}
+
+TEST(CudaOcclusion, LowLevelLauncherRejectsMissingStorageExplicitly) {
+    ASSERT_TRUE(select_closest_hit_device());
+    EXPECT_EQ(
+        blackframe_cuda_launch_scene_occlusion(nullptr, 0U, nullptr, 0U, nullptr, 1U, nullptr),
+        static_cast<int>(cudaErrorInvalidValue));
+}
+
+TEST(CudaOcclusion, StopsBeforeAnInvalidSecondCoincidentBranch) {
+    ASSERT_TRUE(select_closest_hit_device());
+    const auto frame = make_two_instance_closest_hit_scene(0.0F, {401U, 402U}, {0x4U, 0x8U});
+    auto device = upload_closest_hit_scene(*frame);
+    auto bytes = std::vector<std::uint8_t>(device.bvh.size_bytes());
+    auto status =
+        cudaMemcpy(bytes.data(), device.bvh.device_data(), bytes.size(), cudaMemcpyDeviceToHost);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+
+    auto header = xpu::shared::SceneBvhHeader{};
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    ASSERT_EQ(header.tlas_node_count, 3U);
+    const auto node_offset = static_cast<std::size_t>(
+        header.arrays[xpu::shared::scene_bvh_array::tlas_node].offset_bytes);
+    ASSERT_LE(node_offset, bytes.size());
+    ASSERT_LE(header.tlas_node_count,
+              (bytes.size() - node_offset) / sizeof(xpu::shared::SceneBvhNode));
+    ASSERT_LT(header.tlas_root_node, header.tlas_node_count);
+    auto root = xpu::shared::SceneBvhNode{};
+    std::memcpy(&root,
+                bytes.data() + node_offset +
+                    static_cast<std::size_t>(header.tlas_root_node) * sizeof(root),
+                sizeof(root));
+    ASSERT_EQ(root.kind, static_cast<std::uint32_t>(xpu::shared::SceneBvhNodeKind::internal));
+    ASSERT_NE(root.first_child, root.second_child);
+    ASSERT_LT(root.first_child, header.tlas_node_count);
+    ASSERT_LT(root.second_child, header.tlas_node_count);
+
+    auto first_child = xpu::shared::SceneBvhNode{};
+    auto second_child = xpu::shared::SceneBvhNode{};
+    std::memcpy(&first_child,
+                bytes.data() + node_offset +
+                    static_cast<std::size_t>(root.first_child) * sizeof(first_child),
+                sizeof(first_child));
+    std::memcpy(&second_child,
+                bytes.data() + node_offset +
+                    static_cast<std::size_t>(root.second_child) * sizeof(second_child),
+                sizeof(second_child));
+    ASSERT_EQ(first_child.minimum_x, second_child.minimum_x);
+    ASSERT_EQ(first_child.minimum_y, second_child.minimum_y);
+    ASSERT_EQ(first_child.minimum_z, second_child.minimum_z);
+    ASSERT_EQ(first_child.maximum_x, second_child.maximum_x);
+    ASSERT_EQ(first_child.maximum_y, second_child.maximum_y);
+    ASSERT_EQ(first_child.maximum_z, second_child.maximum_z);
+
+    const auto near_child = std::min(root.first_child, root.second_child);
+    const auto far_child = std::max(root.first_child, root.second_child);
+    const auto near_node = near_child == root.first_child ? first_child : second_child;
+    auto far_node = far_child == root.first_child ? first_child : second_child;
+    ASSERT_EQ(near_node.kind, static_cast<std::uint32_t>(xpu::shared::SceneBvhNodeKind::leaf));
+    ASSERT_EQ(far_node.kind, static_cast<std::uint32_t>(xpu::shared::SceneBvhNodeKind::leaf));
+    ASSERT_EQ(near_node.reference_count, 1U);
+    ASSERT_EQ(far_node.reference_count, 1U);
+
+    const auto reference_offset = static_cast<std::size_t>(
+        header.arrays[xpu::shared::scene_bvh_array::instance_reference].offset_bytes);
+    ASSERT_LE(reference_offset, bytes.size());
+    ASSERT_LE(header.instance_reference_count,
+              (bytes.size() - reference_offset) / sizeof(xpu::shared::SceneBvhInstanceReference));
+    ASSERT_LT(near_node.reference_offset, header.instance_reference_count);
+    ASSERT_LT(far_node.reference_offset, header.instance_reference_count);
+    auto near_reference = xpu::shared::SceneBvhInstanceReference{};
+    auto far_reference = xpu::shared::SceneBvhInstanceReference{};
+    std::memcpy(&near_reference,
+                bytes.data() + reference_offset +
+                    static_cast<std::size_t>(near_node.reference_offset) * sizeof(near_reference),
+                sizeof(near_reference));
+    std::memcpy(&far_reference,
+                bytes.data() + reference_offset +
+                    static_cast<std::size_t>(far_node.reference_offset) * sizeof(far_reference),
+                sizeof(far_reference));
+    ASSERT_NE(near_reference.visibility_mask, far_reference.visibility_mask);
+
+    far_node.kind = 99U;
+    std::memcpy(bytes.data() + node_offset + static_cast<std::size_t>(far_child) * sizeof(far_node),
+                &far_node, sizeof(far_node));
+    status = cudaMemcpy(const_cast<std::uint8_t*>(device.bvh.device_data()), bytes.data(),
+                        bytes.size(), cudaMemcpyHostToDevice);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+
+    const auto stopped =
+        trace_cuda_occlusion(device.scene, device.bvh,
+                             make_closest_hit_ray(renderer::RayMask{
+                                 near_reference.visibility_mask | far_reference.visibility_mask}));
+    ASSERT_TRUE(stopped.has_value()) << stopped.error().message;
+    EXPECT_TRUE(*stopped);
+
+    const auto visited = trace_cuda_occlusion(
+        device.scene, device.bvh,
+        make_closest_hit_ray(renderer::RayMask{far_reference.visibility_mask}));
+    ASSERT_FALSE(visited.has_value());
+    EXPECT_EQ(visited.error().code, core::StatusCode::internal_error);
+    EXPECT_NE(visited.error().message.find("invalid BVH topology"), std::string::npos);
 }
 
 TEST(CudaClosestHit, ReportsCyclicDeviceTopologyInsteadOfLooping) {

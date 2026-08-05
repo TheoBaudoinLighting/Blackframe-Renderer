@@ -67,6 +67,7 @@ if(BLACKFRAME_ENABLE_CUDA AND BLACKFRAME_ENABLE_EMBREE)
         APPEND
         blackframe_test_targets
         BlackframeCudaClosestHitParityTests
+        BlackframeCudaOcclusionParityTests
     )
 endif()
 

@@ -1,4 +1,5 @@
 #include <Blackframe/XPU/CUDA/SceneClosestHit.hpp>
+#include <Blackframe/XPU/CUDA/SceneOcclusion.hpp>
 #include <Blackframe/XPU/Shared/SceneBvhAbi.hpp>
 #include <Blackframe/XPU/Shared/SceneSoaAbi.hpp>
 #include <Blackframe/XPU/Shared/SceneTraversalAbi.hpp>
@@ -33,6 +34,8 @@ using shared::SceneBvhNode;
 using shared::SceneBvhNodeKind;
 using shared::SceneClosestHitResult;
 using shared::SceneClosestHitStatus;
+using shared::SceneOcclusionResult;
+using shared::SceneOcclusionStatus;
 using shared::SceneSoaColumnDescriptor;
 using shared::SceneSoaHeader;
 using shared::TransportRay;
@@ -537,6 +540,7 @@ object_space_ray(const std::uint8_t* const scene_bytes, const SceneSoaHeader& sc
     return SceneClosestHitStatus::miss;
 }
 
+template <bool ReturnBarycentrics>
 [[nodiscard]] __device__ SceneClosestHitStatus refine_ambiguous_triangle_edges(
     const Vector3 vertex0, const Vector3 vertex1, const Vector3 vertex2, const Vector3 origin,
     const Vector3 direction, const std::uint32_t kx, const std::uint32_t ky, const std::uint32_t kz,
@@ -602,35 +606,52 @@ object_space_ray(const std::uint8_t* const scene_bytes, const SceneSoaHeader& sc
         return SceneClosestHitStatus::numerical_failure;
     }
     const auto parameter = parameter_numerator / parameter_denominator;
-    const auto barycentric0 = edge0 / determinant;
-    const auto barycentric1 = edge1 / determinant;
-    const auto barycentric2 = edge2 / determinant;
-    if (!isfinite(parameter) || !isfinite(barycentric0) || !isfinite(barycentric1) ||
-        !isfinite(barycentric2)) {
-        return SceneClosestHitStatus::numerical_failure;
-    }
-    if (parameter < static_cast<double>(t_min) || parameter > static_cast<double>(t_max)) {
+    if constexpr (!ReturnBarycentrics) {
+        if (!isfinite(parameter)) {
+            return SceneClosestHitStatus::numerical_failure;
+        }
+        if (parameter < static_cast<double>(t_min) || parameter > static_cast<double>(t_max)) {
+            return SceneClosestHitStatus::miss;
+        }
+        const auto float_parameter = static_cast<float>(parameter);
+        if (!isfinite(float_parameter)) {
+            return SceneClosestHitStatus::numerical_failure;
+        }
+        result.hit = true;
+        result.parameter = float_parameter == 0.0F ? 0.0F : float_parameter;
+        return SceneClosestHitStatus::miss;
+    } else {
+        const auto barycentric0 = edge0 / determinant;
+        const auto barycentric1 = edge1 / determinant;
+        const auto barycentric2 = edge2 / determinant;
+        if (!isfinite(parameter) || !isfinite(barycentric0) || !isfinite(barycentric1) ||
+            !isfinite(barycentric2)) {
+            return SceneClosestHitStatus::numerical_failure;
+        }
+        if (parameter < static_cast<double>(t_min) || parameter > static_cast<double>(t_max)) {
+            return SceneClosestHitStatus::miss;
+        }
+
+        const auto float_parameter = static_cast<float>(parameter);
+        const auto float_barycentric0 = static_cast<float>(barycentric0);
+        const auto float_barycentric1 = static_cast<float>(barycentric1);
+        const auto float_barycentric2 = static_cast<float>(barycentric2);
+        if (!isfinite(float_parameter) || !isfinite(float_barycentric0) ||
+            !isfinite(float_barycentric1) || !isfinite(float_barycentric2)) {
+            return SceneClosestHitStatus::numerical_failure;
+        }
+        result = TriangleIntersection{
+            .hit = true,
+            .parameter = float_parameter == 0.0F ? 0.0F : float_parameter,
+            .barycentric0 = float_barycentric0 == 0.0F ? 0.0F : float_barycentric0,
+            .barycentric1 = float_barycentric1 == 0.0F ? 0.0F : float_barycentric1,
+            .barycentric2 = float_barycentric2 == 0.0F ? 0.0F : float_barycentric2,
+        };
         return SceneClosestHitStatus::miss;
     }
-
-    const auto float_parameter = static_cast<float>(parameter);
-    const auto float_barycentric0 = static_cast<float>(barycentric0);
-    const auto float_barycentric1 = static_cast<float>(barycentric1);
-    const auto float_barycentric2 = static_cast<float>(barycentric2);
-    if (!isfinite(float_parameter) || !isfinite(float_barycentric0) ||
-        !isfinite(float_barycentric1) || !isfinite(float_barycentric2)) {
-        return SceneClosestHitStatus::numerical_failure;
-    }
-    result = TriangleIntersection{
-        .hit = true,
-        .parameter = float_parameter == 0.0F ? 0.0F : float_parameter,
-        .barycentric0 = float_barycentric0 == 0.0F ? 0.0F : float_barycentric0,
-        .barycentric1 = float_barycentric1 == 0.0F ? 0.0F : float_barycentric1,
-        .barycentric2 = float_barycentric2 == 0.0F ? 0.0F : float_barycentric2,
-    };
-    return SceneClosestHitStatus::miss;
 }
 
+template <bool ReturnBarycentrics>
 [[nodiscard]] __device__ SceneClosestHitStatus
 watertight_triangle(const Vector3 vertex0, const Vector3 vertex1, const Vector3 vertex2,
                     const Vector3 origin, const Vector3 direction, const float t_min,
@@ -697,8 +718,8 @@ watertight_triangle(const Vector3 vertex0, const Vector3 vertex1, const Vector3 
     const auto has_negative = edge0 < 0.0F || edge1 < 0.0F || edge2 < 0.0F;
     const auto has_positive = edge0 > 0.0F || edge1 > 0.0F || edge2 > 0.0F;
     if (edge0 == 0.0F || edge1 == 0.0F || edge2 == 0.0F || (has_negative && has_positive)) {
-        return refine_ambiguous_triangle_edges(vertex0, vertex1, vertex2, origin, direction, kx, ky,
-                                               kz, t_min, t_max, result);
+        return refine_ambiguous_triangle_edges<ReturnBarycentrics>(
+            vertex0, vertex1, vertex2, origin, direction, kx, ky, kz, t_min, t_max, result);
     }
 
     const auto determinant = edge0 + edge1 + edge2;
@@ -725,27 +746,41 @@ watertight_triangle(const Vector3 vertex0, const Vector3 vertex1, const Vector3 
         return SceneClosestHitStatus::miss;
     }
 
-    const auto inverse_determinant = 1.0F / determinant;
-    const auto parameter = scaled_parameter * inverse_determinant;
-    const auto barycentric0 = edge0 * inverse_determinant;
-    const auto barycentric1 = edge1 * inverse_determinant;
-    const auto barycentric2 = edge2 * inverse_determinant;
-    if (!isfinite(parameter) || !isfinite(barycentric0) || !isfinite(barycentric1) ||
-        !isfinite(barycentric2)) {
-        return SceneClosestHitStatus::numerical_failure;
-    }
-    if (parameter < t_min || parameter > t_max) {
+    if constexpr (!ReturnBarycentrics) {
+        const auto inverse_determinant = 1.0F / determinant;
+        const auto parameter = scaled_parameter * inverse_determinant;
+        if (!isfinite(parameter)) {
+            return SceneClosestHitStatus::numerical_failure;
+        }
+        if (parameter < t_min || parameter > t_max) {
+            return SceneClosestHitStatus::miss;
+        }
+        result.hit = true;
+        result.parameter = parameter == 0.0F ? 0.0F : parameter;
+        return SceneClosestHitStatus::miss;
+    } else {
+        const auto inverse_determinant = 1.0F / determinant;
+        const auto parameter = scaled_parameter * inverse_determinant;
+        const auto barycentric0 = edge0 * inverse_determinant;
+        const auto barycentric1 = edge1 * inverse_determinant;
+        const auto barycentric2 = edge2 * inverse_determinant;
+        if (!isfinite(parameter) || !isfinite(barycentric0) || !isfinite(barycentric1) ||
+            !isfinite(barycentric2)) {
+            return SceneClosestHitStatus::numerical_failure;
+        }
+        if (parameter < t_min || parameter > t_max) {
+            return SceneClosestHitStatus::miss;
+        }
+
+        result = TriangleIntersection{
+            .hit = true,
+            .parameter = parameter == 0.0F ? 0.0F : parameter,
+            .barycentric0 = barycentric0 == 0.0F ? 0.0F : barycentric0,
+            .barycentric1 = barycentric1 == 0.0F ? 0.0F : barycentric1,
+            .barycentric2 = barycentric2 == 0.0F ? 0.0F : barycentric2,
+        };
         return SceneClosestHitStatus::miss;
     }
-
-    result = TriangleIntersection{
-        .hit = true,
-        .parameter = parameter == 0.0F ? 0.0F : parameter,
-        .barycentric0 = barycentric0 == 0.0F ? 0.0F : barycentric0,
-        .barycentric1 = barycentric1 == 0.0F ? 0.0F : barycentric1,
-        .barycentric2 = barycentric2 == 0.0F ? 0.0F : barycentric2,
-    };
-    return SceneClosestHitStatus::miss;
 }
 
 [[nodiscard]] __device__ SceneClosestHitStatus
@@ -805,11 +840,23 @@ world_geometric_normal(const std::uint8_t* const scene_bytes, const SceneSoaHead
              (instance_id == closest.instance_id && primitive_id < closest.primitive_id)));
 }
 
-[[nodiscard]] __device__ SceneClosestHitStatus traverse_blas(
-    const std::uint8_t* const scene_bytes, const SceneSoaHeader& scene,
-    const std::uint8_t* const bvh_bytes, const SceneBvhHeader& bvh,
-    const SceneBvhInstanceReference& instance_reference, const TransportRay& world_ray,
-    const Vector3 local_origin, const Vector3 local_direction, ClosestCandidate& closest) noexcept {
+template <bool StopAtFirstHit>
+[[nodiscard]] __device__ float traversal_t_max(const TransportRay& ray,
+                                               const ClosestCandidate* const closest) noexcept {
+    if constexpr (StopAtFirstHit) {
+        return ray.t_max;
+    } else {
+        return closest->parameter;
+    }
+}
+
+template <bool StopAtFirstHit>
+[[nodiscard]] __device__ SceneClosestHitStatus
+traverse_blas(const std::uint8_t* const scene_bytes, const SceneSoaHeader& scene,
+              const std::uint8_t* const bvh_bytes, const SceneBvhHeader& bvh,
+              const SceneBvhInstanceReference& instance_reference, const TransportRay& world_ray,
+              const Vector3 local_origin, const Vector3 local_direction,
+              ClosestCandidate* const closest, bool& occluded) noexcept {
     const auto* const blases = bvh_values<SceneBvhBlas>(bvh_bytes, bvh, bvh_array::blas);
     const auto* const nodes = bvh_values<SceneBvhNode>(bvh_bytes, bvh, bvh_array::blas_node);
     const auto* const primitive_references =
@@ -869,7 +916,8 @@ world_geometric_normal(const std::uint8_t* const scene_bytes, const SceneSoaHead
         auto intersects = false;
         auto near_parameter = 0.0F;
         auto status = intersect_bounds(node, local_origin, local_direction, world_ray.t_min,
-                                       closest.parameter, intersects, near_parameter);
+                                       traversal_t_max<StopAtFirstHit>(world_ray, closest),
+                                       intersects, near_parameter);
         if (status != SceneClosestHitStatus::miss) {
             return status;
         }
@@ -880,10 +928,10 @@ world_geometric_normal(const std::uint8_t* const scene_bytes, const SceneSoaHead
             if (node.split_axis > 2U || node.reference_offset != 0U || node.reference_count != 0U) {
                 return SceneClosestHitStatus::invalid_topology;
             }
-            status = push_intersecting_children(nodes, node.first_child, node.second_child,
-                                                blas.node_offset, blas.node_count, local_origin,
-                                                local_direction, world_ray.t_min, closest.parameter,
-                                                stack, stack_size);
+            status = push_intersecting_children(
+                nodes, node.first_child, node.second_child, blas.node_offset, blas.node_count,
+                local_origin, local_direction, world_ray.t_min,
+                traversal_t_max<StopAtFirstHit>(world_ray, closest), stack, stack_size);
             if (status != SceneClosestHitStatus::miss) {
                 return status;
             }
@@ -925,67 +973,76 @@ world_geometric_normal(const std::uint8_t* const scene_bytes, const SceneSoaHead
         }
 
         auto intersection = TriangleIntersection{};
-        status =
-            watertight_triangle(vertices[0], vertices[1], vertices[2], local_origin,
-                                local_direction, world_ray.t_min, closest.parameter, intersection);
+        status = watertight_triangle<!StopAtFirstHit>(
+            vertices[0], vertices[1], vertices[2], local_origin, local_direction, world_ray.t_min,
+            traversal_t_max<StopAtFirstHit>(world_ray, closest), intersection);
         if (status != SceneClosestHitStatus::miss) {
             return status;
         }
-        if (!intersection.hit ||
-            !candidate_precedes(intersection.parameter, instance_reference.instance_id, primitive,
-                                closest)) {
+        if (!intersection.hit) {
             continue;
         }
+        if constexpr (StopAtFirstHit) {
+            occluded = true;
+            return SceneClosestHitStatus::miss;
+        } else {
+            if (!candidate_precedes(intersection.parameter, instance_reference.instance_id,
+                                    primitive, *closest)) {
+                continue;
+            }
 
-        auto normal = Vector3{};
-        status = world_geometric_normal(scene_bytes, scene, instance_reference.scene_instance_index,
-                                        vertices[0], vertices[1], vertices[2], normal);
-        if (status != SceneClosestHitStatus::miss) {
-            return status;
-        }
-        const auto scene_instance = instance_reference.scene_instance_index;
-        const auto scene_instance_id = scene_values<std::uint32_t>(
-            scene_bytes, scene, scene_column::instance_id)[scene_instance];
-        const auto scene_geometry_id = scene_values<std::uint32_t>(
-            scene_bytes, scene, scene_column::instance_geometry_id)[scene_instance];
-        if (scene_instance_id != instance_reference.instance_id ||
-            scene_geometry_id != instance_reference.geometry_id) {
-            return SceneClosestHitStatus::invalid_topology;
-        }
+            auto normal = Vector3{};
+            status =
+                world_geometric_normal(scene_bytes, scene, instance_reference.scene_instance_index,
+                                       vertices[0], vertices[1], vertices[2], normal);
+            if (status != SceneClosestHitStatus::miss) {
+                return status;
+            }
+            const auto scene_instance = instance_reference.scene_instance_index;
+            const auto scene_instance_id = scene_values<std::uint32_t>(
+                scene_bytes, scene, scene_column::instance_id)[scene_instance];
+            const auto scene_geometry_id = scene_values<std::uint32_t>(
+                scene_bytes, scene, scene_column::instance_geometry_id)[scene_instance];
+            if (scene_instance_id != instance_reference.instance_id ||
+                scene_geometry_id != instance_reference.geometry_id) {
+                return SceneClosestHitStatus::invalid_topology;
+            }
 
-        closest.present = true;
-        closest.parameter = intersection.parameter;
-        closest.instance_id = instance_reference.instance_id;
-        closest.primitive_id = primitive;
-        closest.hit = ClosestHit{
-            .parameter = intersection.parameter,
-            .barycentric_vertex0 = intersection.barycentric0,
-            .barycentric_vertex1 = intersection.barycentric1,
-            .barycentric_vertex2 = intersection.barycentric2,
-            .geometric_normal_x = normal.x,
-            .geometric_normal_y = normal.y,
-            .geometric_normal_z = normal.z,
-            .reserved = 0U,
-            .identifiers =
-                {
-                    .object = scene_values<std::uint32_t>(
-                        scene_bytes, scene, scene_column::instance_object_id)[scene_instance],
-                    .instance = instance_reference.instance_id,
-                    .geometry = instance_reference.geometry_id,
-                    .primitive = primitive,
-                    .material = scene_values<std::uint32_t>(
-                        scene_bytes, scene, scene_column::instance_material_id)[scene_instance],
-                    .reserved = {0U, 0U, 0U},
-                },
-        };
+            closest->present = true;
+            closest->parameter = intersection.parameter;
+            closest->instance_id = instance_reference.instance_id;
+            closest->primitive_id = primitive;
+            closest->hit = ClosestHit{
+                .parameter = intersection.parameter,
+                .barycentric_vertex0 = intersection.barycentric0,
+                .barycentric_vertex1 = intersection.barycentric1,
+                .barycentric_vertex2 = intersection.barycentric2,
+                .geometric_normal_x = normal.x,
+                .geometric_normal_y = normal.y,
+                .geometric_normal_z = normal.z,
+                .reserved = 0U,
+                .identifiers =
+                    {
+                        .object = scene_values<std::uint32_t>(
+                            scene_bytes, scene, scene_column::instance_object_id)[scene_instance],
+                        .instance = instance_reference.instance_id,
+                        .geometry = instance_reference.geometry_id,
+                        .primitive = primitive,
+                        .material = scene_values<std::uint32_t>(
+                            scene_bytes, scene, scene_column::instance_material_id)[scene_instance],
+                        .reserved = {0U, 0U, 0U},
+                    },
+            };
+        }
     }
     return SceneClosestHitStatus::miss;
 }
 
+template <bool StopAtFirstHit>
 [[nodiscard]] __device__ SceneClosestHitStatus
-trace_closest_hit(const std::uint8_t* const scene_bytes, const SceneSoaHeader& scene,
-                  const std::uint8_t* const bvh_bytes, const SceneBvhHeader& bvh,
-                  const TransportRay& ray, ClosestCandidate& closest) noexcept {
+trace_scene(const std::uint8_t* const scene_bytes, const SceneSoaHeader& scene,
+            const std::uint8_t* const bvh_bytes, const SceneBvhHeader& bvh, const TransportRay& ray,
+            ClosestCandidate* const closest, bool& occluded) noexcept {
     if (bvh.tlas_node_count == 0U) {
         return SceneClosestHitStatus::miss;
     }
@@ -1014,7 +1071,8 @@ trace_closest_hit(const std::uint8_t* const scene_bytes, const SceneSoaHeader& s
         auto intersects = false;
         auto near_parameter = 0.0F;
         auto status = intersect_bounds(node, world_origin, world_direction, ray.t_min,
-                                       closest.parameter, intersects, near_parameter);
+                                       traversal_t_max<StopAtFirstHit>(ray, closest), intersects,
+                                       near_parameter);
         if (status != SceneClosestHitStatus::miss) {
             return status;
         }
@@ -1025,10 +1083,10 @@ trace_closest_hit(const std::uint8_t* const scene_bytes, const SceneSoaHeader& s
             if (node.split_axis > 2U || node.reference_offset != 0U || node.reference_count != 0U) {
                 return SceneClosestHitStatus::invalid_topology;
             }
-            status = push_intersecting_children(nodes, node.first_child, node.second_child, 0U,
-                                                static_cast<std::uint32_t>(bvh.tlas_node_count),
-                                                world_origin, world_direction, ray.t_min,
-                                                closest.parameter, stack, stack_size);
+            status = push_intersecting_children(
+                nodes, node.first_child, node.second_child, 0U,
+                static_cast<std::uint32_t>(bvh.tlas_node_count), world_origin, world_direction,
+                ray.t_min, traversal_t_max<StopAtFirstHit>(ray, closest), stack, stack_size);
             if (status != SceneClosestHitStatus::miss) {
                 return status;
             }
@@ -1075,13 +1133,27 @@ trace_closest_hit(const std::uint8_t* const scene_bytes, const SceneSoaHeader& s
         if (status != SceneClosestHitStatus::miss) {
             return status;
         }
-        status = traverse_blas(scene_bytes, scene, bvh_bytes, bvh, reference, ray, local_origin,
-                               local_direction, closest);
+        status = traverse_blas<StopAtFirstHit>(scene_bytes, scene, bvh_bytes, bvh, reference, ray,
+                                               local_origin, local_direction, closest, occluded);
         if (status != SceneClosestHitStatus::miss) {
             return status;
         }
+        if (occluded) {
+            return SceneClosestHitStatus::miss;
+        }
     }
     return SceneClosestHitStatus::miss;
+}
+
+[[nodiscard]] __device__ SceneClosestHitStatus validate_traversal_layout(
+    const std::uint8_t* const scene_bytes, const std::size_t scene_size,
+    const std::uint8_t* const bvh_bytes, const std::size_t bvh_size) noexcept {
+    auto status = validate_scene_layout(scene_bytes, scene_size);
+    if (status == SceneClosestHitStatus::miss) {
+        status = validate_bvh_layout(bvh_bytes, bvh_size,
+                                     *reinterpret_cast<const SceneSoaHeader*>(scene_bytes));
+    }
+    return status;
 }
 
 __global__ void scene_closest_hit_kernel(const std::uint8_t* const scene_bytes,
@@ -1092,12 +1164,8 @@ __global__ void scene_closest_hit_kernel(const std::uint8_t* const scene_bytes,
                                          SceneClosestHitResult* const results) {
     __shared__ std::uint32_t layout_status;
     if (threadIdx.x == 0U) {
-        auto status = validate_scene_layout(scene_bytes, scene_size);
-        if (status == SceneClosestHitStatus::miss) {
-            status = validate_bvh_layout(bvh_bytes, bvh_size,
-                                         *reinterpret_cast<const SceneSoaHeader*>(scene_bytes));
-        }
-        layout_status = status_value(status);
+        layout_status =
+            status_value(validate_traversal_layout(scene_bytes, scene_size, bvh_bytes, bvh_size));
     }
     __syncthreads();
 
@@ -1119,14 +1187,57 @@ __global__ void scene_closest_hit_kernel(const std::uint8_t* const scene_bytes,
         return;
     }
     auto closest = ClosestCandidate{.parameter = ray.t_max};
-    const auto status = trace_closest_hit(
+    auto occluded = false;
+    const auto status = trace_scene<false>(
         scene_bytes, *reinterpret_cast<const SceneSoaHeader*>(scene_bytes), bvh_bytes,
-        *reinterpret_cast<const SceneBvhHeader*>(bvh_bytes), ray, closest);
+        *reinterpret_cast<const SceneBvhHeader*>(bvh_bytes), ray, &closest, occluded);
     if (status != SceneClosestHitStatus::miss) {
         output.status = status_value(status);
     } else if (closest.present) {
         output.status = status_value(SceneClosestHitStatus::hit);
         output.hit = closest.hit;
+    }
+    results[index] = output;
+}
+
+__global__ void scene_occlusion_kernel(const std::uint8_t* const scene_bytes,
+                                       const std::size_t scene_size,
+                                       const std::uint8_t* const bvh_bytes,
+                                       const std::size_t bvh_size, const TransportRay* const rays,
+                                       const std::uint32_t ray_count,
+                                       SceneOcclusionResult* const results) {
+    __shared__ std::uint32_t layout_status;
+    if (threadIdx.x == 0U) {
+        layout_status =
+            status_value(validate_traversal_layout(scene_bytes, scene_size, bvh_bytes, bvh_size));
+    }
+    __syncthreads();
+
+    const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= ray_count) {
+        return;
+    }
+    auto output = SceneOcclusionResult{};
+    if (layout_status != status_value(SceneClosestHitStatus::miss)) {
+        output.status = layout_status;
+        results[index] = output;
+        return;
+    }
+
+    const auto ray = rays[index];
+    if (!valid_ray(ray)) {
+        output.status = status_value(SceneClosestHitStatus::invalid_ray);
+        results[index] = output;
+        return;
+    }
+    auto occluded = false;
+    const auto status = trace_scene<true>(
+        scene_bytes, *reinterpret_cast<const SceneSoaHeader*>(scene_bytes), bvh_bytes,
+        *reinterpret_cast<const SceneBvhHeader*>(bvh_bytes), ray, nullptr, occluded);
+    if (status != SceneClosestHitStatus::miss) {
+        output.status = status_value(status);
+    } else if (occluded) {
+        output.status = static_cast<std::uint32_t>(SceneOcclusionStatus::occluded);
     }
     results[index] = output;
 }
@@ -1151,5 +1262,26 @@ extern "C" int blackframe_cuda_launch_scene_closest_hit(
         (static_cast<std::uint64_t>(ray_count) + ThreadsPerBlock - 1U) / ThreadsPerBlock);
     scene_closest_hit_kernel<<<block_count, ThreadsPerBlock>>>(scene_bytes, scene_size, bvh_bytes,
                                                                bvh_size, rays, ray_count, results);
+    return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int blackframe_cuda_launch_scene_occlusion(
+    const std::uint8_t* const scene_bytes, const std::size_t scene_size,
+    const std::uint8_t* const bvh_bytes, const std::size_t bvh_size,
+    const blackframe::xpu::shared::TransportRay* const rays, const std::uint32_t ray_count,
+    blackframe::xpu::shared::SceneOcclusionResult* const results) noexcept {
+    if (scene_bytes == nullptr || scene_size < sizeof(blackframe::xpu::shared::SceneSoaHeader) ||
+        bvh_bytes == nullptr || bvh_size < sizeof(blackframe::xpu::shared::SceneBvhHeader) ||
+        (ray_count != 0U && (rays == nullptr || results == nullptr))) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    if (ray_count == 0U) {
+        return static_cast<int>(cudaSuccess);
+    }
+
+    const auto block_count = static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(ray_count) + ThreadsPerBlock - 1U) / ThreadsPerBlock);
+    scene_occlusion_kernel<<<block_count, ThreadsPerBlock>>>(scene_bytes, scene_size, bvh_bytes,
+                                                             bvh_size, rays, ray_count, results);
     return static_cast<int>(cudaGetLastError());
 }
