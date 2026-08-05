@@ -29,6 +29,8 @@ target_sources(
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneClosestHit.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneOcclusion.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneSoaHash.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SampleStreamDevice.cuh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SampleStreamKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportAbiProbe.hpp"
@@ -93,6 +95,25 @@ target_link_libraries(
         Blackframe::ProjectOptions
 )
 
+add_library(
+    BlackframeCudaSampleStreamKernel
+    STATIC
+        Source/CudaSampleStream.cu
+)
+add_library(Blackframe::CudaSampleStreamKernel ALIAS BlackframeCudaSampleStreamKernel)
+blackframe_set_target_role(BlackframeCudaSampleStreamKernel cuda)
+
+blackframe_configure_cuda_target(BlackframeCudaSampleStreamKernel)
+
+target_link_libraries(
+    BlackframeCudaSampleStreamKernel
+    PUBLIC
+        Blackframe::CudaSharedHeaders
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)
+
 add_library(BlackframeCuda INTERFACE)
 add_library(Blackframe::Cuda ALIAS BlackframeCuda)
 
@@ -139,6 +160,7 @@ target_link_libraries(
     INTERFACE
         Blackframe::CudaMemory
         Blackframe::CudaQueueKernel
+        Blackframe::CudaSampleStreamKernel
         Blackframe::CudaSmokeKernel
         Blackframe::CudaWavefrontStageKernel
         Blackframe::ProjectOptions

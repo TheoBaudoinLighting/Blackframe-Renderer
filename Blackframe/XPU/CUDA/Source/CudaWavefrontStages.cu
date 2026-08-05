@@ -1,3 +1,4 @@
+#include <Blackframe/XPU/CUDA/SampleStreamDevice.cuh>
 #include <Blackframe/XPU/CUDA/WavefrontQueueDevice.cuh>
 #include <Blackframe/XPU/CUDA/WavefrontStageKernel.hpp>
 #include <Blackframe/XPU/Shared/SceneSoaAbi.hpp>
@@ -22,6 +23,8 @@ namespace cuda = blackframe::xpu::cuda;
 namespace shared = blackframe::xpu::shared;
 namespace scene_column = blackframe::xpu::shared::scene_soa_column;
 
+using cuda::SampleStreamBounceDimensions;
+using cuda::SampleStreamDumpStatus;
 using cuda::WavefrontCameraInputDeviceSoa;
 using cuda::WavefrontLaneControl;
 using cuda::WavefrontLanePhase;
@@ -56,8 +59,6 @@ constexpr auto ShadeQueue = std::uint32_t{4U};
 constexpr auto ShadowQueue = std::uint32_t{5U};
 constexpr auto ContinuationQueue = std::uint32_t{6U};
 constexpr auto WavelengthMeasure = std::uint8_t{5U};
-constexpr auto FirstBounceDimension = std::uint64_t{4U};
-constexpr auto DimensionsPerBounce = std::uint64_t{10U};
 constexpr auto Pi = 3.14159265358979323846F;
 constexpr auto InversePi = 0.31830988618379067154F;
 constexpr auto MaximumUniformLightCount = std::uint64_t{1U} << 24U;
@@ -129,6 +130,7 @@ enum class ShadeFailureDetail : std::uint32_t {
     throughput = 13U,
     continuation_ray = 14U,
     continuation_offset = 15U,
+    sample_dimensions = 16U,
 };
 
 [[nodiscard]] __device__ constexpr std::uint32_t value(const WavefrontStageStatus status) noexcept {
@@ -422,24 +424,6 @@ finish_phase(WavefrontLaneControl& control, const WavefrontLanePhase phase,
     return pushed == WavefrontQueueDevicePushStatus::capacity_exhausted
                ? WavefrontStageStatus::queue_overflow
                : WavefrontStageStatus::invalid_contract;
-}
-
-[[nodiscard]] __device__ std::uint64_t mix_bits(std::uint64_t bits) noexcept {
-    bits ^= bits >> 30U;
-    bits *= 0xBF58476D1CE4E5B9ULL;
-    bits ^= bits >> 27U;
-    bits *= 0x94D049BB133111EBULL;
-    return bits ^ (bits >> 31U);
-}
-
-[[nodiscard]] __device__ float sample_1d(const SampleStreamIndex& index,
-                                         const std::uint64_t dimension) noexcept {
-    const auto packed_pixel = (static_cast<std::uint64_t>(index.pixel_x) << 32U) |
-                              static_cast<std::uint64_t>(index.pixel_y);
-    auto state = mix_bits(index.seed ^ 0x9E3779B97F4A7C15ULL);
-    state = mix_bits(state ^ packed_pixel ^ 0xD1B54A32D192ED03ULL);
-    state = mix_bits(state ^ index.sample_index ^ 0x8CB92BA72F3D8DD7ULL);
-    return static_cast<float>(mix_bits(state ^ dimension) >> 40U) * 0x1p-24F;
 }
 
 [[nodiscard]] __device__ constexpr std::uint64_t align_up(const std::uint64_t input,
@@ -1314,10 +1298,10 @@ load_triangle_world(const std::uint8_t* const bytes, const SceneSoaHeader& scene
     return true;
 }
 
-[[nodiscard]] __device__ SceneDeviceStatus
-sample_mesh_area_light(const std::uint8_t* const bytes, const SceneSoaHeader& scene,
-                       const TransportPathStateLane& state, const SampleStreamIndex& sample_index,
-                       const std::uint32_t bounce, LightEndpoint& endpoint) noexcept {
+[[nodiscard]] __device__ SceneDeviceStatus sample_mesh_area_light(
+    const std::uint8_t* const bytes, const SceneSoaHeader& scene,
+    const TransportPathStateLane& state, const SampleStreamIndex& sample_index,
+    const SampleStreamBounceDimensions& dimensions, LightEndpoint& endpoint) noexcept {
     if (scene.punctual_light_count != 0U) {
         return SceneDeviceStatus::unsupported_transport;
     }
@@ -1325,11 +1309,10 @@ sample_mesh_area_light(const std::uint8_t* const bytes, const SceneSoaHeader& sc
         endpoint = LightEndpoint{};
         return SceneDeviceStatus::valid;
     }
-    const auto dimension =
-        FirstBounceDimension + static_cast<std::uint64_t>(bounce) * DimensionsPerBounce;
-    const auto light_selection = sample_1d(sample_index, dimension);
-    const auto area_sample = sample_1d(sample_index, dimension + 1U);
-    const auto triangle_sample = sample_1d(sample_index, dimension + 2U);
+    const auto light_selection =
+        cuda::sample_stream::sample_1d(sample_index, dimensions.light_selection);
+    const auto area_sample = cuda::sample_stream::sample_1d(sample_index, dimensions.light_u);
+    const auto triangle_sample = cuda::sample_stream::sample_1d(sample_index, dimensions.light_v);
     const auto light_count = static_cast<std::uint32_t>(scene.mesh_area_light_count);
     const auto light_index =
         static_cast<std::uint32_t>(light_selection * static_cast<float>(light_count));
@@ -1750,14 +1733,26 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         return;
     }
 
+    auto sample_dimensions = SampleStreamBounceDimensions{};
+    const auto sample_dimension_status = cuda::sample_stream::dimensions_for_bounce(
+        static_cast<std::uint64_t>(state.depth), sample_dimensions);
+    if (sample_dimension_status != SampleStreamDumpStatus::success) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::sample_dimensions));
+        return;
+    }
+
     auto endpoint = LightEndpoint{};
     auto sampled_light = SceneDeviceStatus::valid;
     auto shade_detail = std::uint32_t{};
     if (scene.mesh_area_light_count != 0U && !zero_spectrum(state.beta) &&
         !zero_spectrum(reflectance)) {
         shade_detail = cuda::WavefrontShadeDetailLightSampled;
-        sampled_light = sample_mesh_area_light(
-            scene_bytes, scene, state, streams.sample_streams[slot.value], state.depth, endpoint);
+        sampled_light =
+            sample_mesh_area_light(scene_bytes, scene, state, streams.sample_streams[slot.value],
+                                   sample_dimensions, endpoint);
     }
     if (sampled_light != SceneDeviceStatus::valid) {
         finish_phase(control, WavefrontLanePhase::terminated);
@@ -1878,10 +1873,10 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         }
     }
 
-    const auto bsdf_dimension =
-        FirstBounceDimension + static_cast<std::uint64_t>(state.depth) * DimensionsPerBounce;
-    const auto bsdf_u = sample_1d(streams.sample_streams[slot.value], bsdf_dimension + 4U);
-    const auto bsdf_v = sample_1d(streams.sample_streams[slot.value], bsdf_dimension + 5U);
+    const auto bsdf_u = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
+                                                       sample_dimensions.bsdf_u);
+    const auto bsdf_v = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
+                                                       sample_dimensions.bsdf_v);
     auto outgoing = Vector3{};
     auto local_cosine = 0.0F;
     auto next_origin = Vector3{};

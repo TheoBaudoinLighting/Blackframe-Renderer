@@ -161,8 +161,10 @@ silently selecting another path.
 - **Sampling:** indexed `SampleStream` values with a versioned dimension map, independent hashing,
   local PCG32, stratification, Latin hypercube, high-dimensional Sobol, reproducible Owen
   scrambling, common disk/sphere/hemisphere mappings, and immutable uniform or spectral-power
-  light-selection distributions plus context-dependent Light Tree selection. No global mutable RNG
-  is used.
+  light-selection distributions plus context-dependent Light Tree selection. The CUDA C++20 path
+  reproduces the complete version-one camera and bounce dimension map, rejects unsupported schemas
+  or unrepresentable bounce indices, and emits a canonical device sample dump compared bit-for-bit
+  with the independent CPU implementation. No global mutable RNG is used.
 - **Spectral and color foundations:** four-lane 360-830 nm wavelength packets with marginal PDFs,
   black, constant, and tabulated spectra, `SampledSpectrum<4>`, energy-conserving spectral
   Lambertian and energy-preserving rough-diffuse reflection, one-sided spectral surface emission,
@@ -256,8 +258,9 @@ silently selecting another path.
   existing CUDA closest-hit and any-hit kernels between stages, validates every per-lane outcome and
   queue boundary, and reconstructs results in input path-slot order. The device shading path reads
   four-lane reflectance, one-sided emission, constant environment radiance, and mesh-area lights
-  directly from the serialized scene. Embree stays an independent CPU oracle and is never
-  substituted for CUDA execution.
+  directly from the serialized scene. Its light and BSDF samples use named dimensions from the
+  complete CUDA `SampleStream` contract rather than private numeric offsets. Embree stays an
+  independent CPU oracle and is never substituted for CUDA execution.
 
 ## Current boundary
 
