@@ -52,11 +52,37 @@ enum class WavefrontTermination : std::uint32_t {
     diffuse_depth_limit = 2U,
     zero_throughput = 3U,
     outside_bsdf_support = 4U,
+    russian_roulette = 5U,
 };
 
+inline constexpr std::uint16_t WavefrontTransportConfigAbiMajor = 1U;
+inline constexpr std::uint16_t WavefrontTransportConfigAbiMinor = 0U;
 inline constexpr std::uint32_t WavefrontLaneContinuationPending = 1U << 0U;
 inline constexpr std::uint32_t WavefrontLaneShadowPending = 1U << 1U;
+inline constexpr std::uint32_t WavefrontShadeDetailClosureSampled = 1U << 30U;
 inline constexpr std::uint32_t WavefrontShadeDetailLightSampled = 1U << 31U;
+
+// Backend-local transport configuration copied by value into the shading launch. Numeric enum
+// values are validated and translated by the host before launch; device code never depends on
+// host-only renderer layouts.
+struct alignas(16) WavefrontTransportConfig final {
+    std::uint16_t abi_major{};
+    std::uint16_t abi_minor{};
+    std::uint32_t struct_size{};
+    std::uint32_t mis_heuristic{};
+    std::uint32_t light_sampling_strategy{};
+    std::uint32_t light_count{};
+    std::uint32_t diffuse_depth_limit{};
+    std::uint32_t glossy_depth_limit{};
+    std::uint32_t specular_depth_limit{};
+    std::uint32_t transmission_depth_limit{};
+    std::uint32_t volume_depth_limit{};
+    std::uint32_t russian_roulette_mode{};
+    std::uint32_t russian_roulette_first_depth{};
+    float russian_roulette_minimum_probability{};
+    float russian_roulette_maximum_probability{};
+    std::uint32_t reserved[2U]{};
+};
 
 struct alignas(16) WavefrontStageOutcome final {
     std::uint32_t status{};
@@ -69,14 +95,36 @@ struct alignas(16) WavefrontLaneControl final {
     std::uint32_t phase{};
     std::uint32_t termination{};
     std::uint32_t flags{};
-    std::uint32_t reserved{};
+    std::uint32_t blocked_depth_limits{};
 };
 
 struct alignas(16) WavefrontPendingShadow final {
     shared::TransportRay ray{};
-    shared::TransportSpectrum visible_contribution{};
+    shared::TransportSpectrum beta{};
+    shared::TransportSpectrum reflectance{};
+    shared::TransportSpectrum incident_radiance{};
+    float receiver_cosine{};
+    float estimator_weight{};
+    float selection_probability{};
+    float conditional_probability{};
     std::uint32_t continuation_pending{};
     std::uint32_t termination{};
+    std::uint32_t reserved[2U]{};
+};
+
+// The previous continuous BSDF sample is backend-local MIS state. It deliberately stays outside
+// the shared PathState ABI because public paths cannot be resumed without this vertex context.
+struct alignas(16) WavefrontPreviousBsdfSample final {
+    float context_x{};
+    float context_y{};
+    float context_z{};
+    float context_time{};
+    float incoming_x{};
+    float incoming_y{};
+    float incoming_z{};
+    float probability_value{};
+    std::uint32_t probability_measure{};
+    std::uint32_t valid{};
     std::uint32_t reserved[2U]{};
 };
 
@@ -89,9 +137,10 @@ struct alignas(16) WavefrontStageDeviceSoa final {
     shared::TransportPathStateLane* path_states{};
     shared::ClosestHit* hits{};
     WavefrontPendingShadow* pending_shadows{};
+    WavefrontPreviousBsdfSample* previous_bsdf_samples{};
     WavefrontLaneControl* controls{};
     std::uint32_t capacity{};
-    std::uint32_t reserved[3U]{};
+    std::uint32_t reserved{};
 };
 
 struct alignas(16) WavefrontCameraInputDeviceSoa final {
@@ -108,8 +157,10 @@ struct alignas(16) WavefrontCameraInputDeviceSoa final {
     static_assert(std::is_trivially_destructible_v<record>)
 
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageOutcome);
+BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontTransportConfig);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontLaneControl);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontPendingShadow);
+BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontPreviousBsdfSample);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageDeviceSoa);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontCameraInputDeviceSoa);
 
@@ -119,6 +170,24 @@ static_assert(sizeof(WavefrontStageStatus) == 4U);
 static_assert(sizeof(WavefrontStageRoute) == 4U);
 static_assert(sizeof(WavefrontLanePhase) == 4U);
 static_assert(sizeof(WavefrontTermination) == 4U);
+static_assert(sizeof(WavefrontTransportConfig) == 64U);
+static_assert(alignof(WavefrontTransportConfig) == 16U);
+static_assert(offsetof(WavefrontTransportConfig, abi_major) == 0U);
+static_assert(offsetof(WavefrontTransportConfig, abi_minor) == 2U);
+static_assert(offsetof(WavefrontTransportConfig, struct_size) == 4U);
+static_assert(offsetof(WavefrontTransportConfig, mis_heuristic) == 8U);
+static_assert(offsetof(WavefrontTransportConfig, light_sampling_strategy) == 12U);
+static_assert(offsetof(WavefrontTransportConfig, light_count) == 16U);
+static_assert(offsetof(WavefrontTransportConfig, diffuse_depth_limit) == 20U);
+static_assert(offsetof(WavefrontTransportConfig, glossy_depth_limit) == 24U);
+static_assert(offsetof(WavefrontTransportConfig, specular_depth_limit) == 28U);
+static_assert(offsetof(WavefrontTransportConfig, transmission_depth_limit) == 32U);
+static_assert(offsetof(WavefrontTransportConfig, volume_depth_limit) == 36U);
+static_assert(offsetof(WavefrontTransportConfig, russian_roulette_mode) == 40U);
+static_assert(offsetof(WavefrontTransportConfig, russian_roulette_first_depth) == 44U);
+static_assert(offsetof(WavefrontTransportConfig, russian_roulette_minimum_probability) == 48U);
+static_assert(offsetof(WavefrontTransportConfig, russian_roulette_maximum_probability) == 52U);
+static_assert(offsetof(WavefrontTransportConfig, reserved) == 56U);
 static_assert(sizeof(WavefrontStageOutcome) == 16U);
 static_assert(alignof(WavefrontStageOutcome) == 16U);
 static_assert(offsetof(WavefrontStageOutcome, status) == 0U);
@@ -130,14 +199,33 @@ static_assert(alignof(WavefrontLaneControl) == 16U);
 static_assert(offsetof(WavefrontLaneControl, phase) == 0U);
 static_assert(offsetof(WavefrontLaneControl, termination) == 4U);
 static_assert(offsetof(WavefrontLaneControl, flags) == 8U);
-static_assert(offsetof(WavefrontLaneControl, reserved) == 12U);
-static_assert(sizeof(WavefrontPendingShadow) == 80U);
+static_assert(offsetof(WavefrontLaneControl, blocked_depth_limits) == 12U);
+static_assert(sizeof(WavefrontPendingShadow) == 128U);
 static_assert(alignof(WavefrontPendingShadow) == 16U);
 static_assert(offsetof(WavefrontPendingShadow, ray) == 0U);
-static_assert(offsetof(WavefrontPendingShadow, visible_contribution) == 48U);
-static_assert(offsetof(WavefrontPendingShadow, continuation_pending) == 64U);
-static_assert(offsetof(WavefrontPendingShadow, termination) == 68U);
-static_assert(offsetof(WavefrontPendingShadow, reserved) == 72U);
+static_assert(offsetof(WavefrontPendingShadow, beta) == 48U);
+static_assert(offsetof(WavefrontPendingShadow, reflectance) == 64U);
+static_assert(offsetof(WavefrontPendingShadow, incident_radiance) == 80U);
+static_assert(offsetof(WavefrontPendingShadow, receiver_cosine) == 96U);
+static_assert(offsetof(WavefrontPendingShadow, estimator_weight) == 100U);
+static_assert(offsetof(WavefrontPendingShadow, selection_probability) == 104U);
+static_assert(offsetof(WavefrontPendingShadow, conditional_probability) == 108U);
+static_assert(offsetof(WavefrontPendingShadow, continuation_pending) == 112U);
+static_assert(offsetof(WavefrontPendingShadow, termination) == 116U);
+static_assert(offsetof(WavefrontPendingShadow, reserved) == 120U);
+static_assert(sizeof(WavefrontPreviousBsdfSample) == 48U);
+static_assert(alignof(WavefrontPreviousBsdfSample) == 16U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, context_x) == 0U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, context_y) == 4U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, context_z) == 8U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, context_time) == 12U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, incoming_x) == 16U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, incoming_y) == 20U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, incoming_z) == 24U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, probability_value) == 28U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, probability_measure) == 32U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, valid) == 36U);
+static_assert(offsetof(WavefrontPreviousBsdfSample, reserved) == 40U);
 static_assert(sizeof(void*) == 8U);
 static_assert(sizeof(WavefrontStageDeviceSoa) == 64U);
 static_assert(alignof(WavefrontStageDeviceSoa) == 16U);
@@ -146,9 +234,10 @@ static_assert(offsetof(WavefrontStageDeviceSoa, rays) == 8U);
 static_assert(offsetof(WavefrontStageDeviceSoa, path_states) == 16U);
 static_assert(offsetof(WavefrontStageDeviceSoa, hits) == 24U);
 static_assert(offsetof(WavefrontStageDeviceSoa, pending_shadows) == 32U);
-static_assert(offsetof(WavefrontStageDeviceSoa, controls) == 40U);
-static_assert(offsetof(WavefrontStageDeviceSoa, capacity) == 48U);
-static_assert(offsetof(WavefrontStageDeviceSoa, reserved) == 52U);
+static_assert(offsetof(WavefrontStageDeviceSoa, previous_bsdf_samples) == 40U);
+static_assert(offsetof(WavefrontStageDeviceSoa, controls) == 48U);
+static_assert(offsetof(WavefrontStageDeviceSoa, capacity) == 56U);
+static_assert(offsetof(WavefrontStageDeviceSoa, reserved) == 60U);
 static_assert(sizeof(WavefrontCameraInputDeviceSoa) == 32U);
 static_assert(alignof(WavefrontCameraInputDeviceSoa) == 16U);
 static_assert(offsetof(WavefrontCameraInputDeviceSoa, sample_streams) == 0U);
@@ -202,8 +291,9 @@ extern "C" int blackframe_cuda_launch_wavefront_miss_stage(
 extern "C" int blackframe_cuda_launch_wavefront_shade_stage(
     const std::uint8_t* scene_bytes, std::size_t scene_size,
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
-    blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t max_diffuse_depth,
-    std::uint32_t work_count, blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageDeviceSoa streams,
+    blackframe::xpu::cuda::WavefrontTransportConfig config, std::uint32_t work_count,
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_gather_shadow_rays(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,

@@ -219,6 +219,14 @@ silently selecting another path.
   per-path absolute error at most `1e-4`, and display PSNR of at least 80 dB (or positive infinity).
   It also verifies the explicit analytic/Embree backend kinds and rejects queue overflow or rejected
   lanes; neither side can be substituted by a fallback.
+  A separate same-ray, same-sample CUDA matrix compares the analytic scalar scene loop with the
+  CUDA wavefront transport. It exercises four-lane spectral throughput, Lambertian continuation,
+  surface and environment emission, point, directional, spot, and mesh-area lights, balance and
+  power MIS, complementary BSDF-hit weights, depth limits, Russian roulette, subnormal products,
+  and occluded high-dynamic-range contributions. Every case records MSE, RMSE, bias, maximum error,
+  per-path spectral error, and display PSNR with the same `1e-10`, `1e-5`, `1e-4`, and 80 dB
+  thresholds. Empty light registries use an explicitly absent sampler and continue through BSDF
+  bounces; unsupported sampler strategies or mismatched registries fail before device allocation.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
@@ -257,10 +265,13 @@ silently selecting another path.
   Lambertian shading, shadow visibility, and continuation. The host orchestrator dispatches the
   existing CUDA closest-hit and any-hit kernels between stages, validates every per-lane outcome and
   queue boundary, and reconstructs results in input path-slot order. The device shading path reads
-  four-lane reflectance, one-sided emission, constant environment radiance, and mesh-area lights
-  directly from the serialized scene. Its light and BSDF samples use named dimensions from the
-  complete CUDA `SampleStream` contract rather than private numeric offsets. Embree stays an
-  independent CPU oracle and is never substituted for CUDA execution.
+  four-lane reflectance, one-sided emission, constant environment radiance, point, directional,
+  spot, and mesh-area lights directly from the serialized scene. It uses robust triangle-area
+  evaluation for area-light CDFs and PDFs, applies balance or power MIS to NEE and complementary
+  emitter hits, defers direct-radiance products until visibility is known, and supports explicit
+  diffuse depth and compensated Russian roulette. Its light, BSDF, and roulette samples use named
+  dimensions from the complete CUDA `SampleStream` contract rather than private numeric offsets.
+  Embree stays an independent CPU backend and is never substituted for CUDA execution.
 
 ## Current boundary
 
@@ -268,11 +279,12 @@ Blackframe does not yet provide a general production path-tracing integrator, a 
 general material or lighting system, deformation updates, or transform motion blur. The CPU
 wavefront transport is currently a narrow vacuum-only spectral Lambertian path over FrameScene and
 Embree, with punctual and emissive triangle-mesh lights, NEE, and balance or power MIS. The CUDA
-wavefront transport currently covers vacuum Lambertian paths, one-sided emissive triangle meshes,
-uniform mesh-area NEE, a constant environment, and bounded diffuse depth. It rejects punctual
-lights, participating media, unsupported scene spectra, and malformed device state explicitly;
-its current direct-light estimator avoids duplicate emissive paths without claiming MIS or Russian
-roulette support. `scalar_ref` remains a separate oracle rather than an execution fallback.
+wavefront transport covers the same currently representable FrameScene vacuum Lambertian model,
+including one-sided surface emission, a constant environment, the punctual and emissive-mesh light
+registry, explicit uniform selection, NEE, balance or power MIS, diffuse depth, and compensated
+Russian roulette. A non-uniform light sampler, participating medium, unsupported scene spectrum,
+or malformed device state is rejected explicitly; `scalar_ref` remains a separate oracle rather
+than an execution fallback.
 The rough diffuse, rough conductor, specular delta, rough dielectric, and anisotropic closure
 implementations remain standalone until the FrameScene material schema can describe them.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete

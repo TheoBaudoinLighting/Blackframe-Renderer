@@ -89,6 +89,33 @@ gtest_discover_tests(
         TIMEOUT 180
 )
 
+add_executable(
+    BlackframeCudaTransportParityTests
+    CudaTransportParityTest.cpp
+)
+blackframe_set_target_role(BlackframeCudaTransportParityTests test)
+
+target_link_libraries(
+    BlackframeCudaTransportParityTests
+    PRIVATE
+        Blackframe::CudaWavefrontTransport
+        Blackframe::CudaToolkit
+        Blackframe::Engine
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeCudaTransportParityTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "regression;cpu;cuda"
+        RESOURCE_LOCK blackframe_cuda_device_0
+        RUN_SERIAL TRUE
+        TIMEOUT 180
+)
+
 if(TARGET Blackframe::CpuEmbree)
     add_executable(
         BlackframeCudaClosestHitParityTests

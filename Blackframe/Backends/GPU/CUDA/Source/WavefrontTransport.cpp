@@ -10,6 +10,7 @@
 #include <Blackframe/XPU/Shared/TransportAbi.hpp>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -29,11 +30,13 @@ using xpu::cuda::WavefrontCameraInputDeviceSoa;
 using xpu::cuda::WavefrontLaneControl;
 using xpu::cuda::WavefrontLanePhase;
 using xpu::cuda::WavefrontPendingShadow;
+using xpu::cuda::WavefrontPreviousBsdfSample;
 using xpu::cuda::WavefrontStageDeviceSoa;
 using xpu::cuda::WavefrontStageOutcome;
 using xpu::cuda::WavefrontStageRoute;
 using xpu::cuda::WavefrontStageStatus;
 using xpu::cuda::WavefrontTermination;
+using xpu::cuda::WavefrontTransportConfig;
 using xpu::shared::ClosestHit;
 using xpu::shared::PathSlot;
 using xpu::shared::QueueHeader;
@@ -50,6 +53,23 @@ static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::miss) == 
 static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::shade) == 4U);
 static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::shadow) == 5U);
 static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::continuation) == 6U);
+static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::discrete) == 0U);
+static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::solid_angle) == 1U);
+static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::area) == 2U);
+static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::distance) == 3U);
+static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::volume) == 4U);
+static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::wavelength) == 5U);
+static_assert(static_cast<std::uint32_t>(renderer::MisHeuristic::balance) == 0U);
+static_assert(static_cast<std::uint32_t>(renderer::MisHeuristic::power) == 1U);
+static_assert(static_cast<std::uint32_t>(renderer::LightSamplingStrategy::uniform) == 0U);
+static_assert(static_cast<std::uint32_t>(renderer::LightSamplingStrategy::power_weighted) == 1U);
+static_assert(static_cast<std::uint32_t>(renderer::LightSamplingStrategy::spatial_tree) == 2U);
+static_assert(static_cast<std::uint32_t>(renderer::RussianRouletteMode::disabled) == 0U);
+static_assert(static_cast<std::uint32_t>(renderer::RussianRouletteMode::enabled) == 1U);
+static_assert(static_cast<std::uint32_t>(renderer::ScatteringLobe::diffuse) == 0x00000001U);
+static_assert(static_cast<std::uint32_t>(renderer::PathDeltaFlags::previous_bounce_was_delta) ==
+              1U);
+static_assert(static_cast<std::uint32_t>(renderer::PathDeltaFlags::any_non_delta_bounces) == 2U);
 
 [[nodiscard]] core::Error transport_error(const core::StatusCode code, std::string message) {
     return core::Error{.code = code, .message = std::move(message)};
@@ -89,11 +109,20 @@ validate_options_and_inputs(const std::span<const CudaWavefrontPathInput> inputs
             core::StatusCode::resource_exhausted,
             "CUDA wavefront transport path count exceeds its fixed 32-bit device domain."));
     }
-    if (options.maximum_diffuse_depth == std::numeric_limits<std::uint32_t>::max()) {
+    switch (options.heuristic) {
+    case renderer::MisHeuristic::balance:
+    case renderer::MisHeuristic::power:
+        break;
+    default:
         return std::unexpected(transport_error(
             core::StatusCode::invalid_argument,
-            "CUDA wavefront maximum diffuse depth must leave one representable terminal "
-            "transition."));
+            "CUDA wavefront transport requires the balance or power MIS heuristic."));
+    }
+    if (auto status = renderer::validate_russian_roulette_policy(options.roulette_policy);
+        !status) {
+        return std::unexpected(transport_error(
+            status.error().code, "CUDA wavefront transport rejected its Russian roulette policy: " +
+                                     status.error().message));
     }
     for (auto index = std::size_t{}; index < inputs.size(); ++index) {
         const auto& input = inputs[index];
@@ -115,8 +144,110 @@ validate_options_and_inputs(const std::span<const CudaWavefrontPathInput> inputs
                 "CUDA wavefront transport must begin at primary path depth zero; path " +
                     std::to_string(index) + " supplied a resumed state."));
         }
+        if (auto status = renderer::validate_path_depth_state(options.depth_limits,
+                                                              input.initial_state.depth_counters(),
+                                                              input.initial_state.depth());
+            !status) {
+            return std::unexpected(transport_error(
+                status.error().code, "CUDA wavefront transport rejected depth state at path " +
+                                         std::to_string(index) + ": " + status.error().message));
+        }
+        const auto finite_nonnegative = [](const renderer::TransportSpectrum& spectrum) {
+            return std::ranges::all_of(spectrum.values, [](const auto value) {
+                return std::isfinite(value) && value >= 0.0F;
+            });
+        };
+        if (!finite_nonnegative(input.initial_state.beta()) ||
+            !finite_nonnegative(input.initial_state.accumulated_radiance())) {
+            return std::unexpected(transport_error(
+                core::StatusCode::invalid_argument,
+                "CUDA wavefront transport requires finite non-negative path spectra at path " +
+                    std::to_string(index) + "."));
+        }
     }
     return {};
+}
+
+struct ValidatedLightSampler final {
+    std::uint32_t light_count{};
+    bool present{};
+    renderer::LightSamplingStrategy strategy{renderer::LightSamplingStrategy::uniform};
+};
+
+[[nodiscard]] core::Result<ValidatedLightSampler>
+validate_light_sampler(const xpu::shared::SceneSoaHeader& scene,
+                       const CudaWavefrontLightSampler light_sampler) {
+    if (scene.punctual_light_count >
+        std::numeric_limits<std::uint64_t>::max() - scene.mesh_area_light_count) {
+        return std::unexpected(transport_error(
+            core::StatusCode::resource_exhausted,
+            "CUDA wavefront light-registry size overflowed its serialized domain."));
+    }
+    const auto expected_count = scene.punctual_light_count + scene.mesh_area_light_count;
+    if (expected_count == 0U) {
+        if (light_sampler.has_value()) {
+            return std::unexpected(transport_error(
+                core::StatusCode::incompatible,
+                "CUDA wavefront transport requires the light sampler to be explicitly absent "
+                "when the serialized scene light registry is empty."));
+        }
+        return ValidatedLightSampler{};
+    }
+    if (expected_count > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(transport_error(
+            core::StatusCode::resource_exhausted,
+            "CUDA wavefront light registry exceeds its fixed 32-bit device domain."));
+    }
+    const auto count = static_cast<std::uint32_t>(expected_count);
+    if (!light_sampler.has_value()) {
+        return std::unexpected(transport_error(
+            core::StatusCode::incompatible,
+            "CUDA wavefront transport requires an explicit light sampler for a non-empty "
+            "serialized scene light registry."));
+    }
+    const auto& sampler = light_sampler->get();
+    if (sampler.strategy() != renderer::LightSamplingStrategy::uniform) {
+        return std::unexpected(transport_error(
+            core::StatusCode::unavailable,
+            "CUDA wavefront transport currently requires an explicit uniform light sampler; "
+            "the requested strategy is not ported and will not be substituted."));
+    }
+    if (sampler.light_count() != count) {
+        return std::unexpected(transport_error(
+            core::StatusCode::incompatible,
+            "CUDA wavefront light sampler count does not match the serialized punctual and "
+            "mesh-area registry."));
+    }
+    return ValidatedLightSampler{
+        .light_count = count,
+        .present = true,
+        .strategy = sampler.strategy(),
+    };
+}
+
+[[nodiscard]] WavefrontTransportConfig
+transport_config(const CudaWavefrontTransportOptions& options, const std::uint32_t light_count,
+                 const renderer::LightSamplingStrategy strategy) noexcept {
+    return WavefrontTransportConfig{
+        .abi_major = xpu::cuda::WavefrontTransportConfigAbiMajor,
+        .abi_minor = xpu::cuda::WavefrontTransportConfigAbiMinor,
+        .struct_size = sizeof(WavefrontTransportConfig),
+        .mis_heuristic = static_cast<std::uint32_t>(options.heuristic),
+        .light_sampling_strategy = static_cast<std::uint32_t>(strategy),
+        .light_count = light_count,
+        .diffuse_depth_limit = options.depth_limits.diffuse,
+        .glossy_depth_limit = options.depth_limits.glossy,
+        .specular_depth_limit = options.depth_limits.specular,
+        .transmission_depth_limit = options.depth_limits.transmission,
+        .volume_depth_limit = options.depth_limits.volume,
+        .russian_roulette_mode = static_cast<std::uint32_t>(options.roulette_policy.mode()),
+        .russian_roulette_first_depth = options.roulette_policy.first_eligible_depth(),
+        .russian_roulette_minimum_probability =
+            options.roulette_policy.minimum_survival_probability(),
+        .russian_roulette_maximum_probability =
+            options.roulette_policy.maximum_survival_probability(),
+        .reserved = {0U, 0U},
+    };
 }
 
 [[nodiscard]] TransportPathStateLane transport_path_state(const renderer::PathState& state) {
@@ -239,23 +370,55 @@ renderer_path_state(const TransportPathStateLane& state, const std::size_t path_
     return converted;
 }
 
-[[nodiscard]] core::Result<CudaWavefrontPathTermination>
+struct RendererTermination final {
+    CudaWavefrontPathTermination reason{};
+    renderer::ScatteringLobe blocked_depth_limits{renderer::ScatteringLobe::none};
+};
+
+[[nodiscard]] core::Result<RendererTermination>
 renderer_termination(const WavefrontLaneControl& control, const std::size_t path_index) {
     if (control.phase != static_cast<std::uint32_t>(WavefrontLanePhase::terminated) ||
-        control.flags != 0U || control.reserved != 0U) {
+        control.flags != 0U) {
         return std::unexpected(transport_error(core::StatusCode::internal_error,
                                                "CUDA wavefront path " + std::to_string(path_index) +
                                                    " did not finish in canonical terminal state."));
     }
-    switch (static_cast<WavefrontTermination>(control.termination)) {
+    constexpr auto depth_category_mask =
+        renderer::ScatteringLobe::diffuse | renderer::ScatteringLobe::glossy |
+        renderer::ScatteringLobe::specular | renderer::ScatteringLobe::transmission |
+        renderer::ScatteringLobe::volume;
+    const auto blocked = static_cast<renderer::ScatteringLobe>(control.blocked_depth_limits);
+    if (!renderer::is_known_scattering_lobe_mask(blocked) ||
+        (blocked & depth_category_mask) != blocked) {
+        return std::unexpected(transport_error(core::StatusCode::internal_error,
+                                               "CUDA wavefront path " + std::to_string(path_index) +
+                                                   " returned invalid blocked depth-limit bits."));
+    }
+    const auto termination = static_cast<WavefrontTermination>(control.termination);
+    if ((termination == WavefrontTermination::diffuse_depth_limit &&
+         blocked != renderer::ScatteringLobe::diffuse) ||
+        (termination != WavefrontTermination::diffuse_depth_limit &&
+         blocked != renderer::ScatteringLobe::none)) {
+        return std::unexpected(
+            transport_error(core::StatusCode::internal_error,
+                            "CUDA wavefront path " + std::to_string(path_index) +
+                                " returned blocked depth-limit bits incompatible with its "
+                                "termination."));
+    }
+    switch (termination) {
     case WavefrontTermination::escaped_environment:
-        return CudaWavefrontPathTermination::escaped_environment;
+        return RendererTermination{.reason = CudaWavefrontPathTermination::escaped_environment};
     case WavefrontTermination::diffuse_depth_limit:
-        return CudaWavefrontPathTermination::depth_limit;
+        return RendererTermination{
+            .reason = CudaWavefrontPathTermination::depth_limit,
+            .blocked_depth_limits = blocked,
+        };
     case WavefrontTermination::zero_throughput:
-        return CudaWavefrontPathTermination::zero_throughput;
+        return RendererTermination{.reason = CudaWavefrontPathTermination::zero_throughput};
     case WavefrontTermination::outside_bsdf_support:
-        return CudaWavefrontPathTermination::outside_bsdf_support;
+        return RendererTermination{.reason = CudaWavefrontPathTermination::outside_bsdf_support};
+    case WavefrontTermination::russian_roulette:
+        return RendererTermination{.reason = CudaWavefrontPathTermination::russian_roulette};
     case WavefrontTermination::none:
         break;
     }
@@ -440,17 +603,18 @@ scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudg
         sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(TransportPathStateLane) +
         sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(TransportPathStateLane) +
         sizeof(ClosestHit) + sizeof(WavefrontPendingShadow) + sizeof(WavefrontLaneControl) +
-        sizeof(PathSlot) + sizeof(TransportRay) + sizeof(SceneClosestHitResult) +
-        sizeof(SceneOcclusionResult) + sizeof(WavefrontStageOutcome);
+        sizeof(WavefrontPreviousBsdfSample) + sizeof(PathSlot) + sizeof(TransportRay) +
+        sizeof(SceneClosestHitResult) + sizeof(SceneOcclusionResult) +
+        sizeof(WavefrontStageOutcome);
     constexpr auto column_alignment_slack =
         (alignof(SampleStreamIndex) - 1U) + (alignof(TransportRay) - 1U) +
         (alignof(TransportPathStateLane) - 1U) + (alignof(SampleStreamIndex) - 1U) +
         (alignof(TransportRay) - 1U) + (alignof(TransportPathStateLane) - 1U) +
         (alignof(ClosestHit) - 1U) + (alignof(WavefrontPendingShadow) - 1U) +
-        (alignof(WavefrontLaneControl) - 1U) + (alignof(PathSlot) - 1U) +
-        (alignof(TransportRay) - 1U) + (alignof(SceneClosestHitResult) - 1U) +
-        (alignof(SceneOcclusionResult) - 1U) + (alignof(WavefrontStageOutcome) - 1U) +
-        (alignof(std::uint32_t) - 1U);
+        (alignof(WavefrontPreviousBsdfSample) - 1U) + (alignof(WavefrontLaneControl) - 1U) +
+        (alignof(PathSlot) - 1U) + (alignof(TransportRay) - 1U) +
+        (alignof(SceneClosestHitResult) - 1U) + (alignof(SceneOcclusionResult) - 1U) +
+        (alignof(WavefrontStageOutcome) - 1U) + (alignof(std::uint32_t) - 1U);
     constexpr auto fixed_bytes = sizeof(std::uint32_t);
     if (path_count >
         (std::numeric_limits<std::size_t>::max() - column_alignment_slack - fixed_bytes) /
@@ -485,6 +649,7 @@ scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudg
 core::Result<CudaWavefrontTransportBatch>
 trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bvh,
                                const std::span<const CudaWavefrontPathInput> inputs,
+                               const CudaWavefrontLightSampler light_sampler,
                                const CudaWavefrontTransportOptions options) try {
     if (auto status = cuda_scene_query_detail::validate_binding(scene, bvh, "wavefront transport");
         !status) {
@@ -493,12 +658,12 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
     if (auto status = validate_options_and_inputs(inputs, options); !status) {
         return std::unexpected(std::move(status.error()));
     }
-    if (scene.header().punctual_light_count != 0U) {
-        return std::unexpected(transport_error(
-            core::StatusCode::unavailable,
-            "CUDA wavefront transport currently supports mesh-area lights only; punctual lights "
-            "are rejected explicitly."));
+    const auto validated_light_sampler = validate_light_sampler(scene.header(), light_sampler);
+    if (!validated_light_sampler) {
+        return std::unexpected(validated_light_sampler.error());
     }
+    const auto config = transport_config(options, validated_light_sampler->light_count,
+                                         validated_light_sampler->strategy);
 
     const auto path_count = inputs.size();
     const auto device_path_count = static_cast<std::uint32_t>(path_count);
@@ -544,6 +709,8 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
     auto hits_result = allocate_column.template operator()<ClosestHit>(path_count);
     auto pending_shadows_result =
         allocate_column.template operator()<WavefrontPendingShadow>(path_count);
+    auto previous_bsdf_samples_result =
+        allocate_column.template operator()<WavefrontPreviousBsdfSample>(path_count);
     auto controls_result = allocate_column.template operator()<WavefrontLaneControl>(path_count);
     auto compact_slots_result = allocate_column.template operator()<PathSlot>(path_count);
     auto compact_rays_result = allocate_column.template operator()<TransportRay>(path_count);
@@ -570,6 +737,8 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
             return &hits_result.error();
         if (!pending_shadows_result)
             return &pending_shadows_result.error();
+        if (!previous_bsdf_samples_result)
+            return &previous_bsdf_samples_result.error();
         if (!controls_result)
             return &controls_result.error();
         if (!compact_slots_result)
@@ -598,6 +767,7 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
     auto* const stream_states = *stream_states_result;
     auto* const hits = *hits_result;
     auto* const pending_shadows = *pending_shadows_result;
+    auto* const previous_bsdf_samples = *previous_bsdf_samples_result;
     auto* const controls = *controls_result;
     auto* const compact_slots = *compact_slots_result;
     auto* const compact_rays = *compact_rays_result;
@@ -652,9 +822,10 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
         .path_states = stream_states,
         .hits = hits,
         .pending_shadows = pending_shadows,
+        .previous_bsdf_samples = previous_bsdf_samples,
         .controls = controls,
         .capacity = device_path_count,
-        .reserved = {0U, 0U, 0U},
+        .reserved = 0U,
     };
     const auto camera_inputs = WavefrontCameraInputDeviceSoa{
         .sample_streams = input_samples,
@@ -666,7 +837,12 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
     auto host_outcomes = std::vector<WavefrontStageOutcome>{};
     auto report = CudaWavefrontTransportReport{
         .schema_version = CurrentCudaWavefrontTransportReportSchemaVersion,
-        .maximum_diffuse_depth = options.maximum_diffuse_depth,
+        .has_light_sampler = validated_light_sampler->present,
+        .registered_light_count = validated_light_sampler->light_count,
+        .heuristic = options.heuristic,
+        .light_sampling_strategy = validated_light_sampler->strategy,
+        .depth_limits = options.depth_limits,
+        .roulette_policy = options.roulette_policy,
         .path_count = path_count,
     };
 
@@ -710,7 +886,7 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
         return std::unexpected(ray_header.error());
     }
     auto iteration = std::uint64_t{};
-    const auto maximum_iterations = static_cast<std::uint64_t>(options.maximum_diffuse_depth) + 2U;
+    const auto maximum_iterations = static_cast<std::uint64_t>(options.depth_limits.diffuse) + 2U;
     while (ray_header->size != 0U) {
         if (iteration++ >= maximum_iterations) {
             return std::unexpected(transport_error(
@@ -829,13 +1005,16 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
                                             [&] {
                                                 return blackframe_cuda_launch_wavefront_shade_stage(
                                                     scene.device_data(), scene.size_bytes(),
-                                                    queue_view, stream_view,
-                                                    options.maximum_diffuse_depth,
+                                                    queue_view, stream_view, config,
                                                     shade_header->size, outcomes);
                                             });
                 !status) {
                 return std::unexpected(std::move(status.error()));
             }
+            report.closure_samples += static_cast<std::uint64_t>(
+                std::ranges::count_if(host_outcomes, [](const WavefrontStageOutcome outcome) {
+                    return (outcome.detail & xpu::cuda::WavefrontShadeDetailClosureSampled) != 0U;
+                }));
             report.light_samples += static_cast<std::uint64_t>(
                 std::ranges::count_if(host_outcomes, [](const WavefrontStageOutcome outcome) {
                     return (outcome.detail & xpu::cuda::WavefrontShadeDetailLightSampled) != 0U;
@@ -969,7 +1148,8 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
         paths.push_back(CudaWavefrontPathResult{
             .state = *state,
             .terminal_ray = *ray,
-            .termination = *termination,
+            .termination = termination->reason,
+            .blocked_depth_limits = termination->blocked_depth_limits,
         });
     }
     report.terminated_paths = path_count;

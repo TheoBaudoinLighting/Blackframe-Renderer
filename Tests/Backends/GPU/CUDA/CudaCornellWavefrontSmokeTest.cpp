@@ -3,10 +3,13 @@
 #include <Blackframe/Backends/GPU/CUDA/SceneBvh.hpp>
 #include <Blackframe/Backends/GPU/CUDA/SceneSoA.hpp>
 #include <Blackframe/Backends/GPU/CUDA/WavefrontTransport.hpp>
+#include <Blackframe/Engine/FrameScene.hpp>
+#include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/Cie1931Sensor.hpp>
 #include <Blackframe/Renderer/Color.hpp>
 #include <Blackframe/Renderer/Film.hpp>
 #include <Blackframe/Renderer/IndependentSampler.hpp>
+#include <Blackframe/Renderer/LightSampler.hpp>
 #include <Blackframe/Renderer/PixelJitter.hpp>
 #if defined(BLACKFRAME_CUDA_CORNELL_PNG)
 #include <Blackframe/Renderer/PngWriter.hpp>
@@ -19,7 +22,10 @@
 #include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <filesystem>
+#include <functional>
 #include <gtest/gtest.h>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -42,6 +48,80 @@ constexpr auto CornellPathTime = renderer::TransportScalar{0.5F};
 constexpr auto CornellMaximumDiffuseDepth = std::uint32_t{5U};
 constexpr auto DiagnosticCornellExtent = renderer::RenderExtent{.width = 800U, .height = 800U};
 constexpr auto DiagnosticCornellSamplesPerPixel = std::uint32_t{16U};
+
+[[nodiscard]] CudaWavefrontTransportOptions
+transport_options(const std::uint32_t maximum_diffuse_depth = CornellMaximumDiffuseDepth) {
+    return CudaWavefrontTransportOptions{
+        .heuristic = renderer::MisHeuristic::power,
+        .depth_limits = renderer::PathDepthLimits{.diffuse = maximum_diffuse_depth},
+        .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
+    };
+}
+
+[[nodiscard]] core::Result<renderer::LightSampler>
+make_uniform_light_sampler(const FrameScene& scene) {
+    return renderer::LightSampler::create_uniform(scene.punctual_lights().size() +
+                                                  scene.mesh_area_lights().size());
+}
+
+[[nodiscard]] core::Result<FrameSceneHandle>
+make_environment_receiver_scene(const renderer::SampledWavelengths& sampled_wavelengths) {
+    auto mesh = TriangleMesh::create(
+        {
+            renderer::Point3{.x = -2.0F, .y = -2.0F},
+            renderer::Point3{.x = 2.0F, .y = -2.0F},
+            renderer::Point3{.x = 2.0F, .y = 2.0F},
+            renderer::Point3{.x = -2.0F, .y = 2.0F},
+        },
+        std::vector<renderer::Normal3>(4U, renderer::Normal3{.z = 1.0F}),
+        {
+            renderer::Point2{},
+            renderer::Point2{.x = 1.0F},
+            renderer::Point2{.x = 1.0F, .y = 1.0F},
+            renderer::Point2{.y = 1.0F},
+        },
+        {
+            TriangleVertexIndices{.vertices = {0U, 1U, 2U}},
+            TriangleVertexIndices{.vertices = {0U, 2U, 3U}},
+        });
+    if (!mesh) {
+        return std::unexpected(mesh.error());
+    }
+    auto shared_mesh = std::make_shared<const TriangleMesh>(std::move(*mesh));
+    return FrameScene::create(FrameSceneDescription{
+        .objects = {SceneObject{.id = {.value = 1U}}},
+        .geometries = {SceneGeometry{.id = {.value = 11U}, .mesh = std::move(shared_mesh)}},
+        .materials =
+            {
+                SceneMaterial{
+                    .id = {.value = 21U},
+                    .spectral =
+                        SceneSpectralMaterial{
+                            .wavelengths = sampled_wavelengths,
+                            .reflectance = {.values = {0.25F, 0.5F, 0.75F, 1.0F}},
+                            .emitted_radiance = {},
+                        },
+                },
+            },
+        .instances =
+            {
+                SceneInstance{
+                    .id = {.value = 31U},
+                    .parent = std::nullopt,
+                    .object = {.value = 1U},
+                    .geometry = {.value = 11U},
+                    .material = {.value = 21U},
+                    .local_to_parent = renderer::identity_matrix<renderer::TransportScalar>(),
+                },
+            },
+        .punctual_lights = {},
+        .spectral_environment =
+            SceneSpectralEnvironment{
+                .wavelengths = sampled_wavelengths,
+                .radiance = {.values = {2.0F, 2.0F, 2.0F, 2.0F}},
+            },
+    });
+}
 
 [[nodiscard]] testing::AssertionResult select_test_device() {
     auto device_count = int{};
@@ -216,6 +296,7 @@ void add_report(CudaWavefrontTransportReport& destination,
     destination.stage_lanes.shade += source.stage_lanes.shade;
     destination.stage_lanes.shadow += source.stage_lanes.shadow;
     destination.stage_lanes.continuation += source.stage_lanes.continuation;
+    destination.closure_samples += source.closure_samples;
     destination.light_samples += source.light_samples;
     destination.shadow_queries += source.shadow_queries;
     destination.terminated_paths += source.terminated_paths;
@@ -236,6 +317,10 @@ class CudaCornellWavefrontSmokeTest : public testing::Test {
         const auto created_scene = cornell_wavefront_test::make_cornell_scene();
         ASSERT_TRUE(created_scene.has_value()) << created_scene.error().message;
         scene_ = *created_scene;
+
+        auto light_sampler = make_uniform_light_sampler(*scene_);
+        ASSERT_TRUE(light_sampler.has_value()) << light_sampler.error().message;
+        light_sampler_.emplace(std::move(*light_sampler));
 
         auto uploaded = CudaSceneSoA::upload(*scene_);
         ASSERT_TRUE(uploaded.has_value()) << uploaded.error().message;
@@ -262,6 +347,7 @@ class CudaCornellWavefrontSmokeTest : public testing::Test {
     }
 
     FrameSceneHandle scene_{};
+    std::optional<renderer::LightSampler> light_sampler_{};
     std::optional<CudaSceneSoA> scene_soa_{};
     std::optional<CudaSceneBvh> scene_bvh_{};
 };
@@ -291,7 +377,12 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
 
     auto aggregate_report = CudaWavefrontTransportReport{
         .schema_version = CurrentCudaWavefrontTransportReportSchemaVersion,
-        .maximum_diffuse_depth = CornellMaximumDiffuseDepth,
+        .has_light_sampler = true,
+        .registered_light_count = light_sampler_->light_count(),
+        .heuristic = renderer::MisHeuristic::power,
+        .light_sampling_strategy = renderer::LightSamplingStrategy::uniform,
+        .depth_limits = renderer::PathDepthLimits{.diffuse = CornellMaximumDiffuseDepth},
+        .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
     };
     auto non_black_spectral_paths = std::size_t{};
     for (auto first_sample = std::uint32_t{}; first_sample < samples_per_pixel;
@@ -303,14 +394,19 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
         ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 
         const auto traced = trace_cuda_wavefront_transport(
-            *scene_soa_, *scene_bvh_, *inputs,
-            CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+            *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options());
         ASSERT_TRUE(traced.has_value()) << traced.error().message;
         ASSERT_EQ(traced->paths.size(), inputs->size());
 
         const auto& report = traced->report;
         EXPECT_EQ(report.schema_version, CurrentCudaWavefrontTransportReportSchemaVersion);
-        EXPECT_EQ(report.maximum_diffuse_depth, CornellMaximumDiffuseDepth);
+        EXPECT_TRUE(report.has_light_sampler);
+        EXPECT_EQ(report.registered_light_count, light_sampler_->light_count());
+        EXPECT_EQ(report.heuristic, renderer::MisHeuristic::power);
+        EXPECT_EQ(report.light_sampling_strategy, renderer::LightSamplingStrategy::uniform);
+        EXPECT_EQ(report.depth_limits,
+                  renderer::PathDepthLimits{.diffuse = CornellMaximumDiffuseDepth});
+        EXPECT_EQ(report.roulette_policy, renderer::RussianRoulettePolicy::disabled());
         EXPECT_EQ(report.path_count, inputs->size());
         EXPECT_EQ(report.terminated_paths, inputs->size());
         EXPECT_EQ(report.queue_overflow_attempts, 0U);
@@ -363,6 +459,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
     EXPECT_GT(aggregate_report.stage_lanes.continuation, 0U);
     EXPECT_EQ(aggregate_report.stage_lanes.hit + aggregate_report.stage_lanes.miss,
               aggregate_report.stage_lanes.intersection);
+    EXPECT_GT(aggregate_report.closure_samples, 0U);
     EXPECT_GT(aggregate_report.light_samples, 0U);
     EXPECT_GT(aggregate_report.shadow_queries, 0U);
     EXPECT_GT(aggregate_report.light_samples, aggregate_report.shadow_queries);
@@ -457,9 +554,8 @@ TEST_F(CudaCornellWavefrontSmokeTest, AccumulatesConstantEnvironmentOnPrimaryMis
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
     const auto inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 1U);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
-    const auto traced = trace_cuda_wavefront_transport(
-        uploaded, bvh, *inputs,
-        CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+    const auto traced =
+        trace_cuda_wavefront_transport(uploaded, bvh, *inputs, std::nullopt, transport_options());
     ASSERT_TRUE(traced.has_value()) << traced.error().message;
     ASSERT_EQ(traced->paths.size(), 1U);
     EXPECT_EQ(traced->paths.front().termination, CudaWavefrontPathTermination::escaped_environment);
@@ -469,8 +565,79 @@ TEST_F(CudaCornellWavefrontSmokeTest, AccumulatesConstantEnvironmentOnPrimaryMis
     EXPECT_EQ(traced->report.stage_lanes.hit, 0U);
     EXPECT_EQ(traced->report.stage_lanes.miss, 1U);
     EXPECT_EQ(traced->report.stage_lanes.shade, 0U);
+    EXPECT_FALSE(traced->report.has_light_sampler);
+    EXPECT_EQ(traced->report.registered_light_count, 0U);
+    EXPECT_EQ(traced->report.closure_samples, 0U);
     EXPECT_EQ(traced->report.light_samples, 0U);
     EXPECT_EQ(traced->report.shadow_queries, 0U);
+
+    const auto extraneous_sampler = renderer::LightSampler::create_uniform(1U);
+    ASSERT_TRUE(extraneous_sampler.has_value()) << extraneous_sampler.error().message;
+    const auto rejected = trace_cuda_wavefront_transport(
+        uploaded, bvh, *inputs, std::cref(*extraneous_sampler), transport_options());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, core::StatusCode::incompatible);
+    EXPECT_NE(rejected.error().message.find("explicitly absent"), std::string::npos);
+
+    EXPECT_TRUE(bvh.close().has_value());
+    EXPECT_TRUE(uploaded.close().has_value());
+}
+
+TEST_F(CudaCornellWavefrontSmokeTest, SamplesLambertThenEnvironmentWithoutRegisteredLights) {
+    const auto frame = make_environment_receiver_scene(wavelengths());
+    ASSERT_TRUE(frame.has_value()) << frame.error().message;
+    auto uploaded_result = CudaSceneSoA::upload(**frame);
+    ASSERT_TRUE(uploaded_result.has_value()) << uploaded_result.error().message;
+    auto uploaded = std::move(*uploaded_result);
+    auto bvh_result = CudaSceneBvh::build(uploaded);
+    ASSERT_TRUE(bvh_result.has_value()) << bvh_result.error().message;
+    auto bvh = std::move(*bvh_result);
+
+    const auto initial_state =
+        renderer::PathState::create_initial(wavelengths(), renderer::VacuumMedium);
+    ASSERT_TRUE(initial_state.has_value()) << initial_state.error().message;
+    const auto primary =
+        renderer::Ray::create(renderer::Point3{.z = 1.0F}, renderer::Vector3{.z = -1.0F}, 0.0F,
+                              std::numeric_limits<renderer::TransportScalar>::infinity(),
+                              CornellPathTime, renderer::AllRayVisibility, renderer::VacuumMedium);
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    const auto sampler = renderer::IndependentSampler{CornellSeed};
+    const auto inputs = std::vector{
+        CudaWavefrontPathInput{
+            .primary_ray = *primary,
+            .initial_state = *initial_state,
+            .sample = sampler.make_stream(0U, 0U, 0U).index(),
+        },
+    };
+
+    const auto traced =
+        trace_cuda_wavefront_transport(uploaded, bvh, inputs, std::nullopt, transport_options(1U));
+    ASSERT_TRUE(traced.has_value()) << traced.error().message;
+    ASSERT_EQ(traced->paths.size(), 1U);
+    const auto& path = traced->paths.front();
+    EXPECT_EQ(path.termination, CudaWavefrontPathTermination::escaped_environment);
+    EXPECT_EQ(path.state.depth(), 1U);
+    EXPECT_EQ(path.state.depth_counters(), renderer::PathDepthCounters{.diffuse = 1U});
+    const auto expected_beta = renderer::TransportSpectrum{
+        .values = {0.25F, 0.5F, 0.75F, 1.0F},
+    };
+    const auto expected_radiance = renderer::TransportSpectrum{
+        .values = {0.5F, 1.0F, 1.5F, 2.0F},
+    };
+    for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+        EXPECT_NEAR(path.state.beta()[lane], expected_beta[lane], 1.0e-6F);
+        EXPECT_NEAR(path.state.accumulated_radiance()[lane], expected_radiance[lane], 2.0e-6F);
+    }
+    EXPECT_FALSE(traced->report.has_light_sampler);
+    EXPECT_EQ(traced->report.registered_light_count, 0U);
+    EXPECT_EQ(traced->report.closure_samples, 1U);
+    EXPECT_EQ(traced->report.light_samples, 0U);
+    EXPECT_EQ(traced->report.shadow_queries, 0U);
+    EXPECT_EQ(traced->report.stage_lanes.hit, 1U);
+    EXPECT_EQ(traced->report.stage_lanes.miss, 1U);
+    EXPECT_EQ(traced->report.stage_lanes.shade, 1U);
+    EXPECT_EQ(traced->report.stage_lanes.continuation, 1U);
+
     EXPECT_TRUE(bvh.close().has_value());
     EXPECT_TRUE(uploaded.close().has_value());
 }
@@ -478,7 +645,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, AccumulatesConstantEnvironmentOnPrimaryMis
 TEST_F(CudaCornellWavefrontSmokeTest, RejectsEmptyInputWithoutFallback) {
     const auto rejected = trace_cuda_wavefront_transport(
         *scene_soa_, *scene_bvh_, std::span<const CudaWavefrontPathInput>{},
-        CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+        std::cref(*light_sampler_), transport_options());
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, core::StatusCode::invalid_argument);
     EXPECT_FALSE(rejected.error().message.empty());
@@ -497,8 +664,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, TerminatesSmoothNormalSupportMissAfterPend
     }
 
     const auto candidates = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *inputs,
-        CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options());
     ASSERT_TRUE(candidates.has_value()) << candidates.error().message;
     ASSERT_EQ(candidates->paths.size(), candidate_count);
 
@@ -512,8 +678,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, TerminatesSmoothNormalSupportMissAfterPend
         const auto input =
             std::span<const CudaWavefrontPathInput>{inputs->data() + index, std::size_t{1U}};
         const auto traced = trace_cuda_wavefront_transport(
-            *scene_soa_, *scene_bvh_, input,
-            CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+            *scene_soa_, *scene_bvh_, input, std::cref(*light_sampler_), transport_options());
         ASSERT_TRUE(traced.has_value()) << traced.error().message;
         ASSERT_EQ(traced->paths.size(), 1U);
         verified =
@@ -534,9 +699,8 @@ TEST_F(CudaCornellWavefrontSmokeTest, KeepsCoplanarBackWallShadowRaysVisible) {
     const auto inputs = make_pixel_inputs(*camera, wavelengths(), 400U, 383U, 0U, sample_count);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 
-    const auto traced =
-        trace_cuda_wavefront_transport(*scene_soa_, *scene_bvh_, *inputs,
-                                       CudaWavefrontTransportOptions{.maximum_diffuse_depth = 1U});
+    const auto traced = trace_cuda_wavefront_transport(
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options(1U));
     ASSERT_TRUE(traced.has_value()) << traced.error().message;
     ASSERT_EQ(traced->paths.size(), sample_count);
     EXPECT_EQ(traced->report.stage_lanes.camera, sample_count);
@@ -559,8 +723,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, RejectsNonVacuumPathWithoutFallback) {
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 
     const auto rejected = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *inputs,
-        CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options());
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, core::StatusCode::invalid_argument);
     EXPECT_NE(rejected.error().message.find("vacuum"), std::string_view::npos);
@@ -582,8 +745,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, RejectsResumedPathWithoutFallback) {
     inputs->front().initial_state = *resumed;
 
     const auto rejected = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *inputs,
-        CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options());
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, core::StatusCode::incompatible);
     EXPECT_NE(rejected.error().message.find("primary path depth zero"), std::string_view::npos);
@@ -603,8 +765,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, TerminatesZeroThroughputBeforeSampling) {
     inputs->front().initial_state = *zero_state;
 
     const auto traced = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *inputs,
-        CudaWavefrontTransportOptions{.maximum_diffuse_depth = CornellMaximumDiffuseDepth});
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), transport_options());
     ASSERT_TRUE(traced.has_value()) << traced.error().message;
     ASSERT_EQ(traced->paths.size(), 1U);
     EXPECT_EQ(traced->paths.front().termination, CudaWavefrontPathTermination::zero_throughput);
@@ -621,12 +782,10 @@ TEST_F(CudaCornellWavefrontSmokeTest, RejectsInsufficientDeviceBudgetWithoutFall
     const auto inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 1U);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 
-    const auto rejected = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *inputs,
-        CudaWavefrontTransportOptions{
-            .maximum_diffuse_depth = CornellMaximumDiffuseDepth,
-            .device_memory_budget = xpu::cuda::DeviceMemoryBudget{.maximum_bytes = 1U},
-        });
+    auto options = transport_options();
+    options.device_memory_budget = xpu::cuda::DeviceMemoryBudget{.maximum_bytes = 1U};
+    const auto rejected = trace_cuda_wavefront_transport(*scene_soa_, *scene_bvh_, *inputs,
+                                                         std::cref(*light_sampler_), options);
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, core::StatusCode::resource_exhausted);
     EXPECT_FALSE(rejected.error().message.empty());
