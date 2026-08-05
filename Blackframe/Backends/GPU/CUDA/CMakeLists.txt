@@ -1,6 +1,7 @@
 add_library(
     BlackframeCudaScene
     STATIC
+        Source/ClosestHit.cpp
         Source/SceneBvh.cpp
         Source/SceneSoA.cpp
 )
@@ -13,6 +14,7 @@ target_sources(
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/ClosestHit.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/SceneBvh.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/SceneSoA.hpp"
 )

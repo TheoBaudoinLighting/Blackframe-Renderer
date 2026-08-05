@@ -62,6 +62,13 @@ if(BLACKFRAME_ENABLE_CUDA)
         BlackframeCudaSmokeTests
     )
 endif()
+if(BLACKFRAME_ENABLE_CUDA AND BLACKFRAME_ENABLE_EMBREE)
+    list(
+        APPEND
+        blackframe_test_targets
+        BlackframeCudaClosestHitParityTests
+    )
+endif()
 
 add_custom_target(BlackframeTests)
 add_dependencies(BlackframeTests ${blackframe_test_targets})

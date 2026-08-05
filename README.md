@@ -234,7 +234,7 @@ silently selecting another path.
 - **Host control:** bounded versioned local IPC, a C extension ABI, explicit absolute-path loading,
   XPU device discovery, a reference discovery plugin, and a headless `render` control executable.
 - **Backend integration:** explicit capability reporting and pre-dispatch checks, pinned Embree 4
-  closest-hit/occlusion queries, and an optional CUDA C++20 smoke kernel. The host/device transport
+  closest-hit/occlusion queries, and a CUDA C++20 closest-hit kernel. The host/device transport
   boundary is isolated in a versioned C++20-compatible header containing fixed-width, explicitly
   aligned ray, hit, queue, sampler, spectrum, and path-state records. The host compiler and a CUDA
   kernel compare every frozen size, alignment, and member offset at test time. A separate host-only
@@ -242,9 +242,11 @@ silently selecting another path.
   aligned scratch suballocation, preserves live storage when growth is refused, and reports CUDA
   allocation exhaustion without selecting host memory. A committed `FrameScene` serializes into a
   deterministic pointer-free device SoA, and a separate versioned CUDA blob builds one binary BLAS
-  per geometry plus a TLAS over resolved instances with conservative finite bounds. The CUDA BVH is
-  construction data only at this stage: no GPU ray traversal or Embree substitution is hidden
-  behind it. These are narrow integration contracts, not complete rendering backends.
+  per geometry plus a TLAS over resolved instances with conservative finite bounds. CUDA
+  closest-hit queries traverse that TLAS and its BLAS, apply resolved instance transforms, and
+  intersect two-sided watertight triangles with explicit per-ray miss and error states. Embree stays
+  an independent CPU oracle and is never substituted for CUDA execution. These are narrow
+  integration contracts, not complete rendering backends.
 
 ## Current boundary
 

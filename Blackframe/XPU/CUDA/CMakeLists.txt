@@ -26,6 +26,7 @@ target_sources(
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneClosestHit.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneSoaHash.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
@@ -70,6 +71,7 @@ target_link_libraries(
 add_library(
     BlackframeCudaSceneKernel
     STATIC
+        Source/CudaSceneClosestHit.cu
         Source/CudaSceneBvhAbiContract.cu
         Source/CudaSceneSoaHash.cu
 )

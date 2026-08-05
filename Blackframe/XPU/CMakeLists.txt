@@ -10,6 +10,7 @@ target_sources(
         FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/SceneBvhAbi.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/SceneSoaAbi.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/SceneTraversalAbi.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Shared/Include/Blackframe/XPU/Shared/TransportAbi.hpp"
 )
 
