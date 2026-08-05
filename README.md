@@ -247,8 +247,12 @@ silently selecting another path.
   queries traverse that TLAS and its BLAS, apply resolved instance transforms and intersect
   two-sided watertight triangles with explicit per-ray miss and error states. Opaque shadow queries
   apply visibility masks and exit at the first eligible crossing without reconstructing surface
-  data. Embree stays an independent CPU oracle and is never substituted for CUDA execution. These
-  are narrow integration contracts, not complete rendering backends.
+  data. Seven fixed-capacity CUDA queue columns now store path-slot indices for camera, ray, hit,
+  miss, shade, shadow, and continuation work. Device-side CAS reservation keeps each published size
+  within capacity, while saturated overflow and rejection counters make exhaustion explicit without
+  overwriting adjacent storage; reset requires an explicit overflow policy. Embree stays an
+  independent CPU oracle and is never substituted for CUDA execution. These are narrow integration
+  contracts, not complete rendering backends.
 
 ## Current boundary
 

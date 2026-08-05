@@ -60,6 +60,7 @@ if(BLACKFRAME_ENABLE_CUDA)
         BlackframeCudaMemoryTests
         BlackframeCudaSceneTests
         BlackframeCudaSmokeTests
+        BlackframeCudaWavefrontQueueTests
     )
 endif()
 if(BLACKFRAME_ENABLE_CUDA AND BLACKFRAME_ENABLE_EMBREE)

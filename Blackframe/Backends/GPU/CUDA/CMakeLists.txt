@@ -47,3 +47,46 @@ set_target_properties(
         OUTPUT_NAME BlackframeCudaScene
         DEBUG_POSTFIX d
 )
+
+add_library(
+    BlackframeCudaQueues
+    STATIC
+        Source/WavefrontQueues.cpp
+)
+add_library(Blackframe::CudaQueues ALIAS BlackframeCudaQueues)
+blackframe_set_target_role(BlackframeCudaQueues cuda)
+
+target_sources(
+    BlackframeCudaQueues
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/WavefrontQueues.hpp"
+)
+
+target_include_directories(
+    BlackframeCudaQueues
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+target_link_libraries(
+    BlackframeCudaQueues
+    PUBLIC
+        Blackframe::CudaMemory
+        Blackframe::CudaQueueKernel
+        Blackframe::Renderer
+        Blackframe::XpuHostDeviceAbi
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)
+
+set_target_properties(
+    BlackframeCudaQueues
+    PROPERTIES
+        OUTPUT_NAME BlackframeCudaQueues
+        DEBUG_POSTFIX d
+)

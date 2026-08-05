@@ -32,6 +32,8 @@ target_sources(
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportAbiProbe.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueDevice.cuh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueKernel.hpp"
 )
 
 target_include_directories(
@@ -93,10 +95,30 @@ target_link_libraries(
 add_library(BlackframeCuda INTERFACE)
 add_library(Blackframe::Cuda ALIAS BlackframeCuda)
 
+add_library(
+    BlackframeCudaQueueKernel
+    STATIC
+        Source/CudaWavefrontQueues.cu
+)
+add_library(Blackframe::CudaQueueKernel ALIAS BlackframeCudaQueueKernel)
+blackframe_set_target_role(BlackframeCudaQueueKernel cuda)
+
+blackframe_configure_cuda_target(BlackframeCudaQueueKernel)
+
+target_link_libraries(
+    BlackframeCudaQueueKernel
+    PUBLIC
+        Blackframe::CudaSharedHeaders
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)
+
 target_link_libraries(
     BlackframeCuda
     INTERFACE
         Blackframe::CudaMemory
+        Blackframe::CudaQueueKernel
         Blackframe::CudaSmokeKernel
         Blackframe::ProjectOptions
 )

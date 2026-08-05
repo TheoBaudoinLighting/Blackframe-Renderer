@@ -25,6 +25,31 @@ gtest_discover_tests(
         RUN_SERIAL TRUE
 )
 
+add_executable(
+    BlackframeCudaWavefrontQueueTests
+    WavefrontQueuesTest.cpp
+)
+blackframe_set_target_role(BlackframeCudaWavefrontQueueTests test)
+
+target_link_libraries(
+    BlackframeCudaWavefrontQueueTests
+    PRIVATE
+        Blackframe::CudaQueues
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeCudaWavefrontQueueTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cuda"
+        RESOURCE_LOCK blackframe_cuda_device_0
+        RUN_SERIAL TRUE
+)
+
 if(TARGET Blackframe::CpuEmbree)
     add_executable(
         BlackframeCudaClosestHitParityTests
