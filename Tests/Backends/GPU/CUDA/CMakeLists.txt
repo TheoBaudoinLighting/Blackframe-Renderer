@@ -141,6 +141,31 @@ gtest_discover_tests(
         TIMEOUT 180
 )
 
+if(BLACKFRAME_ENABLE_NSIGHT_VALIDATION)
+    set(
+        blackframe_cuda_nsight_output_directory
+        "${CMAKE_CURRENT_BINARY_DIR}/nsight/$<CONFIG>"
+    )
+    add_test(
+        NAME BlackframeCudaNsightValidation
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DBLACKFRAME_NSYS_EXECUTABLE:FILEPATH=${BLACKFRAME_NSYS_EXECUTABLE}"
+            "-DBLACKFRAME_NSIGHT_TARGET:FILEPATH=$<TARGET_FILE:BlackframeCudaCornellSmokeTests>"
+            "-DBLACKFRAME_NSIGHT_BUILD_DIRECTORY:PATH=${CMAKE_BINARY_DIR}"
+            "-DBLACKFRAME_NSIGHT_OUTPUT_DIRECTORY:PATH=${blackframe_cuda_nsight_output_directory}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/RunNsightValidation.cmake"
+    )
+    set_tests_properties(
+        BlackframeCudaNsightValidation
+        PROPERTIES
+            LABELS "nightly;cuda"
+            RESOURCE_LOCK blackframe_cuda_device_0
+            RUN_SERIAL TRUE
+            TIMEOUT 900
+    )
+endif()
+
 cmake_path(GET CMAKE_CUDA_COMPILER PARENT_PATH blackframe_cuda_compiler_bin)
 cmake_path(GET blackframe_cuda_compiler_bin PARENT_PATH blackframe_cuda_toolkit_root)
 find_program(
@@ -168,6 +193,27 @@ add_test(
 )
 set_tests_properties(
     BlackframeCudaWavefrontAsyncRacecheck
+    PROPERTIES
+        LABELS "nightly;cuda"
+        RESOURCE_LOCK blackframe_cuda_device_0
+        RUN_SERIAL TRUE
+        TIMEOUT 600
+)
+
+add_test(
+    NAME BlackframeCudaWavefrontInstrumentationRacecheck
+    COMMAND
+        "${blackframe_compute_sanitizer_racecheck}"
+        --tool racecheck
+        --racecheck-memcpy-async yes
+        --racecheck-detect-level warn
+        --racecheck-report all
+        --error-exitcode 99
+        "$<TARGET_FILE:BlackframeCudaCornellSmokeTests>"
+        --gtest_filter=CudaCornellWavefrontSmokeTest.NsightInstrumentationExportsStageMetrics
+)
+set_tests_properties(
+    BlackframeCudaWavefrontInstrumentationRacecheck
     PROPERTIES
         LABELS "nightly;cuda"
         RESOURCE_LOCK blackframe_cuda_device_0

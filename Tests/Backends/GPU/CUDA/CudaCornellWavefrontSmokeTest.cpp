@@ -16,6 +16,7 @@
 #endif
 #include <Blackframe/Renderer/Ray.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -384,6 +385,12 @@ struct RegionSum final {
 
 void add_report(CudaWavefrontTransportReport& destination,
                 const CudaWavefrontTransportReport& source) noexcept {
+    const auto add_metric = [](CudaWavefrontStageMetric& target,
+                               const CudaWavefrontStageMetric& value) {
+        target.kernel_dispatches += value.kernel_dispatches;
+        target.kernel_lanes += value.kernel_lanes;
+        target.gpu_elapsed_nanoseconds += value.gpu_elapsed_nanoseconds;
+    };
     destination.path_count += source.path_count;
     destination.asynchronous_upload_bytes += source.asynchronous_upload_bytes;
     destination.asynchronous_download_bytes += source.asynchronous_download_bytes;
@@ -395,6 +402,13 @@ void add_report(CudaWavefrontTransportReport& destination,
     destination.stage_lanes.shade += source.stage_lanes.shade;
     destination.stage_lanes.shadow += source.stage_lanes.shadow;
     destination.stage_lanes.continuation += source.stage_lanes.continuation;
+    add_metric(destination.stage_metrics.camera, source.stage_metrics.camera);
+    add_metric(destination.stage_metrics.intersection, source.stage_metrics.intersection);
+    add_metric(destination.stage_metrics.hit, source.stage_metrics.hit);
+    add_metric(destination.stage_metrics.miss, source.stage_metrics.miss);
+    add_metric(destination.stage_metrics.shade, source.stage_metrics.shade);
+    add_metric(destination.stage_metrics.shadow, source.stage_metrics.shadow);
+    add_metric(destination.stage_metrics.continuation, source.stage_metrics.continuation);
     destination.closure_samples += source.closure_samples;
     destination.light_samples += source.light_samples;
     destination.shadow_queries += source.shadow_queries;
@@ -1027,6 +1041,72 @@ TEST_F(CudaCornellWavefrontSmokeTest, TerminatesZeroThroughputBeforeSampling) {
     EXPECT_EQ(traced->report.stage_lanes.continuation, 0U);
 }
 
+TEST_F(CudaCornellWavefrontSmokeTest, NsightInstrumentationExportsStageMetrics) {
+    const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
+    ASSERT_TRUE(camera.has_value()) << camera.error().message;
+    const auto inputs = make_inputs(*camera, wavelengths(), CornellExtent, 0U, 1U);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+
+    auto baseline_options = transport_options();
+    baseline_options.transfer_mode = CudaWavefrontTransferMode::synchronous;
+    const auto baseline = trace_cuda_wavefront_transport(
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), baseline_options);
+    ASSERT_TRUE(baseline.has_value()) << baseline.error().message;
+    EXPECT_EQ(baseline->report.instrumentation_mode, CudaWavefrontInstrumentationMode::disabled);
+    EXPECT_EQ(baseline->report.stage_metrics, CudaWavefrontStageMetrics{});
+
+    auto profiled_options = baseline_options;
+    profiled_options.transfer_mode = CudaWavefrontTransferMode::asynchronous;
+    profiled_options.instrumentation_mode = CudaWavefrontInstrumentationMode::nsight;
+    auto workspace = CudaWavefrontTransportWorkspace::create(
+        inputs->size(), xpu::cuda::DeviceMemoryBudget{}, profiled_options.transfer_mode,
+        profiled_options.instrumentation_mode);
+    ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
+    EXPECT_EQ(workspace->instrumentation_mode(), CudaWavefrontInstrumentationMode::nsight);
+
+    const auto profiled =
+        trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), profiled_options);
+    ASSERT_TRUE(profiled.has_value()) << profiled.error().message;
+    expect_transport_batches_physically_exact(*baseline, *profiled);
+    EXPECT_EQ(profiled->report.instrumentation_mode, CudaWavefrontInstrumentationMode::nsight);
+
+    const auto& lanes = profiled->report.stage_lanes;
+    const auto& metrics = profiled->report.stage_metrics;
+    EXPECT_EQ(metrics.camera.kernel_dispatches, 1U);
+    EXPECT_EQ(metrics.camera.kernel_lanes, lanes.camera);
+    EXPECT_EQ(metrics.intersection.kernel_lanes, lanes.intersection * 3U);
+    EXPECT_EQ(metrics.hit.kernel_lanes, lanes.hit);
+    EXPECT_EQ(metrics.miss.kernel_lanes, lanes.miss);
+    EXPECT_EQ(metrics.shade.kernel_lanes, lanes.shade);
+    EXPECT_EQ(metrics.shadow.kernel_lanes, lanes.shadow * 3U);
+    EXPECT_EQ(metrics.continuation.kernel_lanes, lanes.continuation);
+    EXPECT_EQ(metrics.intersection.kernel_dispatches % 3U, 0U);
+    EXPECT_EQ(metrics.shadow.kernel_dispatches % 3U, 0U);
+
+    const auto stage_metrics = std::array{
+        std::cref(metrics.camera),       std::cref(metrics.intersection), std::cref(metrics.hit),
+        std::cref(metrics.miss),         std::cref(metrics.shade),        std::cref(metrics.shadow),
+        std::cref(metrics.continuation),
+    };
+    for (const auto metric : stage_metrics) {
+        EXPECT_GT(metric.get().kernel_dispatches, 0U);
+        EXPECT_GT(metric.get().kernel_lanes, 0U);
+        EXPECT_GT(metric.get().gpu_elapsed_nanoseconds, 0U);
+    }
+
+    const auto replay =
+        trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), profiled_options);
+    ASSERT_TRUE(replay.has_value()) << replay.error().message;
+    expect_transport_paths_exact(*profiled, *replay);
+    EXPECT_EQ(replay->report, profiled->report)
+        << "Observational GPU durations must not make deterministic reports unequal.";
+
+    const auto close_status = workspace->close();
+    ASSERT_TRUE(close_status) << close_status.error().message;
+}
+
 TEST_F(CudaCornellWavefrontSmokeTest, SynchronousAndAsynchronousTransfersMatchExactly) {
     const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
@@ -1047,6 +1127,10 @@ TEST_F(CudaCornellWavefrontSmokeTest, SynchronousAndAsynchronousTransfersMatchEx
     ASSERT_TRUE(asynchronous_workspace.has_value()) << asynchronous_workspace.error().message;
     EXPECT_EQ(synchronous_workspace->transfer_mode(), CudaWavefrontTransferMode::synchronous);
     EXPECT_EQ(asynchronous_workspace->transfer_mode(), CudaWavefrontTransferMode::asynchronous);
+    EXPECT_EQ(synchronous_workspace->instrumentation_mode(),
+              CudaWavefrontInstrumentationMode::disabled);
+    EXPECT_EQ(asynchronous_workspace->instrumentation_mode(),
+              CudaWavefrontInstrumentationMode::disabled);
     EXPECT_EQ(synchronous_workspace->capacity(), 8U);
     EXPECT_EQ(asynchronous_workspace->capacity(), 8U);
     EXPECT_EQ(synchronous_workspace->device_ordinal(), scene_soa_->device_ordinal());
@@ -1095,7 +1179,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, SynchronousAndAsynchronousTransfersMatchEx
 }
 
 TEST_F(CudaCornellWavefrontSmokeTest,
-       RejectsInvalidOrMismatchedTransferModesWithoutPoisoningWorkspace) {
+       RejectsInvalidOrMismatchedRuntimeModesWithoutPoisoningWorkspace) {
     const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
     const auto inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 3U);
@@ -1106,6 +1190,12 @@ TEST_F(CudaCornellWavefrontSmokeTest,
         CudaWavefrontTransportWorkspace::create(3U, xpu::cuda::DeviceMemoryBudget{}, invalid_mode);
     ASSERT_FALSE(invalid_workspace.has_value());
     EXPECT_EQ(invalid_workspace.error().code, core::StatusCode::invalid_argument);
+    constexpr auto invalid_instrumentation = static_cast<CudaWavefrontInstrumentationMode>(0xFFU);
+    const auto invalid_instrumented_workspace = CudaWavefrontTransportWorkspace::create(
+        3U, xpu::cuda::DeviceMemoryBudget{}, CudaWavefrontTransferMode::synchronous,
+        invalid_instrumentation);
+    ASSERT_FALSE(invalid_instrumented_workspace.has_value());
+    EXPECT_EQ(invalid_instrumented_workspace.error().code, core::StatusCode::invalid_argument);
 
     auto synchronous_options = transport_options();
     synchronous_options.transfer_mode = CudaWavefrontTransferMode::synchronous;
@@ -1113,6 +1203,10 @@ TEST_F(CudaCornellWavefrontSmokeTest,
     asynchronous_options.transfer_mode = CudaWavefrontTransferMode::asynchronous;
     auto invalid_options = synchronous_options;
     invalid_options.transfer_mode = invalid_mode;
+    auto invalid_instrumentation_options = synchronous_options;
+    invalid_instrumentation_options.instrumentation_mode = invalid_instrumentation;
+    auto nsight_options = synchronous_options;
+    nsight_options.instrumentation_mode = CudaWavefrontInstrumentationMode::nsight;
 
     const auto baseline = trace_cuda_wavefront_transport(
         *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), synchronous_options);
@@ -1127,11 +1221,21 @@ TEST_F(CudaCornellWavefrontSmokeTest,
                                        std::cref(*light_sampler_), invalid_options);
     ASSERT_FALSE(invalid_trace.has_value());
     EXPECT_EQ(invalid_trace.error().code, core::StatusCode::invalid_argument);
+    const auto invalid_instrumentation_trace =
+        trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), invalid_instrumentation_options);
+    ASSERT_FALSE(invalid_instrumentation_trace.has_value());
+    EXPECT_EQ(invalid_instrumentation_trace.error().code, core::StatusCode::invalid_argument);
     const auto asynchronous_mismatch =
         trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
                                        std::cref(*light_sampler_), asynchronous_options);
     ASSERT_FALSE(asynchronous_mismatch.has_value());
     EXPECT_EQ(asynchronous_mismatch.error().code, core::StatusCode::incompatible);
+    const auto instrumentation_mismatch =
+        trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), nsight_options);
+    ASSERT_FALSE(instrumentation_mismatch.has_value());
+    EXPECT_EQ(instrumentation_mismatch.error().code, core::StatusCode::incompatible);
     const auto synchronous_recovered =
         trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
                                        std::cref(*light_sampler_), synchronous_options);

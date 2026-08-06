@@ -106,6 +106,66 @@ class Event final {
     std::int32_t device_ordinal_{-1};
 };
 
+class TimingEventPair final {
+  public:
+    TimingEventPair() noexcept = default;
+    ~TimingEventPair() noexcept;
+
+    TimingEventPair(const TimingEventPair&) = delete;
+    TimingEventPair& operator=(const TimingEventPair&) = delete;
+
+    TimingEventPair(TimingEventPair&& other) noexcept;
+    TimingEventPair& operator=(TimingEventPair&& other) = delete;
+
+    // Timing events deliberately remain separate from dependency Event. Passing
+    // nullptr explicitly selects CUDA's default stream; a non-null pointer must
+    // refer to an open stream owned by the same device. Both records for one
+    // interval must select the same stream.
+    [[nodiscard]] static core::Result<TimingEventPair> create();
+    [[nodiscard]] core::Status begin(const Stream* stream);
+    [[nodiscard]] core::Status end(const Stream* stream);
+
+    // This is a non-blocking query. A pending event is reported as an explicit
+    // cudaErrorNotReady-derived error and never synchronized here. A successful
+    // query consumes the completed interval and rearms the pair for begin().
+    [[nodiscard]] core::Result<std::uint64_t> elapsed_nanoseconds();
+
+    [[nodiscard]] core::Status close();
+
+    [[nodiscard]] EventHandle begin_native_handle() const noexcept {
+        return begin_handle_;
+    }
+    [[nodiscard]] EventHandle end_native_handle() const noexcept {
+        return end_handle_;
+    }
+    [[nodiscard]] std::int32_t device_ordinal() const noexcept {
+        return device_ordinal_;
+    }
+    [[nodiscard]] bool empty() const noexcept {
+        return begin_handle_ == nullptr && end_handle_ == nullptr;
+    }
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return begin_handle_ != nullptr && end_handle_ != nullptr;
+    }
+
+  private:
+    enum class State : std::uint8_t {
+        ready,
+        begun,
+        ended,
+    };
+
+    TimingEventPair(EventHandle begin_handle, EventHandle end_handle,
+                    std::int32_t device_ordinal) noexcept;
+    void close_without_diagnostic() noexcept;
+
+    EventHandle begin_handle_{nullptr};
+    EventHandle end_handle_{nullptr};
+    StreamHandle recorded_stream_{nullptr};
+    std::int32_t device_ordinal_{-1};
+    State state_{State::ready};
+};
+
 struct PinnedHostMemoryBudget final {
     std::size_t maximum_bytes{static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())};
 };
@@ -270,6 +330,8 @@ static_assert(std::is_nothrow_move_constructible_v<Stream>);
 static_assert(std::is_nothrow_destructible_v<Stream>);
 static_assert(std::is_nothrow_move_constructible_v<Event>);
 static_assert(std::is_nothrow_destructible_v<Event>);
+static_assert(std::is_nothrow_move_constructible_v<TimingEventPair>);
+static_assert(std::is_nothrow_destructible_v<TimingEventPair>);
 static_assert(std::is_nothrow_move_constructible_v<PinnedHostAllocation>);
 static_assert(std::is_nothrow_destructible_v<PinnedHostAllocation>);
 

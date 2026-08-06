@@ -1,12 +1,15 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/XPU/CUDA/AsyncRuntime.hpp>
 #include <Blackframe/XPU/CUDA/DeviceMemory.hpp>
+#include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
 #include <limits>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -19,6 +22,7 @@ using blackframe::xpu::cuda::PinnedHostAllocation;
 using blackframe::xpu::cuda::PinnedHostBuffer;
 using blackframe::xpu::cuda::PinnedHostMemoryBudget;
 using blackframe::xpu::cuda::Stream;
+using blackframe::xpu::cuda::TimingEventPair;
 
 struct alignas(8192) OverAlignedPinnedValue final {
     std::uint64_t value{};
@@ -45,6 +49,48 @@ struct alignas(8192) OverAlignedPinnedValue final {
 [[nodiscard]] cudaStream_t native_stream(const Stream& stream) noexcept {
     return static_cast<cudaStream_t>(stream.native_handle());
 }
+
+[[nodiscard]] cudaEvent_t native_event(const blackframe::xpu::cuda::EventHandle handle) noexcept {
+    return static_cast<cudaEvent_t>(handle);
+}
+
+struct HostFunctionGate final {
+    std::atomic_bool release{};
+};
+
+void CUDART_CB wait_for_host_release(void* const user_data) {
+    auto& gate = *static_cast<HostFunctionGate*>(user_data);
+    while (!gate.release.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+
+class HostFunctionReleaseGuard final {
+  public:
+    HostFunctionReleaseGuard(HostFunctionGate& gate, const cudaStream_t stream) noexcept
+        : gate_(gate), stream_(stream) {}
+
+    HostFunctionReleaseGuard(const HostFunctionReleaseGuard&) = delete;
+    HostFunctionReleaseGuard& operator=(const HostFunctionReleaseGuard&) = delete;
+
+    ~HostFunctionReleaseGuard() noexcept {
+        if (!released_) {
+            gate_.release.store(true, std::memory_order_release);
+            static_cast<void>(cudaStreamSynchronize(stream_));
+        }
+    }
+
+    [[nodiscard]] cudaError_t release_and_wait() noexcept {
+        gate_.release.store(true, std::memory_order_release);
+        released_ = true;
+        return cudaStreamSynchronize(stream_);
+    }
+
+  private:
+    HostFunctionGate& gate_;
+    cudaStream_t stream_{};
+    bool released_{};
+};
 
 TEST(CudaAsyncRuntime, StreamAndEventMoveOwnershipAndCloseIdempotently) {
     ASSERT_TRUE(select_test_device());
@@ -211,6 +257,181 @@ TEST(CudaAsyncRuntime, ClosedHandlesAreRejectedExplicitly) {
     const auto complete = closed_event.is_complete();
     ASSERT_FALSE(complete);
     EXPECT_EQ(complete.error().code, StatusCode::invalid_argument);
+
+    auto closed_timing = TimingEventPair{};
+    status = closed_timing.begin(nullptr);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+    status = closed_timing.end(nullptr);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+    const auto elapsed = closed_timing.elapsed_nanoseconds();
+    ASSERT_FALSE(elapsed);
+    EXPECT_EQ(elapsed.error().code, StatusCode::invalid_argument);
+    status = closed_timing.close();
+    ASSERT_TRUE(status) << status.error().message;
+}
+
+TEST(CudaAsyncRuntime, TimingEventPairEnforcesOrderAndNeverSynchronizesElapsedQuery) {
+    ASSERT_TRUE(select_test_device());
+
+    auto stream = Stream::create();
+    auto other_stream = Stream::create();
+    auto timing = TimingEventPair::create();
+    ASSERT_TRUE(stream) << stream.error().message;
+    ASSERT_TRUE(other_stream) << other_stream.error().message;
+    ASSERT_TRUE(timing) << timing.error().message;
+    ASSERT_TRUE(*timing);
+    EXPECT_NE(timing->begin_native_handle(), nullptr);
+    EXPECT_NE(timing->end_native_handle(), nullptr);
+    EXPECT_NE(timing->begin_native_handle(), timing->end_native_handle());
+    EXPECT_EQ(timing->device_ordinal(), 0);
+
+    auto status = timing->end(&*stream);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+    auto elapsed = timing->elapsed_nanoseconds();
+    ASSERT_FALSE(elapsed);
+    EXPECT_EQ(elapsed.error().code, StatusCode::invalid_argument);
+
+    status = timing->begin(&*stream);
+    ASSERT_TRUE(status) << status.error().message;
+    status = timing->end(&*other_stream);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::incompatible);
+    status = timing->begin(&*stream);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+    elapsed = timing->elapsed_nanoseconds();
+    ASSERT_FALSE(elapsed);
+    EXPECT_EQ(elapsed.error().code, StatusCode::invalid_argument);
+
+    auto gate = HostFunctionGate{};
+    auto release_guard = HostFunctionReleaseGuard{gate, native_stream(*stream)};
+    ASSERT_EQ(cudaLaunchHostFunc(native_stream(*stream), wait_for_host_release, &gate),
+              cudaSuccess);
+    status = timing->end(&*stream);
+    ASSERT_TRUE(status) << status.error().message;
+    status = timing->end(&*stream);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+    status = timing->begin(&*stream);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+
+    elapsed = timing->elapsed_nanoseconds();
+    ASSERT_FALSE(elapsed);
+    EXPECT_EQ(elapsed.error().code, StatusCode::unavailable);
+    EXPECT_NE(elapsed.error().message.find("cudaErrorNotReady"), std::string::npos);
+
+    ASSERT_EQ(release_guard.release_and_wait(), cudaSuccess);
+    elapsed = timing->elapsed_nanoseconds();
+    ASSERT_TRUE(elapsed) << elapsed.error().message;
+
+    const auto second_elapsed = timing->elapsed_nanoseconds();
+    ASSERT_FALSE(second_elapsed);
+    EXPECT_EQ(second_elapsed.error().code, StatusCode::invalid_argument);
+    status = timing->begin(&*stream);
+    ASSERT_TRUE(status) << status.error().message;
+    status = timing->end(&*stream);
+    ASSERT_TRUE(status) << status.error().message;
+    status = stream->synchronize();
+    ASSERT_TRUE(status) << status.error().message;
+    elapsed = timing->elapsed_nanoseconds();
+    ASSERT_TRUE(elapsed) << elapsed.error().message;
+
+    status = timing->close();
+    ASSERT_TRUE(status) << status.error().message;
+    EXPECT_FALSE(*timing);
+    status = timing->close();
+    ASSERT_TRUE(status) << status.error().message;
+    status = other_stream->close();
+    ASSERT_TRUE(status) << status.error().message;
+    status = stream->close();
+    ASSERT_TRUE(status) << status.error().message;
+}
+
+TEST(CudaAsyncRuntime, TimingEventPairUsesDefaultStreamAndChecksNanosecondConversion) {
+    ASSERT_TRUE(select_test_device());
+
+    auto timing = TimingEventPair::create();
+    ASSERT_TRUE(timing) << timing.error().message;
+    auto status = timing->begin(nullptr);
+    ASSERT_TRUE(status) << status.error().message;
+    status = timing->end(nullptr);
+    ASSERT_TRUE(status) << status.error().message;
+    ASSERT_EQ(cudaEventSynchronize(native_event(timing->end_native_handle())), cudaSuccess);
+
+    auto raw_milliseconds = float{};
+    ASSERT_EQ(cudaEventElapsedTime(&raw_milliseconds, native_event(timing->begin_native_handle()),
+                                   native_event(timing->end_native_handle())),
+              cudaSuccess);
+    ASSERT_TRUE(std::isfinite(raw_milliseconds));
+    ASSERT_GE(raw_milliseconds, 0.0F);
+    const auto expected_nanoseconds =
+        static_cast<std::uint64_t>(std::round(static_cast<double>(raw_milliseconds) * 1'000'000.0));
+
+    const auto elapsed = timing->elapsed_nanoseconds();
+    ASSERT_TRUE(elapsed) << elapsed.error().message;
+    EXPECT_EQ(*elapsed, expected_nanoseconds);
+
+    status = timing->close();
+    ASSERT_TRUE(status) << status.error().message;
+}
+
+TEST(CudaAsyncRuntime, TimingEventPairMovesAndClosesOnItsOwningDevice) {
+    ASSERT_TRUE(select_test_device());
+
+    auto created = TimingEventPair::create();
+    ASSERT_TRUE(created) << created.error().message;
+    auto timing = TimingEventPair{std::move(*created)};
+    EXPECT_FALSE(*created);
+    EXPECT_EQ(created->device_ordinal(), -1);
+    EXPECT_TRUE(timing);
+    EXPECT_EQ(timing.device_ordinal(), 0);
+
+    auto device_count = int{};
+    ASSERT_EQ(cudaGetDeviceCount(&device_count), cudaSuccess);
+    if (device_count < 2) {
+        auto status = timing.close();
+        ASSERT_TRUE(status) << status.error().message;
+        GTEST_SKIP() << "A second CUDA device is required for the cross-device close check.";
+    }
+
+    ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
+    auto foreign_stream = Stream::create();
+    ASSERT_TRUE(foreign_stream) << foreign_stream.error().message;
+    auto status = timing.begin(&*foreign_stream);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::incompatible);
+    status = timing.begin(nullptr);
+    ASSERT_FALSE(status);
+    EXPECT_EQ(status.error().code, StatusCode::invalid_argument);
+
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    status = timing.begin(nullptr);
+    ASSERT_TRUE(status) << status.error().message;
+    status = timing.end(nullptr);
+    ASSERT_TRUE(status) << status.error().message;
+    ASSERT_EQ(cudaEventSynchronize(native_event(timing.end_native_handle())), cudaSuccess);
+    ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
+    const auto elapsed = timing.elapsed_nanoseconds();
+    ASSERT_FALSE(elapsed);
+    EXPECT_EQ(elapsed.error().code, StatusCode::invalid_argument);
+
+    status = timing.close();
+    ASSERT_TRUE(status) << status.error().message;
+    EXPECT_FALSE(timing);
+    EXPECT_EQ(timing.device_ordinal(), -1);
+    auto active_device = int{-1};
+    ASSERT_EQ(cudaGetDevice(&active_device), cudaSuccess);
+    EXPECT_EQ(active_device, 1);
+    status = timing.close();
+    ASSERT_TRUE(status) << status.error().message;
+
+    status = foreign_stream->close();
+    ASSERT_TRUE(status) << status.error().message;
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
 }
 
 TEST(CudaAsyncRuntime, PinnedAllocationEnforcesBudgetAndTypedOverflow) {
@@ -310,6 +531,10 @@ static_assert(std::is_move_constructible_v<Event>);
 static_assert(!std::is_move_assignable_v<Event>);
 static_assert(!std::is_copy_constructible_v<Event>);
 static_assert(!std::is_copy_assignable_v<Event>);
+static_assert(std::is_move_constructible_v<TimingEventPair>);
+static_assert(!std::is_move_assignable_v<TimingEventPair>);
+static_assert(!std::is_copy_constructible_v<TimingEventPair>);
+static_assert(!std::is_copy_assignable_v<TimingEventPair>);
 static_assert(std::is_move_constructible_v<PinnedHostAllocation>);
 static_assert(!std::is_move_assignable_v<PinnedHostAllocation>);
 static_assert(!std::is_copy_constructible_v<PinnedHostAllocation>);

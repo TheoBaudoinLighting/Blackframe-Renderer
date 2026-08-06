@@ -126,6 +126,7 @@ target_link_libraries(
         Blackframe::CudaToolkit
         Blackframe::CudaWavefrontStageKernel
         Blackframe::ProjectOptions
+        Blackframe::CudaNvtx3
 )
 
 set_target_properties(

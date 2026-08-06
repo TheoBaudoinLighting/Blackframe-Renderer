@@ -1,4 +1,5 @@
 #include <Blackframe/XPU/CUDA/AsyncRuntime.hpp>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -38,6 +39,23 @@ namespace {
         .code = core::StatusCode::invalid_argument,
         .message =
             "CUDA " + std::string{resource} + " operation requires its owning device to be active.",
+    };
+}
+
+[[nodiscard]] core::Error timing_not_ready_error(const std::string_view event_name) {
+    return core::Error{
+        .code = core::StatusCode::unavailable,
+        .message =
+            "CUDA timing " + std::string{event_name} + " event is not ready: cudaErrorNotReady.",
+    };
+}
+
+[[nodiscard]] core::Error timing_call_order_error(const std::string_view operation,
+                                                  const std::string_view requirement) {
+    return core::Error{
+        .code = core::StatusCode::invalid_argument,
+        .message = "CUDA timing event pair " + std::string{operation} + " requires " +
+                   std::string{requirement} + ".",
     };
 }
 
@@ -99,6 +117,64 @@ activate_owning_device(const std::int32_t device_ordinal, const std::string_view
 
 [[nodiscard]] cudaEvent_t native_event(const EventHandle handle) noexcept {
     return static_cast<cudaEvent_t>(handle);
+}
+
+[[nodiscard]] core::Result<cudaStream_t> timing_stream(const Stream* const stream,
+                                                       const std::int32_t device_ordinal,
+                                                       const std::string_view operation) {
+    if (stream == nullptr) {
+        return cudaStream_t{};
+    }
+    if (!static_cast<bool>(*stream)) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "CUDA timing event pair " + std::string{operation} +
+                       " requires an open stream or an explicit nullptr default stream.",
+        });
+    }
+    if (stream->device_ordinal() != device_ordinal) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::incompatible,
+            .message = "CUDA timing event pair cannot " + std::string{operation} +
+                       " on a stream owned by another device.",
+        });
+    }
+    return native_stream(stream->native_handle());
+}
+
+[[nodiscard]] core::Status require_timing_event_complete(const cudaEvent_t event,
+                                                         const std::string_view event_name) {
+    const auto status = cudaEventQuery(event);
+    if (status == cudaSuccess) {
+        return {};
+    }
+    if (status == cudaErrorNotReady) {
+        return std::unexpected(timing_not_ready_error(event_name));
+    }
+    return std::unexpected(
+        runtime_error(status, "timing " + std::string{event_name} + " event query"));
+}
+
+[[nodiscard]] core::Result<std::uint64_t> nanoseconds_from_milliseconds(const float milliseconds) {
+    constexpr auto nanoseconds_per_millisecond = 1'000'000.0;
+    constexpr auto uint64_limit_exclusive = 18'446'744'073'709'551'616.0;
+
+    if (!std::isfinite(milliseconds) || milliseconds < 0.0F) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::platform_error,
+            .message = "CUDA timing elapsed milliseconds are not finite and non-negative.",
+        });
+    }
+    const auto nanoseconds = static_cast<double>(milliseconds) * nanoseconds_per_millisecond;
+    const auto rounded_nanoseconds = std::round(nanoseconds);
+    if (!std::isfinite(rounded_nanoseconds) || rounded_nanoseconds < 0.0 ||
+        rounded_nanoseconds >= uint64_limit_exclusive) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::resource_exhausted,
+            .message = "CUDA timing elapsed nanoseconds exceed the uint64 range.",
+        });
+    }
+    return static_cast<std::uint64_t>(rounded_nanoseconds);
 }
 
 } // namespace
@@ -365,6 +441,248 @@ void Event::close_without_diagnostic() noexcept {
     }
     handle_ = nullptr;
     device_ordinal_ = -1;
+}
+
+TimingEventPair::TimingEventPair(const EventHandle begin_handle, const EventHandle end_handle,
+                                 const std::int32_t device_ordinal) noexcept
+    : begin_handle_(begin_handle), end_handle_(end_handle), device_ordinal_(device_ordinal) {}
+
+TimingEventPair::~TimingEventPair() noexcept {
+    close_without_diagnostic();
+}
+
+TimingEventPair::TimingEventPair(TimingEventPair&& other) noexcept
+    : begin_handle_(std::exchange(other.begin_handle_, nullptr)),
+      end_handle_(std::exchange(other.end_handle_, nullptr)),
+      recorded_stream_(std::exchange(other.recorded_stream_, nullptr)),
+      device_ordinal_(std::exchange(other.device_ordinal_, -1)),
+      state_(std::exchange(other.state_, State::ready)) {}
+
+core::Result<TimingEventPair> TimingEventPair::create() {
+    auto device_ordinal = int{-1};
+    auto status = cudaGetDevice(&device_ordinal);
+    if (status != cudaSuccess) {
+        return std::unexpected(runtime_error(status, "timing event pair device query"));
+    }
+
+    auto begin_event = cudaEvent_t{};
+    status = cudaEventCreateWithFlags(&begin_event, cudaEventDefault);
+    if (status != cudaSuccess) {
+        return std::unexpected(runtime_error(status, "timing begin event creation"));
+    }
+    if (begin_event == nullptr) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::internal_error,
+            .message =
+                "CUDA timing begin event creation succeeded without returning a native handle.",
+        });
+    }
+
+    auto end_event = cudaEvent_t{};
+    status = cudaEventCreateWithFlags(&end_event, cudaEventDefault);
+    if (status != cudaSuccess || end_event == nullptr) {
+        auto error = status != cudaSuccess
+                         ? runtime_error(status, "timing end event creation")
+                         : core::Error{
+                               .code = core::StatusCode::internal_error,
+                               .message = "CUDA timing end event creation succeeded without "
+                                          "returning a native handle.",
+                           };
+        const auto end_cleanup_status =
+            end_event != nullptr ? cudaEventDestroy(end_event) : cudaSuccess;
+        const auto begin_cleanup_status = cudaEventDestroy(begin_event);
+        if (end_cleanup_status != cudaSuccess) {
+            error.message +=
+                " Cleanup also failed: " +
+                runtime_error(end_cleanup_status, "timing end event destruction").message;
+        }
+        if (begin_cleanup_status != cudaSuccess) {
+            error.message +=
+                " Cleanup also failed: " +
+                runtime_error(begin_cleanup_status, "timing begin event destruction").message;
+        }
+        return std::unexpected(std::move(error));
+    }
+
+    return TimingEventPair{static_cast<void*>(begin_event), static_cast<void*>(end_event),
+                           device_ordinal};
+}
+
+core::Status TimingEventPair::begin(const Stream* const stream) {
+    if (!static_cast<bool>(*this)) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "Cannot begin a closed or partially closed CUDA timing event pair.",
+        });
+    }
+    if (state_ != State::ready) {
+        return std::unexpected(timing_call_order_error(
+            "begin", "a fresh pair or a successfully consumed elapsed interval"));
+    }
+    auto selected_stream = timing_stream(stream, device_ordinal_, "begin");
+    if (!selected_stream) {
+        return std::unexpected(std::move(selected_stream.error()));
+    }
+    if (auto active = require_active_device(device_ordinal_, "timing begin recording"); !active) {
+        return active;
+    }
+    const auto status = cudaEventRecord(native_event(begin_handle_), *selected_stream);
+    if (status != cudaSuccess) {
+        return std::unexpected(runtime_error(status, "timing begin event recording"));
+    }
+    recorded_stream_ = static_cast<void*>(*selected_stream);
+    state_ = State::begun;
+    return {};
+}
+
+core::Status TimingEventPair::end(const Stream* const stream) {
+    if (!static_cast<bool>(*this)) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "Cannot end a closed or partially closed CUDA timing event pair.",
+        });
+    }
+    if (state_ != State::begun) {
+        return std::unexpected(timing_call_order_error(
+            "end", "exactly one successful begin for the current interval"));
+    }
+    auto selected_stream = timing_stream(stream, device_ordinal_, "end");
+    if (!selected_stream) {
+        return std::unexpected(std::move(selected_stream.error()));
+    }
+    if (static_cast<void*>(*selected_stream) != recorded_stream_) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::incompatible,
+            .message = "CUDA timing event pair begin and end must use the same stream.",
+        });
+    }
+    if (auto active = require_active_device(device_ordinal_, "timing end recording"); !active) {
+        return active;
+    }
+    const auto status = cudaEventRecord(native_event(end_handle_), *selected_stream);
+    if (status != cudaSuccess) {
+        return std::unexpected(runtime_error(status, "timing end event recording"));
+    }
+    state_ = State::ended;
+    return {};
+}
+
+core::Result<std::uint64_t> TimingEventPair::elapsed_nanoseconds() {
+    if (!static_cast<bool>(*this)) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::invalid_argument,
+            .message = "Cannot query a closed or partially closed CUDA timing event pair.",
+        });
+    }
+    if (state_ != State::ended) {
+        return std::unexpected(timing_call_order_error(
+            "elapsed-time query", "a successful begin and end for the current interval"));
+    }
+    if (auto active = require_active_device(device_ordinal_, "timing elapsed query"); !active) {
+        return std::unexpected(std::move(active.error()));
+    }
+    if (auto complete = require_timing_event_complete(native_event(begin_handle_), "begin");
+        !complete) {
+        return std::unexpected(std::move(complete.error()));
+    }
+    if (auto complete = require_timing_event_complete(native_event(end_handle_), "end");
+        !complete) {
+        return std::unexpected(std::move(complete.error()));
+    }
+
+    auto elapsed_milliseconds = float{};
+    const auto status = cudaEventElapsedTime(&elapsed_milliseconds, native_event(begin_handle_),
+                                             native_event(end_handle_));
+    if (status == cudaErrorNotReady) {
+        return std::unexpected(timing_not_ready_error("elapsed"));
+    }
+    if (status != cudaSuccess) {
+        return std::unexpected(runtime_error(status, "timing elapsed-time query"));
+    }
+    auto elapsed_nanoseconds = nanoseconds_from_milliseconds(elapsed_milliseconds);
+    if (!elapsed_nanoseconds) {
+        return std::unexpected(std::move(elapsed_nanoseconds.error()));
+    }
+    recorded_stream_ = nullptr;
+    state_ = State::ready;
+    return *elapsed_nanoseconds;
+}
+
+core::Status TimingEventPair::close() {
+    if (empty()) {
+        return {};
+    }
+    auto activation = activate_owning_device(device_ordinal_, "timing event pair close");
+    if (!activation) {
+        return std::unexpected(std::move(activation.error()));
+    }
+
+    const auto begin_destroy_status =
+        begin_handle_ != nullptr ? cudaEventDestroy(native_event(begin_handle_)) : cudaSuccess;
+    if (begin_destroy_status == cudaSuccess) {
+        begin_handle_ = nullptr;
+    }
+    const auto end_destroy_status =
+        end_handle_ != nullptr ? cudaEventDestroy(native_event(end_handle_)) : cudaSuccess;
+    if (end_destroy_status == cudaSuccess) {
+        end_handle_ = nullptr;
+    }
+    if (empty()) {
+        recorded_stream_ = nullptr;
+        device_ordinal_ = -1;
+        state_ = State::ready;
+    }
+    auto restoration_status = restore_device(*activation, "timing event pair close");
+
+    if (begin_destroy_status != cudaSuccess) {
+        auto error = runtime_error(begin_destroy_status, "timing begin event destruction");
+        if (end_destroy_status != cudaSuccess) {
+            error.message +=
+                " Additional failure: " +
+                runtime_error(end_destroy_status, "timing end event destruction").message;
+        }
+        if (!restoration_status) {
+            error.message += " Additional failure: " + restoration_status.error().message;
+        }
+        return std::unexpected(std::move(error));
+    }
+    if (end_destroy_status != cudaSuccess) {
+        auto error = runtime_error(end_destroy_status, "timing end event destruction");
+        if (!restoration_status) {
+            error.message += " Additional failure: " + restoration_status.error().message;
+        }
+        return std::unexpected(std::move(error));
+    }
+    if (!restoration_status) {
+        return restoration_status;
+    }
+    return {};
+}
+
+void TimingEventPair::close_without_diagnostic() noexcept {
+    if (empty()) {
+        return;
+    }
+    auto previous_device = int{-1};
+    const auto get_status = cudaGetDevice(&previous_device);
+    const auto changed = get_status == cudaSuccess && previous_device != device_ordinal_;
+    const auto set_status = changed ? cudaSetDevice(device_ordinal_) : cudaSuccess;
+    if (get_status == cudaSuccess && set_status == cudaSuccess) {
+        if (begin_handle_ != nullptr) {
+            static_cast<void>(cudaEventDestroy(native_event(begin_handle_)));
+        }
+        if (end_handle_ != nullptr) {
+            static_cast<void>(cudaEventDestroy(native_event(end_handle_)));
+        }
+    }
+    if (changed && set_status == cudaSuccess) {
+        static_cast<void>(cudaSetDevice(previous_device));
+    }
+    begin_handle_ = nullptr;
+    end_handle_ = nullptr;
+    recorded_stream_ = nullptr;
+    device_ordinal_ = -1;
+    state_ = State::ready;
 }
 
 PinnedHostAllocation::PinnedHostAllocation(void* const data, const std::size_t size_bytes,

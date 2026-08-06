@@ -296,7 +296,12 @@ silently selecting another path.
   path, while asynchronous batches use pinned staging, overlap input uploads with independent lane
   initialization, order all kernels on an explicit compute stream, and hand final downloads to a
   transfer stream through recorded events. Mode mismatches are rejected rather than substituted;
-  the versioned report records asynchronous byte counts and cross-stream event dependencies.
+  the versioned report records asynchronous byte counts and cross-stream event dependencies. An
+  independently fixed instrumentation mode adds a `blackframe.cuda.wavefront` NVTX domain with
+  nested camera, intersection, hit, miss, shade, shadow, and continuation ranges. Timing-enabled
+  CUDA events record dispatches, processed lanes, and GPU nanoseconds for those seven stages without
+  adding a synchronization boundary; observational durations are excluded from deterministic report
+  equality. Requested instrumentation and workspace modes must match exactly.
   Callers that omit a workspace keep the explicit allocate-per-call behavior in the requested mode.
   A dedicated CUDA Google Benchmark records stable compaction occupancy, published and rejected
   lane counts, scratch bytes, transfer telemetry, throughput, and timing in machine-readable JSON.
@@ -344,6 +349,9 @@ Requirements:
 - CUDA Toolkit 13.3.33 only when a CUDA preset is selected. Linux expects `nvcc` in `PATH`; CUDA
   architectures must be explicit, and the supplied presets target architecture 86. CUDA test
   configurations also require the matching `compute-sanitizer` shipped by that toolkit.
+- Nsight Systems is optional. Its validation is enabled explicitly with
+  `BLACKFRAME_ENABLE_NSIGHT_VALIDATION=ON` and requires an absolute
+  `BLACKFRAME_NSYS_EXECUTABLE` path; configuration fails if that executable cannot be verified.
 
 OpenEXR, Imath, Embree, stb, GoogleTest, and Google Benchmark are fetched at immutable revisions
 with verified hashes as required by the selected configuration. All dependency sources and build
@@ -397,6 +405,18 @@ The CUDA stable-compaction benchmark and its JSON contract are validated with:
 ctest --test-dir build/windows-cuda-release `
   -R '^Blackframe\.Benchmarks\.CudaWavefrontCompaction\.Json$' `
   --output-on-failure
+```
+
+An opt-in Nsight Systems test captures the instrumented Cornell timeline and exports the native
+report, JSON Lines trace, SQLite database, NVTX summary, GPU projection by range, and CUDA-kernel
+summary below the selected build directory:
+
+```powershell
+cmake --preset windows-cuda-debug `
+  -DBLACKFRAME_ENABLE_NSIGHT_VALIDATION=ON `
+  -DBLACKFRAME_NSYS_EXECUTABLE='C:\absolute\path\to\nsys.exe'
+ctest --test-dir build/windows-cuda-debug -C Debug `
+  -R '^BlackframeCudaNsightValidation$' --output-on-failure
 ```
 
 ## Headless control service

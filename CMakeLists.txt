@@ -30,11 +30,76 @@ option(BLACKFRAME_ENABLE_EMBREE "Fetch the Embree 4 CPU ray-query dependency" ${
 option(BLACKFRAME_ENABLE_STB "Fetch the stb image utility headers" ${PROJECT_IS_TOP_LEVEL})
 option(BLACKFRAME_ENABLE_CUDA "Expose the locally installed CUDA toolkit" ${PROJECT_IS_TOP_LEVEL})
 option(
+    BLACKFRAME_ENABLE_NSIGHT_VALIDATION
+    "Enable explicit Nsight Systems validation tests for the CUDA backend"
+    OFF
+)
+set(
+    BLACKFRAME_NSYS_EXECUTABLE
+    ""
+    CACHE FILEPATH
+    "Explicit absolute path to the Nsight Systems nsys executable"
+)
+option(
     BLACKFRAME_WARNINGS_AS_ERRORS
     "Treat warnings in Blackframe targets as errors"
     ${PROJECT_IS_TOP_LEVEL}
 )
 option(BLACKFRAME_ENABLE_SANITIZERS "Enable supported address/undefined sanitizers" OFF)
+
+if(BLACKFRAME_ENABLE_NSIGHT_VALIDATION)
+    if(NOT BUILD_TESTING)
+        message(FATAL_ERROR "Nsight Systems validation requires BUILD_TESTING=ON.")
+    endif()
+    if(NOT BLACKFRAME_ENABLE_CUDA)
+        message(FATAL_ERROR "Nsight Systems validation requires BLACKFRAME_ENABLE_CUDA=ON.")
+    endif()
+    if(BLACKFRAME_NSYS_EXECUTABLE STREQUAL "")
+        message(
+            FATAL_ERROR
+            "Nsight Systems validation requires an explicit BLACKFRAME_NSYS_EXECUTABLE path."
+        )
+    endif()
+    if(NOT IS_ABSOLUTE "${BLACKFRAME_NSYS_EXECUTABLE}")
+        message(FATAL_ERROR "BLACKFRAME_NSYS_EXECUTABLE must be an absolute path.")
+    endif()
+    if(NOT EXISTS "${BLACKFRAME_NSYS_EXECUTABLE}" OR IS_DIRECTORY "${BLACKFRAME_NSYS_EXECUTABLE}")
+        message(
+            FATAL_ERROR
+            "BLACKFRAME_NSYS_EXECUTABLE does not name an existing executable file: "
+            "${BLACKFRAME_NSYS_EXECUTABLE}"
+        )
+    endif()
+
+    execute_process(
+        COMMAND "${BLACKFRAME_NSYS_EXECUTABLE}" --version
+        RESULT_VARIABLE blackframe_nsys_version_result
+        OUTPUT_VARIABLE blackframe_nsys_version_stdout
+        ERROR_VARIABLE blackframe_nsys_version_stderr
+        TIMEOUT 30
+    )
+    string(
+        STRIP
+        "${blackframe_nsys_version_stdout}\n${blackframe_nsys_version_stderr}"
+        blackframe_nsys_version
+    )
+    if(NOT "${blackframe_nsys_version_result}" STREQUAL "0")
+        message(
+            FATAL_ERROR
+            "BLACKFRAME_NSYS_EXECUTABLE failed its --version probe with result "
+            "${blackframe_nsys_version_result}: ${blackframe_nsys_version}"
+        )
+    endif()
+    if(blackframe_nsys_version STREQUAL "" OR
+       NOT blackframe_nsys_version MATCHES "[Nn][Ss]ight[ ]+[Ss]ystems")
+        message(
+            FATAL_ERROR
+            "BLACKFRAME_NSYS_EXECUTABLE --version did not identify NVIDIA Nsight Systems: "
+            "${blackframe_nsys_version}"
+        )
+    endif()
+    message(STATUS "Nsight Systems validation: ${blackframe_nsys_version}")
+endif()
 
 set(blackframe_plugin_output_directory "${CMAKE_BINARY_DIR}/plugins")
 

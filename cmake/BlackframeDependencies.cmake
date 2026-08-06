@@ -316,7 +316,7 @@ function(blackframe_find_cuda_toolkit)
         )
     endif()
 
-    foreach(cuda_target IN ITEMS CUDA::cuda_driver CUDA::cudart)
+    foreach(cuda_target IN ITEMS CUDA::cuda_driver CUDA::cudart CUDA::nvtx3)
         if(NOT TARGET "${cuda_target}")
             message(
                 FATAL_ERROR
@@ -334,6 +334,11 @@ function(blackframe_find_cuda_toolkit)
             CUDA::cudart
     )
     blackframe_set_target_role(BlackframeCudaToolkit dependency)
+
+    add_library(BlackframeCudaNvtx3 INTERFACE)
+    add_library(Blackframe::CudaNvtx3 ALIAS BlackframeCudaNvtx3)
+    target_link_libraries(BlackframeCudaNvtx3 INTERFACE CUDA::nvtx3)
+    blackframe_set_target_role(BlackframeCudaNvtx3 dependency)
 
     set_property(
         GLOBAL

@@ -21,7 +21,7 @@
 
 namespace blackframe::engine {
 
-inline constexpr std::uint32_t CurrentCudaWavefrontTransportReportSchemaVersion = 3U;
+inline constexpr std::uint32_t CurrentCudaWavefrontTransportReportSchemaVersion = 4U;
 
 struct CudaWavefrontPathInput final {
     renderer::Ray primary_ray;
@@ -40,6 +40,11 @@ enum class CudaWavefrontPathTermination : std::uint8_t {
 enum class CudaWavefrontTransferMode : std::uint8_t {
     synchronous = 0U,
     asynchronous = 1U,
+};
+
+enum class CudaWavefrontInstrumentationMode : std::uint8_t {
+    disabled = 0U,
+    nsight = 1U,
 };
 
 struct CudaWavefrontPathResult final {
@@ -62,6 +67,31 @@ struct CudaWavefrontStageLaneCounts final {
     operator==(const CudaWavefrontStageLaneCounts&) const noexcept = default;
 };
 
+struct CudaWavefrontStageMetric final {
+    std::uint64_t kernel_dispatches{};
+    std::uint64_t kernel_lanes{};
+    std::uint64_t gpu_elapsed_nanoseconds{};
+
+    // GPU duration is observational and naturally varies between identical replays. Dispatch and
+    // lane counts remain part of deterministic report equality.
+    [[nodiscard]] constexpr bool operator==(const CudaWavefrontStageMetric& other) const noexcept {
+        return kernel_dispatches == other.kernel_dispatches && kernel_lanes == other.kernel_lanes;
+    }
+};
+
+struct CudaWavefrontStageMetrics final {
+    CudaWavefrontStageMetric camera{};
+    CudaWavefrontStageMetric intersection{};
+    CudaWavefrontStageMetric hit{};
+    CudaWavefrontStageMetric miss{};
+    CudaWavefrontStageMetric shade{};
+    CudaWavefrontStageMetric shadow{};
+    CudaWavefrontStageMetric continuation{};
+
+    [[nodiscard]] constexpr bool
+    operator==(const CudaWavefrontStageMetrics&) const noexcept = default;
+};
+
 struct CudaWavefrontTransportReport final {
     std::uint32_t schema_version{};
     bool has_light_sampler{};
@@ -73,11 +103,14 @@ struct CudaWavefrontTransportReport final {
     renderer::RussianRoulettePolicy roulette_policy{renderer::RussianRoulettePolicy::disabled()};
     std::size_t path_count{};
     CudaWavefrontTransferMode transfer_mode{CudaWavefrontTransferMode::synchronous};
+    CudaWavefrontInstrumentationMode instrumentation_mode{
+        CudaWavefrontInstrumentationMode::disabled};
     std::uint64_t asynchronous_upload_bytes{};
     std::uint64_t asynchronous_download_bytes{};
     // Counts explicit event waits that establish dependencies between distinct CUDA streams.
     std::uint64_t cross_stream_event_dependencies{};
     CudaWavefrontStageLaneCounts stage_lanes{};
+    CudaWavefrontStageMetrics stage_metrics{};
     std::uint64_t closure_samples{};
     std::uint64_t light_samples{};
     std::uint64_t shadow_queries{};
@@ -100,6 +133,8 @@ struct CudaWavefrontTransportOptions final {
     renderer::RussianRoulettePolicy roulette_policy{renderer::RussianRoulettePolicy::disabled()};
     xpu::cuda::DeviceMemoryBudget device_memory_budget{};
     CudaWavefrontTransferMode transfer_mode{CudaWavefrontTransferMode::synchronous};
+    CudaWavefrontInstrumentationMode instrumentation_mode{
+        CudaWavefrontInstrumentationMode::disabled};
 };
 
 using CudaWavefrontLightSampler =
@@ -120,12 +155,15 @@ class CudaWavefrontTransportWorkspace final {
 
     [[nodiscard]] static core::Result<CudaWavefrontTransportWorkspace>
     create(std::size_t capacity, xpu::cuda::DeviceMemoryBudget device_memory_budget = {},
-           CudaWavefrontTransferMode transfer_mode = CudaWavefrontTransferMode::synchronous);
+           CudaWavefrontTransferMode transfer_mode = CudaWavefrontTransferMode::synchronous,
+           CudaWavefrontInstrumentationMode instrumentation_mode =
+               CudaWavefrontInstrumentationMode::disabled);
 
     [[nodiscard]] std::size_t capacity() const noexcept;
     [[nodiscard]] std::size_t device_size_bytes() const noexcept;
     [[nodiscard]] std::int32_t device_ordinal() const noexcept;
     [[nodiscard]] CudaWavefrontTransferMode transfer_mode() const noexcept;
+    [[nodiscard]] CudaWavefrontInstrumentationMode instrumentation_mode() const noexcept;
     [[nodiscard]] explicit operator bool() const noexcept;
     [[nodiscard]] core::Status close();
 
@@ -168,8 +206,13 @@ static_assert(std::is_standard_layout_v<CudaWavefrontPathInput>);
 static_assert(std::is_trivially_copyable_v<CudaWavefrontPathInput>);
 static_assert(sizeof(CudaWavefrontPathTermination) == sizeof(std::uint8_t));
 static_assert(sizeof(CudaWavefrontTransferMode) == sizeof(std::uint8_t));
+static_assert(sizeof(CudaWavefrontInstrumentationMode) == sizeof(std::uint8_t));
 static_assert(std::is_standard_layout_v<CudaWavefrontStageLaneCounts>);
 static_assert(std::is_trivially_copyable_v<CudaWavefrontStageLaneCounts>);
+static_assert(std::is_standard_layout_v<CudaWavefrontStageMetric>);
+static_assert(std::is_trivially_copyable_v<CudaWavefrontStageMetric>);
+static_assert(std::is_standard_layout_v<CudaWavefrontStageMetrics>);
+static_assert(std::is_trivially_copyable_v<CudaWavefrontStageMetrics>);
 static_assert(std::is_standard_layout_v<CudaWavefrontTransportReport>);
 static_assert(std::is_trivially_copyable_v<CudaWavefrontTransportReport>);
 static_assert(std::is_standard_layout_v<CudaWavefrontTransportOptions>);

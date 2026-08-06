@@ -19,6 +19,8 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <nvtx3/nvToolsExt.h>
+#include <nvtx3/nvToolsExtCudaRt.h>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -116,6 +118,8 @@ struct CudaWavefrontTransferCounters final {
     std::uint64_t event_dependencies{};
 };
 
+struct CudaWavefrontProfilingResources;
+
 struct CudaWavefrontExecutionContext final {
     CudaWavefrontTransferMode mode{CudaWavefrontTransferMode::synchronous};
     xpu::cuda::Stream* compute_stream{};
@@ -125,12 +129,24 @@ struct CudaWavefrontExecutionContext final {
     WavefrontQueueCompactionResult* host_compaction_result{};
     QueueHeader* host_queue_header{};
     std::uint32_t* host_clear_status{};
+    CudaWavefrontProfilingResources* profiling{};
+    bool* workspace_poisoned{};
 };
 
 [[nodiscard]] constexpr bool valid_transfer_mode(const CudaWavefrontTransferMode mode) noexcept {
     switch (mode) {
     case CudaWavefrontTransferMode::synchronous:
     case CudaWavefrontTransferMode::asynchronous:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] constexpr bool
+valid_instrumentation_mode(const CudaWavefrontInstrumentationMode mode) noexcept {
+    switch (mode) {
+    case CudaWavefrontInstrumentationMode::disabled:
+    case CudaWavefrontInstrumentationMode::nsight:
         return true;
     }
     return false;
@@ -171,6 +187,216 @@ uses_asynchronous_transfers(const CudaWavefrontExecutionContext& context) noexce
     return std::unexpected(transport_error(error.code, "CUDA wavefront transport " +
                                                            std::string{operation} +
                                                            " failed: " + std::move(error.message)));
+}
+
+enum class CudaWavefrontNvtxCategory : std::uint32_t {
+    transport = 1U,
+    transfer = 2U,
+    camera = 10U,
+    intersection = 11U,
+    hit = 12U,
+    miss = 13U,
+    shade = 14U,
+    shadow = 15U,
+    continuation = 16U,
+};
+
+struct CudaWavefrontProfilingResources final {
+    CudaWavefrontProfilingResources(xpu::cuda::TimingEventPair stage,
+                                    xpu::cuda::TimingEventPair traversal,
+                                    const nvtxDomainHandle_t domain_handle) noexcept
+        : stage_timer(std::move(stage)), traversal_timer(std::move(traversal)),
+          domain(domain_handle) {}
+
+    CudaWavefrontProfilingResources(const CudaWavefrontProfilingResources&) = delete;
+    CudaWavefrontProfilingResources& operator=(const CudaWavefrontProfilingResources&) = delete;
+    CudaWavefrontProfilingResources(CudaWavefrontProfilingResources&&) = delete;
+    CudaWavefrontProfilingResources& operator=(CudaWavefrontProfilingResources&&) = delete;
+
+    ~CudaWavefrontProfilingResources() noexcept {
+        static_cast<void>(close());
+    }
+
+    [[nodiscard]] bool valid(const std::int32_t device_ordinal) const noexcept {
+        return static_cast<bool>(stage_timer) && static_cast<bool>(traversal_timer) &&
+               stage_timer.device_ordinal() == device_ordinal &&
+               traversal_timer.device_ordinal() == device_ordinal;
+    }
+
+    [[nodiscard]] core::Status close() {
+        auto first_error = core::Status{};
+        auto status = stage_timer.close();
+        if (!status && first_error) {
+            first_error = std::unexpected(std::move(status.error()));
+        }
+        status = traversal_timer.close();
+        if (!status && first_error) {
+            first_error = std::unexpected(std::move(status.error()));
+        }
+        if (domain != nullptr) {
+            nvtxDomainDestroy(domain);
+            domain = nullptr;
+        }
+        return first_error;
+    }
+
+    xpu::cuda::TimingEventPair stage_timer;
+    xpu::cuda::TimingEventPair traversal_timer;
+    nvtxDomainHandle_t domain{};
+};
+
+[[nodiscard]] core::Result<std::unique_ptr<CudaWavefrontProfilingResources>>
+create_profiling_resources(const xpu::cuda::Stream* const compute_stream,
+                           const xpu::cuda::Stream* const transfer_stream) {
+    auto stage_timer = xpu::cuda::TimingEventPair::create();
+    if (!stage_timer) {
+        return std::unexpected(std::move(stage_timer.error()));
+    }
+    auto traversal_timer = xpu::cuda::TimingEventPair::create();
+    if (!traversal_timer) {
+        return std::unexpected(std::move(traversal_timer.error()));
+    }
+
+    nvtxInitialize(nullptr);
+    const auto domain = nvtxDomainCreateA("blackframe.cuda.wavefront");
+    nvtxDomainNameCategoryA(
+        domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::transport), "transport");
+    nvtxDomainNameCategoryA(domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::transfer),
+                            "transfer");
+    nvtxDomainNameCategoryA(domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::camera),
+                            "camera");
+    nvtxDomainNameCategoryA(domain,
+                            static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::intersection),
+                            "intersection");
+    nvtxDomainNameCategoryA(domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::hit),
+                            "hit");
+    nvtxDomainNameCategoryA(domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::miss),
+                            "miss");
+    nvtxDomainNameCategoryA(domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::shade),
+                            "shade");
+    nvtxDomainNameCategoryA(domain, static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::shadow),
+                            "shadow");
+    nvtxDomainNameCategoryA(domain,
+                            static_cast<std::uint32_t>(CudaWavefrontNvtxCategory::continuation),
+                            "continuation");
+
+    nvtxNameCudaStreamA(native_stream(compute_stream), "Blackframe CUDA compute");
+    if (transfer_stream != nullptr) {
+        nvtxNameCudaStreamA(native_stream(transfer_stream), "Blackframe CUDA transfer");
+    }
+    nvtxNameCudaEventA(static_cast<cudaEvent_t>(stage_timer->begin_native_handle()),
+                       "Blackframe stage timer begin");
+    nvtxNameCudaEventA(static_cast<cudaEvent_t>(stage_timer->end_native_handle()),
+                       "Blackframe stage timer end");
+    nvtxNameCudaEventA(static_cast<cudaEvent_t>(traversal_timer->begin_native_handle()),
+                       "Blackframe traversal timer begin");
+    nvtxNameCudaEventA(static_cast<cudaEvent_t>(traversal_timer->end_native_handle()),
+                       "Blackframe traversal timer end");
+
+    return std::make_unique<CudaWavefrontProfilingResources>(std::move(*stage_timer),
+                                                             std::move(*traversal_timer), domain);
+}
+
+class CudaWavefrontNvtxRange final {
+  public:
+    CudaWavefrontNvtxRange(CudaWavefrontProfilingResources* const profiling, const char* const name,
+                           const CudaWavefrontNvtxCategory category, const std::uint32_t color,
+                           const std::uint64_t payload) noexcept
+        : profiling_(profiling) {
+        if (profiling_ == nullptr) {
+            return;
+        }
+        auto attributes = nvtxEventAttributes_t{};
+        attributes.version = NVTX_VERSION;
+        attributes.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        attributes.category = static_cast<std::uint32_t>(category);
+        attributes.colorType = NVTX_COLOR_ARGB;
+        attributes.color = color;
+        attributes.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
+        attributes.payload.ullValue = payload;
+        attributes.messageType = NVTX_MESSAGE_TYPE_ASCII;
+        attributes.message.ascii = name;
+        static_cast<void>(nvtxDomainRangePushEx(profiling_->domain, &attributes));
+    }
+
+    CudaWavefrontNvtxRange(const CudaWavefrontNvtxRange&) = delete;
+    CudaWavefrontNvtxRange& operator=(const CudaWavefrontNvtxRange&) = delete;
+
+    ~CudaWavefrontNvtxRange() noexcept {
+        if (profiling_ != nullptr) {
+            static_cast<void>(nvtxDomainRangePop(profiling_->domain));
+        }
+    }
+
+  private:
+    CudaWavefrontProfilingResources* profiling_{};
+};
+
+[[nodiscard]] core::Status add_stage_metric(CudaWavefrontStageMetric& metric,
+                                            const std::uint64_t kernel_lanes,
+                                            const std::uint64_t elapsed_nanoseconds,
+                                            const std::string_view stage_name) {
+    if (metric.kernel_dispatches == std::numeric_limits<std::uint64_t>::max() ||
+        kernel_lanes > std::numeric_limits<std::uint64_t>::max() - metric.kernel_lanes ||
+        elapsed_nanoseconds >
+            std::numeric_limits<std::uint64_t>::max() - metric.gpu_elapsed_nanoseconds) {
+        return std::unexpected(transport_error(
+            core::StatusCode::resource_exhausted,
+            "CUDA wavefront " + std::string{stage_name} +
+                " profiling counters overflowed their fixed 64-bit report domain."));
+    }
+    ++metric.kernel_dispatches;
+    metric.kernel_lanes += kernel_lanes;
+    metric.gpu_elapsed_nanoseconds += elapsed_nanoseconds;
+    return {};
+}
+
+void poison_profiling_workspace(const CudaWavefrontExecutionContext& context) noexcept {
+    if (context.workspace_poisoned != nullptr) {
+        *context.workspace_poisoned = true;
+    }
+}
+
+[[nodiscard]] core::Status begin_timed_kernel(xpu::cuda::TimingEventPair& timer,
+                                              const CudaWavefrontExecutionContext& context,
+                                              const std::string_view stage_name) {
+    auto status = contextual_runtime_status(timer.begin(context.compute_stream),
+                                            std::string{stage_name} + " timing begin");
+    if (!status) {
+        poison_profiling_workspace(context);
+    }
+    return status;
+}
+
+[[nodiscard]] core::Status end_timed_kernel(xpu::cuda::TimingEventPair& timer,
+                                            const CudaWavefrontExecutionContext& context,
+                                            const std::string_view stage_name) {
+    auto status = contextual_runtime_status(timer.end(context.compute_stream),
+                                            std::string{stage_name} + " timing end");
+    if (!status) {
+        poison_profiling_workspace(context);
+    }
+    return status;
+}
+
+[[nodiscard]] core::Status collect_timed_kernel(xpu::cuda::TimingEventPair& timer,
+                                                CudaWavefrontStageMetric& metric,
+                                                const std::uint64_t kernel_lanes,
+                                                const CudaWavefrontExecutionContext& context,
+                                                const std::string_view stage_name) {
+    auto elapsed = timer.elapsed_nanoseconds();
+    if (!elapsed) {
+        poison_profiling_workspace(context);
+        auto error = std::move(elapsed.error());
+        return std::unexpected(
+            transport_error(error.code, "CUDA wavefront transport " + std::string{stage_name} +
+                                            " timing query failed: " + std::move(error.message)));
+    }
+    auto status = add_stage_metric(metric, kernel_lanes, *elapsed, stage_name);
+    if (!status) {
+        poison_profiling_workspace(context);
+    }
+    return status;
 }
 
 [[nodiscard]] core::Status initialize_device_bytes(void* const destination, const int value,
@@ -261,6 +487,12 @@ validate_options_and_inputs(const std::span<const CudaWavefrontPathInput> inputs
             core::StatusCode::invalid_argument,
             "CUDA wavefront transport requires an explicit synchronous or asynchronous transfer "
             "mode."));
+    }
+    if (!valid_instrumentation_mode(options.instrumentation_mode)) {
+        return std::unexpected(transport_error(
+            core::StatusCode::invalid_argument,
+            "CUDA wavefront transport requires instrumentation to be explicitly disabled or set "
+            "to Nsight."));
     }
     if (inputs.empty()) {
         return std::unexpected(
@@ -668,7 +900,7 @@ execute_stage(const WavefrontStageKind stage_kind, const std::string_view stage_
               const std::uint32_t work_count, const StageRouteMask allowed_routes,
               const std::uint32_t path_capacity, WavefrontStageOutcome* const device_outcomes,
               WavefrontStageAudit* const device_audit, const CudaWavefrontExecutionContext& context,
-              Launcher&& launcher) {
+              CudaWavefrontStageMetric* const metric, Launcher&& launcher) {
     if (work_count == 0U) {
         return WavefrontStageAudit{
             .abi_major = xpu::cuda::WavefrontStageAuditAbiMajor,
@@ -686,20 +918,42 @@ execute_stage(const WavefrontStageKind stage_kind, const std::string_view stage_
         !status) {
         return std::unexpected(std::move(status.error()));
     }
+    auto* const stage_timer = context.profiling != nullptr && metric != nullptr
+                                  ? &context.profiling->stage_timer
+                                  : nullptr;
+    if (stage_timer != nullptr) {
+        if (auto status = begin_timed_kernel(*stage_timer, context, stage_name); !status) {
+            return std::unexpected(std::move(status.error()));
+        }
+    }
     auto cuda_status = static_cast<cudaError_t>(launcher());
     if (cuda_status != cudaSuccess) {
+        if (stage_timer != nullptr) {
+            poison_profiling_workspace(context);
+        }
         return std::unexpected(
             cuda_transport_error(cuda_status, std::string{stage_name} + " kernel launch"));
+    }
+    if (stage_timer != nullptr) {
+        if (auto status = end_timed_kernel(*stage_timer, context, stage_name); !status) {
+            return std::unexpected(std::move(status.error()));
+        }
     }
     cuda_status = static_cast<cudaError_t>(blackframe_cuda_launch_wavefront_audit_stage(
         device_outcomes, work_count, allowed_routes, path_capacity,
         static_cast<std::uint32_t>(stage_kind), device_audit,
         opaque_stream(native_stream(context.compute_stream))));
     if (cuda_status != cudaSuccess) {
+        if (stage_timer != nullptr) {
+            poison_profiling_workspace(context);
+        }
         return std::unexpected(cuda_transport_error(
             cuda_status, std::string{stage_name} + " outcome-audit kernel launch"));
     }
     if (context.host_stage_audit == nullptr) {
+        if (stage_timer != nullptr) {
+            poison_profiling_workspace(context);
+        }
         return std::unexpected(
             transport_error(core::StatusCode::internal_error,
                             "CUDA wavefront transport has no host staging slot for stage audits."));
@@ -709,7 +963,17 @@ execute_stage(const WavefrontStageKind stage_kind, const std::string_view stage_
                                                    sizeof(WavefrontStageAudit), context,
                                                    "outcome-audit download");
         !status) {
+        if (stage_timer != nullptr) {
+            poison_profiling_workspace(context);
+        }
         return std::unexpected(std::move(status.error()));
+    }
+    if (stage_timer != nullptr) {
+        if (auto status =
+                collect_timed_kernel(*stage_timer, *metric, work_count, context, stage_name);
+            !status) {
+            return std::unexpected(std::move(status.error()));
+        }
     }
     const auto audit = *context.host_stage_audit;
     const auto expected_stage_kind = static_cast<std::uint32_t>(stage_kind);
@@ -1373,10 +1637,14 @@ struct CudaWavefrontTransportWorkspace::Storage final {
             CudaWavefrontWorkspaceColumns column_views, const std::size_t path_capacity,
             const std::size_t allocated_device_bytes,
             const CudaWavefrontTransferMode selected_transfer_mode,
-            std::unique_ptr<CudaWavefrontAsyncStaging> asynchronous_staging)
+            const CudaWavefrontInstrumentationMode selected_instrumentation_mode,
+            std::unique_ptr<CudaWavefrontAsyncStaging> asynchronous_staging,
+            std::unique_ptr<CudaWavefrontProfilingResources> profiling_resources)
         : scratch(std::move(scratch_storage)), queues(std::move(queue_storage)),
           columns(column_views), capacity(path_capacity), device_size_bytes(allocated_device_bytes),
-          transfer_mode(selected_transfer_mode), async_staging(std::move(asynchronous_staging)),
+          transfer_mode(selected_transfer_mode),
+          instrumentation_mode(selected_instrumentation_mode),
+          async_staging(std::move(asynchronous_staging)), profiling(std::move(profiling_resources)),
           host_samples(selected_transfer_mode == CudaWavefrontTransferMode::synchronous
                            ? path_capacity
                            : 0U),
@@ -1434,7 +1702,10 @@ struct CudaWavefrontTransportWorkspace::Storage final {
     std::size_t capacity{};
     std::size_t device_size_bytes{};
     CudaWavefrontTransferMode transfer_mode{CudaWavefrontTransferMode::synchronous};
+    CudaWavefrontInstrumentationMode instrumentation_mode{
+        CudaWavefrontInstrumentationMode::disabled};
     std::unique_ptr<CudaWavefrontAsyncStaging> async_staging;
+    std::unique_ptr<CudaWavefrontProfilingResources> profiling;
     std::vector<SampleStreamIndex> host_samples;
     std::vector<TransportRay> host_rays;
     std::vector<TransportPathStateLane> host_states;
@@ -1458,15 +1729,21 @@ CudaWavefrontTransportWorkspace::CudaWavefrontTransportWorkspace(
 
 CudaWavefrontTransportWorkspace::~CudaWavefrontTransportWorkspace() noexcept = default;
 
-core::Result<CudaWavefrontTransportWorkspace>
-CudaWavefrontTransportWorkspace::create(const std::size_t capacity,
-                                        const xpu::cuda::DeviceMemoryBudget device_memory_budget,
-                                        const CudaWavefrontTransferMode transfer_mode) try {
+core::Result<CudaWavefrontTransportWorkspace> CudaWavefrontTransportWorkspace::create(
+    const std::size_t capacity, const xpu::cuda::DeviceMemoryBudget device_memory_budget,
+    const CudaWavefrontTransferMode transfer_mode,
+    const CudaWavefrontInstrumentationMode instrumentation_mode) try {
     if (!valid_transfer_mode(transfer_mode)) {
         return std::unexpected(transport_error(
             core::StatusCode::invalid_argument,
             "CUDA wavefront workspace requires an explicit synchronous or asynchronous transfer "
             "mode."));
+    }
+    if (!valid_instrumentation_mode(instrumentation_mode)) {
+        return std::unexpected(transport_error(
+            core::StatusCode::invalid_argument,
+            "CUDA wavefront workspace requires instrumentation to be explicitly disabled or set "
+            "to Nsight."));
     }
     if (capacity == 0U) {
         return std::unexpected(
@@ -1524,10 +1801,38 @@ CudaWavefrontTransportWorkspace::create(const std::size_t capacity,
                 "CUDA wavefront asynchronous resources do not belong to the workspace device."));
         }
     }
+    auto profiling = std::unique_ptr<CudaWavefrontProfilingResources>{};
+    if (instrumentation_mode == CudaWavefrontInstrumentationMode::nsight) {
+        auto created_profiling = create_profiling_resources(
+            async_staging != nullptr ? async_staging->compute_stream.get() : nullptr,
+            async_staging != nullptr ? async_staging->transfer_stream.get() : nullptr);
+        if (!created_profiling) {
+            return std::unexpected(std::move(created_profiling.error()));
+        }
+        profiling = std::move(*created_profiling);
+        if (!profiling->valid(scratch->device_ordinal())) {
+            return std::unexpected(transport_error(
+                core::StatusCode::internal_error,
+                "CUDA wavefront profiling resources do not belong to the workspace device."));
+        }
+        if (async_staging != nullptr) {
+            nvtxNameCudaEventA(
+                static_cast<cudaEvent_t>(async_staging->uploads_ready->native_handle()),
+                "Blackframe uploads ready");
+            nvtxNameCudaEventA(static_cast<cudaEvent_t>(async_staging->checkpoint->native_handle()),
+                               "Blackframe compute checkpoint");
+            nvtxNameCudaEventA(
+                static_cast<cudaEvent_t>(async_staging->compute_done->native_handle()),
+                "Blackframe compute done");
+            nvtxNameCudaEventA(
+                static_cast<cudaEvent_t>(async_staging->downloads_ready->native_handle()),
+                "Blackframe downloads ready");
+        }
+    }
     const auto allocated_device_bytes = required_scratch->total_bytes + required_queues;
-    auto storage =
-        std::make_unique<Storage>(std::move(*scratch), std::move(*queues), *columns, capacity,
-                                  allocated_device_bytes, transfer_mode, std::move(async_staging));
+    auto storage = std::make_unique<Storage>(
+        std::move(*scratch), std::move(*queues), *columns, capacity, allocated_device_bytes,
+        transfer_mode, instrumentation_mode, std::move(async_staging), std::move(profiling));
     return CudaWavefrontTransportWorkspace{std::move(storage)};
 } catch (const std::bad_alloc&) {
     return std::unexpected(
@@ -1555,12 +1860,21 @@ CudaWavefrontTransferMode CudaWavefrontTransportWorkspace::transfer_mode() const
     return storage_ != nullptr ? storage_->transfer_mode : CudaWavefrontTransferMode::synchronous;
 }
 
+CudaWavefrontInstrumentationMode
+CudaWavefrontTransportWorkspace::instrumentation_mode() const noexcept {
+    return storage_ != nullptr ? storage_->instrumentation_mode
+                               : CudaWavefrontInstrumentationMode::disabled;
+}
+
 CudaWavefrontTransportWorkspace::operator bool() const noexcept {
     return storage_ != nullptr && storage_->capacity != 0U && !storage_->scratch.empty() &&
            static_cast<bool>(storage_->queues) &&
            storage_->scratch.device_ordinal() == storage_->queues.device_ordinal() &&
            (storage_->transfer_mode == CudaWavefrontTransferMode::synchronous ||
-            (storage_->async_staging != nullptr && storage_->async_staging->valid()));
+            (storage_->async_staging != nullptr && storage_->async_staging->valid())) &&
+           (storage_->instrumentation_mode == CudaWavefrontInstrumentationMode::disabled ||
+            (storage_->profiling != nullptr &&
+             storage_->profiling->valid(storage_->scratch.device_ordinal())));
 }
 
 core::Status CudaWavefrontTransportWorkspace::close() {
@@ -1572,6 +1886,12 @@ core::Status CudaWavefrontTransportWorkspace::close() {
         auto async_status = storage_->async_staging->close();
         if (!async_status) {
             return std::unexpected(std::move(async_status.error()));
+        }
+    }
+    if (storage_->profiling != nullptr) {
+        auto profiling_status = storage_->profiling->close();
+        if (!profiling_status && first_error) {
+            first_error = std::unexpected(std::move(profiling_status.error()));
         }
     }
     auto queue_status = storage_->queues.close();
@@ -1619,14 +1939,20 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
     if (storage.poisoned) {
         return std::unexpected(transport_error(
             core::StatusCode::incompatible,
-            "CUDA wavefront transport workspace is poisoned because a prior asynchronous drain "
-            "could not establish quiescence; it must be closed and recreated."));
+            "CUDA wavefront transport workspace is poisoned because a prior asynchronous drain or "
+            "profiling interval could not be completed; it must be closed and recreated."));
     }
     if (storage.transfer_mode != options.transfer_mode) {
         return std::unexpected(transport_error(
             core::StatusCode::incompatible,
             "CUDA wavefront transport transfer mode does not match its reusable workspace; the "
             "requested mode was not substituted."));
+    }
+    if (storage.instrumentation_mode != options.instrumentation_mode) {
+        return std::unexpected(transport_error(
+            core::StatusCode::incompatible,
+            "CUDA wavefront transport instrumentation mode does not match its reusable workspace; "
+            "the requested mode was not substituted."));
     }
     if (path_count > storage.capacity) {
         return std::unexpected(transport_error(
@@ -1655,10 +1981,15 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
         .host_compaction_result = storage.host_compaction_result_data(),
         .host_queue_header = storage.host_queue_header_data(),
         .host_clear_status = storage.host_clear_status_data(),
+        .profiling = storage.profiling.get(),
+        .workspace_poisoned = &storage.poisoned,
     };
     auto async_drain = CudaWavefrontAsyncDrain{asynchronous, &storage.poisoned};
     auto traced = [&]() -> core::Result<CudaWavefrontTransportBatch> {
         try {
+            const auto transport_range = CudaWavefrontNvtxRange{
+                execution_context.profiling, "transport", CudaWavefrontNvtxCategory::transport,
+                0xFF607D8BU, path_count};
             const auto device_capacity = static_cast<std::uint32_t>(storage.capacity);
             const auto& columns = storage.columns;
             const auto queue_view = storage.queues.device_view();
@@ -1722,43 +2053,49 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             const auto ray_bytes = path_count * sizeof(TransportRay);
             const auto state_bytes = path_count * sizeof(TransportPathStateLane);
             const auto control_bytes = path_count * sizeof(WavefrontLaneControl);
-            if (auto status = copy_host_to_device(columns.input_samples, host_samples, sample_bytes,
-                                                  transfer_stream, storage.transfer_mode,
-                                                  transfer_counters, "sample upload");
-                !status) {
-                return std::unexpected(std::move(status.error()));
-            }
-            if (auto status =
-                    copy_host_to_device(columns.input_rays, host_rays, ray_bytes, transfer_stream,
-                                        storage.transfer_mode, transfer_counters, "ray upload");
-                !status) {
-                return std::unexpected(std::move(status.error()));
-            }
-            if (auto status = copy_host_to_device(columns.input_states, host_states, state_bytes,
-                                                  transfer_stream, storage.transfer_mode,
-                                                  transfer_counters, "path-state upload");
-                !status) {
-                return std::unexpected(std::move(status.error()));
-            }
-            if (auto status = initialize_device_bytes(controls, 0, control_bytes, execution_context,
-                                                      "lane-control initialization");
-                !status) {
-                return std::unexpected(std::move(status.error()));
-            }
-            if (asynchronous != nullptr) {
-                if (auto status = contextual_runtime_status(
-                        asynchronous->uploads_ready->record(*asynchronous->transfer_stream),
-                        "upload-ready event record");
+            {
+                const auto upload_range = CudaWavefrontNvtxRange{
+                    execution_context.profiling, "upload", CudaWavefrontNvtxCategory::transfer,
+                    0xFF78909CU, sample_bytes + ray_bytes + state_bytes};
+                if (auto status = copy_host_to_device(
+                        columns.input_samples, host_samples, sample_bytes, transfer_stream,
+                        storage.transfer_mode, transfer_counters, "sample upload");
                     !status) {
                     return std::unexpected(std::move(status.error()));
                 }
-                if (auto status = contextual_runtime_status(
-                        asynchronous->compute_stream->wait(*asynchronous->uploads_ready),
-                        "upload-ready event wait");
+                if (auto status = copy_host_to_device(columns.input_rays, host_rays, ray_bytes,
+                                                      transfer_stream, storage.transfer_mode,
+                                                      transfer_counters, "ray upload");
                     !status) {
                     return std::unexpected(std::move(status.error()));
                 }
-                ++transfer_counters.event_dependencies;
+                if (auto status = copy_host_to_device(
+                        columns.input_states, host_states, state_bytes, transfer_stream,
+                        storage.transfer_mode, transfer_counters, "path-state upload");
+                    !status) {
+                    return std::unexpected(std::move(status.error()));
+                }
+                if (auto status =
+                        initialize_device_bytes(controls, 0, control_bytes, execution_context,
+                                                "lane-control initialization");
+                    !status) {
+                    return std::unexpected(std::move(status.error()));
+                }
+                if (asynchronous != nullptr) {
+                    if (auto status = contextual_runtime_status(
+                            asynchronous->uploads_ready->record(*asynchronous->transfer_stream),
+                            "upload-ready event record");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status = contextual_runtime_status(
+                            asynchronous->compute_stream->wait(*asynchronous->uploads_ready),
+                            "upload-ready event wait");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    ++transfer_counters.event_dependencies;
+                }
             }
             auto cuda_status = cudaSuccess;
 
@@ -1792,54 +2129,61 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 .roulette_policy = options.roulette_policy,
                 .path_count = path_count,
                 .transfer_mode = options.transfer_mode,
+                .instrumentation_mode = options.instrumentation_mode,
             };
 
             storage.queues_dirty = true;
-            if (auto status =
-                    execute_stage(WavefrontStageKind::camera_seed, "camera seed", device_path_count,
-                                  route_mask(WavefrontStageRoute::none), device_path_count,
-                                  outcomes, stage_audit, execution_context,
-                                  [&] {
-                                      return blackframe_cuda_launch_wavefront_seed_camera(
-                                          queue_view, stream_view, 0U, device_path_count, outcomes,
-                                          kernel_stream);
-                                  });
-                !status) {
-                return std::unexpected(std::move(status.error()));
-            }
-            const auto camera_header =
-                queue_header(queue_view, renderer::WavefrontQueueKind::camera, device_capacity,
-                             execution_context);
-            if (!camera_header || camera_header->size != device_path_count) {
-                return std::unexpected(
-                    camera_header ? transport_error(core::StatusCode::internal_error,
-                                                    "CUDA wavefront camera seed lost path lanes.")
-                                  : camera_header.error());
-            }
-            if (auto status =
-                    execute_stage(WavefrontStageKind::camera, "camera", device_path_count,
-                                  route_mask(WavefrontStageRoute::ray), device_path_count, outcomes,
-                                  stage_audit, execution_context,
-                                  [&] {
-                                      return blackframe_cuda_launch_wavefront_camera_stage(
-                                          queue_view, camera_inputs, stream_view, device_path_count,
-                                          outcomes, kernel_stream);
-                                  });
-                !status) {
-                return std::unexpected(std::move(status.error()));
-            }
-            if (auto compacted =
-                    compact_route(queue_view, outcomes, device_path_count, WavefrontStageRoute::ray,
-                                  compaction_scratch, compaction_scratch_bytes, compaction_result,
-                                  execution_context);
-                !compacted) {
-                return std::unexpected(std::move(compacted.error()));
-            }
-            report.stage_lanes.camera = device_path_count;
-            if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::camera,
-                                          clear_status, execution_context);
-                !status) {
-                return std::unexpected(std::move(status.error()));
+            {
+                const auto camera_range = CudaWavefrontNvtxRange{
+                    execution_context.profiling, "camera", CudaWavefrontNvtxCategory::camera,
+                    0xFF42A5F5U, device_path_count};
+                if (auto status = execute_stage(
+                        WavefrontStageKind::camera_seed, "camera seed", device_path_count,
+                        route_mask(WavefrontStageRoute::none), device_path_count, outcomes,
+                        stage_audit, execution_context, nullptr,
+                        [&] {
+                            return blackframe_cuda_launch_wavefront_seed_camera(
+                                queue_view, stream_view, 0U, device_path_count, outcomes,
+                                kernel_stream);
+                        });
+                    !status) {
+                    return std::unexpected(std::move(status.error()));
+                }
+                const auto camera_header =
+                    queue_header(queue_view, renderer::WavefrontQueueKind::camera, device_capacity,
+                                 execution_context);
+                if (!camera_header || camera_header->size != device_path_count) {
+                    return std::unexpected(
+                        camera_header
+                            ? transport_error(core::StatusCode::internal_error,
+                                              "CUDA wavefront camera seed lost path lanes.")
+                            : camera_header.error());
+                }
+                if (auto status = execute_stage(
+                        WavefrontStageKind::camera, "camera", device_path_count,
+                        route_mask(WavefrontStageRoute::ray), device_path_count, outcomes,
+                        stage_audit, execution_context, &report.stage_metrics.camera,
+                        [&] {
+                            return blackframe_cuda_launch_wavefront_camera_stage(
+                                queue_view, camera_inputs, stream_view, device_path_count, outcomes,
+                                kernel_stream);
+                        });
+                    !status) {
+                    return std::unexpected(std::move(status.error()));
+                }
+                if (auto compacted = compact_route(queue_view, outcomes, device_path_count,
+                                                   WavefrontStageRoute::ray, compaction_scratch,
+                                                   compaction_scratch_bytes, compaction_result,
+                                                   execution_context);
+                    !compacted) {
+                    return std::unexpected(std::move(compacted.error()));
+                }
+                report.stage_lanes.camera = device_path_count;
+                if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::camera,
+                                              clear_status, execution_context);
+                    !status) {
+                    return std::unexpected(std::move(status.error()));
+                }
             }
 
             auto ray_header = queue_header(queue_view, renderer::WavefrontQueueKind::ray,
@@ -1862,61 +2206,104 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                         "CUDA wavefront transport exceeded its depth-derived dispatch bound."));
                 }
                 const auto ray_count = ray_header->size;
-                report.stage_lanes.intersection += ray_count;
-                if (auto status = execute_stage(
-                        WavefrontStageKind::intersection_gather, "intersection gather", ray_count,
-                        route_mask(WavefrontStageRoute::ray), device_path_count, outcomes,
-                        stage_audit, execution_context,
-                        [&] {
-                            return blackframe_cuda_launch_wavefront_gather_rays(
-                                queue_view, stream_view, ray_count, compact_slots, compact_rays,
-                                outcomes, kernel_stream);
-                        });
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                cuda_status = static_cast<cudaError_t>(blackframe_cuda_launch_scene_closest_hit(
-                    scene.device_data(), scene.size_bytes(), bvh.device_data(), bvh.size_bytes(),
-                    compact_rays, ray_count, closest_results, kernel_stream));
-                if (cuda_status != cudaSuccess) {
-                    return std::unexpected(
-                        cuda_transport_error(cuda_status, "closest-hit kernel launch"));
-                }
-                // Classification uses the same stream. Its compact stage audit is the
-                // synchronization boundary for both kernels, so an intermediate device-wide barrier
-                // is redundant.
-                if (auto status = execute_stage(
+                const auto bounce_range = CudaWavefrontNvtxRange{
+                    execution_context.profiling, "bounce", CudaWavefrontNvtxCategory::transport,
+                    0xFF90A4AEU, iteration};
+                {
+                    const auto intersection_range = CudaWavefrontNvtxRange{
+                        execution_context.profiling, "intersection",
+                        CudaWavefrontNvtxCategory::intersection, 0xFF5C6BC0U, ray_count};
+                    report.stage_lanes.intersection += ray_count;
+                    if (auto status = execute_stage(
+                            WavefrontStageKind::intersection_gather, "intersection gather",
+                            ray_count, route_mask(WavefrontStageRoute::ray), device_path_count,
+                            outcomes, stage_audit, execution_context,
+                            &report.stage_metrics.intersection,
+                            [&] {
+                                return blackframe_cuda_launch_wavefront_gather_rays(
+                                    queue_view, stream_view, ray_count, compact_slots, compact_rays,
+                                    outcomes, kernel_stream);
+                            });
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (execution_context.profiling != nullptr) {
+                        if (auto status =
+                                begin_timed_kernel(execution_context.profiling->traversal_timer,
+                                                   execution_context, "intersection traversal");
+                            !status) {
+                            return std::unexpected(std::move(status.error()));
+                        }
+                    }
+                    cuda_status = static_cast<cudaError_t>(blackframe_cuda_launch_scene_closest_hit(
+                        scene.device_data(), scene.size_bytes(), bvh.device_data(),
+                        bvh.size_bytes(), compact_rays, ray_count, closest_results, kernel_stream));
+                    if (cuda_status != cudaSuccess) {
+                        if (execution_context.profiling != nullptr) {
+                            poison_profiling_workspace(execution_context);
+                        }
+                        return std::unexpected(
+                            cuda_transport_error(cuda_status, "closest-hit kernel launch"));
+                    }
+                    if (execution_context.profiling != nullptr) {
+                        if (auto status =
+                                end_timed_kernel(execution_context.profiling->traversal_timer,
+                                                 execution_context, "intersection traversal");
+                            !status) {
+                            return std::unexpected(std::move(status.error()));
+                        }
+                    }
+                    // Classification uses the same stream. Its compact stage audit is the
+                    // synchronization boundary for both kernels, so an intermediate device-wide
+                    // barrier is redundant.
+                    auto classification = execute_stage(
                         WavefrontStageKind::intersection_classify, "intersection classify",
                         ray_count,
                         route_mask(WavefrontStageRoute::hit) |
                             route_mask(WavefrontStageRoute::miss),
                         device_path_count, outcomes, stage_audit, execution_context,
-                        [&] {
+                        &report.stage_metrics.intersection, [&] {
                             return blackframe_cuda_launch_wavefront_classify_closest_hit(
                                 queue_view, stream_view, compact_slots, closest_results, ray_count,
                                 outcomes, kernel_stream);
                         });
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto compacted =
-                        compact_route(queue_view, outcomes, ray_count, WavefrontStageRoute::hit,
-                                      compaction_scratch, compaction_scratch_bytes,
-                                      compaction_result, execution_context);
-                    !compacted) {
-                    return std::unexpected(std::move(compacted.error()));
-                }
-                if (auto compacted =
-                        compact_route(queue_view, outcomes, ray_count, WavefrontStageRoute::miss,
-                                      compaction_scratch, compaction_scratch_bytes,
-                                      compaction_result, execution_context);
-                    !compacted) {
-                    return std::unexpected(std::move(compacted.error()));
-                }
-                if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::ray,
-                                              clear_status, execution_context);
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
+                    if (execution_context.profiling != nullptr) {
+                        auto traversal_status =
+                            collect_timed_kernel(execution_context.profiling->traversal_timer,
+                                                 report.stage_metrics.intersection, ray_count,
+                                                 execution_context, "intersection traversal");
+                        if (!traversal_status) {
+                            if (!classification) {
+                                auto error = std::move(classification.error());
+                                error.message += " Profiling cleanup also failed: " +
+                                                 std::move(traversal_status.error().message);
+                                return std::unexpected(std::move(error));
+                            }
+                            return std::unexpected(std::move(traversal_status.error()));
+                        }
+                    }
+                    if (!classification) {
+                        return std::unexpected(std::move(classification.error()));
+                    }
+                    if (auto compacted =
+                            compact_route(queue_view, outcomes, ray_count, WavefrontStageRoute::hit,
+                                          compaction_scratch, compaction_scratch_bytes,
+                                          compaction_result, execution_context);
+                        !compacted) {
+                        return std::unexpected(std::move(compacted.error()));
+                    }
+                    if (auto compacted = compact_route(queue_view, outcomes, ray_count,
+                                                       WavefrontStageRoute::miss,
+                                                       compaction_scratch, compaction_scratch_bytes,
+                                                       compaction_result, execution_context);
+                        !compacted) {
+                        return std::unexpected(std::move(compacted.error()));
+                    }
+                    if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::ray,
+                                                  clear_status, execution_context);
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
                 }
 
                 auto miss_header = queue_header(queue_view, renderer::WavefrontQueueKind::miss,
@@ -1936,10 +2323,13 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 report.stage_lanes.hit += hit_header->size;
 
                 if (miss_header->size != 0U) {
+                    const auto miss_range = CudaWavefrontNvtxRange{
+                        execution_context.profiling, "miss", CudaWavefrontNvtxCategory::miss,
+                        0xFFB0BEC5U, miss_header->size};
                     if (auto status = execute_stage(
                             WavefrontStageKind::miss, "miss", miss_header->size,
                             route_mask(WavefrontStageRoute::terminated), device_path_count,
-                            outcomes, stage_audit, execution_context,
+                            outcomes, stage_audit, execution_context, &report.stage_metrics.miss,
                             [&] {
                                 return blackframe_cuda_launch_wavefront_miss_stage(
                                     scene.device_data(), scene.size_bytes(), queue_view,
@@ -1956,15 +2346,18 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 }
 
                 if (hit_header->size != 0U) {
-                    if (auto status =
-                            execute_stage(WavefrontStageKind::hit, "hit", hit_header->size,
-                                          route_mask(WavefrontStageRoute::shade), device_path_count,
-                                          outcomes, stage_audit, execution_context,
-                                          [&] {
-                                              return blackframe_cuda_launch_wavefront_hit_stage(
-                                                  queue_view, stream_view, hit_header->size,
-                                                  outcomes, kernel_stream);
-                                          });
+                    const auto hit_range = CudaWavefrontNvtxRange{
+                        execution_context.profiling, "hit", CudaWavefrontNvtxCategory::hit,
+                        0xFF66BB6AU, hit_header->size};
+                    if (auto status = execute_stage(
+                            WavefrontStageKind::hit, "hit", hit_header->size,
+                            route_mask(WavefrontStageRoute::shade), device_path_count, outcomes,
+                            stage_audit, execution_context, &report.stage_metrics.hit,
+                            [&] {
+                                return blackframe_cuda_launch_wavefront_hit_stage(
+                                    queue_view, stream_view, hit_header->size, outcomes,
+                                    kernel_stream);
+                            });
                         !status) {
                         return std::unexpected(std::move(status.error()));
                     }
@@ -1993,12 +2386,16 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 }
                 report.stage_lanes.shade += shade_header->size;
                 if (shade_header->size != 0U) {
+                    const auto shade_range = CudaWavefrontNvtxRange{
+                        execution_context.profiling, "shade", CudaWavefrontNvtxCategory::shade,
+                        0xFFFFA726U, shade_header->size};
                     const auto audit = execute_stage(
                         WavefrontStageKind::shade, "shade", shade_header->size,
                         route_mask(WavefrontStageRoute::shadow) |
                             route_mask(WavefrontStageRoute::continuation) |
                             route_mask(WavefrontStageRoute::terminated),
-                        device_path_count, outcomes, stage_audit, execution_context, [&] {
+                        device_path_count, outcomes, stage_audit, execution_context,
+                        &report.stage_metrics.shade, [&] {
                             return blackframe_cuda_launch_wavefront_shade_stage(
                                 scene.device_data(), scene.size_bytes(), queue_view, stream_view,
                                 config, shade_header->size, outcomes, kernel_stream);
@@ -2036,10 +2433,13 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 report.stage_lanes.shadow += shadow_header->size;
                 report.shadow_queries += shadow_header->size;
                 if (shadow_header->size != 0U) {
+                    const auto shadow_range = CudaWavefrontNvtxRange{
+                        execution_context.profiling, "shadow", CudaWavefrontNvtxCategory::shadow,
+                        0xFF7E57C2U, shadow_header->size};
                     if (auto status = execute_stage(
                             WavefrontStageKind::shadow_gather, "shadow gather", shadow_header->size,
                             route_mask(WavefrontStageRoute::shadow), device_path_count, outcomes,
-                            stage_audit, execution_context,
+                            stage_audit, execution_context, &report.stage_metrics.shadow,
                             [&] {
                                 return blackframe_cuda_launch_wavefront_gather_shadow_rays(
                                     queue_view, stream_view, shadow_header->size, compact_slots,
@@ -2048,28 +2448,62 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                         !status) {
                         return std::unexpected(std::move(status.error()));
                     }
+                    if (execution_context.profiling != nullptr) {
+                        if (auto status =
+                                begin_timed_kernel(execution_context.profiling->traversal_timer,
+                                                   execution_context, "shadow traversal");
+                            !status) {
+                            return std::unexpected(std::move(status.error()));
+                        }
+                    }
                     cuda_status = static_cast<cudaError_t>(blackframe_cuda_launch_scene_occlusion(
                         scene.device_data(), scene.size_bytes(), bvh.device_data(),
                         bvh.size_bytes(), compact_rays, shadow_header->size, occlusion_results,
                         kernel_stream));
                     if (cuda_status != cudaSuccess) {
+                        if (execution_context.profiling != nullptr) {
+                            poison_profiling_workspace(execution_context);
+                        }
                         return std::unexpected(
                             cuda_transport_error(cuda_status, "shadow any-hit kernel launch"));
                     }
+                    if (execution_context.profiling != nullptr) {
+                        if (auto status =
+                                end_timed_kernel(execution_context.profiling->traversal_timer,
+                                                 execution_context, "shadow traversal");
+                            !status) {
+                            return std::unexpected(std::move(status.error()));
+                        }
+                    }
                     // Shadow processing is ordered on the same stream and the following stage audit
                     // provides the required completion/error boundary.
-                    if (auto status = execute_stage(
-                            WavefrontStageKind::shadow_process, "shadow", shadow_header->size,
-                            route_mask(WavefrontStageRoute::continuation) |
-                                route_mask(WavefrontStageRoute::terminated),
-                            device_path_count, outcomes, stage_audit, execution_context,
-                            [&] {
-                                return blackframe_cuda_launch_wavefront_process_shadow(
-                                    queue_view, stream_view, compact_slots, occlusion_results,
-                                    shadow_header->size, outcomes, kernel_stream);
-                            });
-                        !status) {
-                        return std::unexpected(std::move(status.error()));
+                    auto shadow_process = execute_stage(
+                        WavefrontStageKind::shadow_process, "shadow", shadow_header->size,
+                        route_mask(WavefrontStageRoute::continuation) |
+                            route_mask(WavefrontStageRoute::terminated),
+                        device_path_count, outcomes, stage_audit, execution_context,
+                        &report.stage_metrics.shadow, [&] {
+                            return blackframe_cuda_launch_wavefront_process_shadow(
+                                queue_view, stream_view, compact_slots, occlusion_results,
+                                shadow_header->size, outcomes, kernel_stream);
+                        });
+                    if (execution_context.profiling != nullptr) {
+                        auto traversal_status =
+                            collect_timed_kernel(execution_context.profiling->traversal_timer,
+                                                 report.stage_metrics.shadow, shadow_header->size,
+                                                 execution_context, "shadow traversal");
+                        if (!traversal_status) {
+                            if (!shadow_process) {
+                                auto error = std::move(shadow_process.error());
+                                error.message += " Profiling cleanup also failed: " +
+                                                 std::move(traversal_status.error().message);
+                                return std::unexpected(std::move(error));
+                            }
+                            return std::unexpected(std::move(traversal_status.error()));
+                        }
+                    }
+                    if (!shadow_process) {
+                        return std::unexpected(std::move(shadow_process.error()));
                     }
                     if (auto compacted = compact_route(queue_view, outcomes, shadow_header->size,
                                                        WavefrontStageRoute::continuation,
@@ -2092,10 +2526,15 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                     return std::unexpected(continuation_header.error());
                 report.stage_lanes.continuation += continuation_header->size;
                 if (continuation_header->size != 0U) {
+                    const auto continuation_range =
+                        CudaWavefrontNvtxRange{execution_context.profiling, "continuation",
+                                               CudaWavefrontNvtxCategory::continuation, 0xFF26A69AU,
+                                               continuation_header->size};
                     if (auto status = execute_stage(
                             WavefrontStageKind::continuation, "continuation",
                             continuation_header->size, route_mask(WavefrontStageRoute::ray),
                             device_path_count, outcomes, stage_audit, execution_context,
+                            &report.stage_metrics.continuation,
                             [&] {
                                 return blackframe_cuda_launch_wavefront_continuation_stage(
                                     queue_view, stream_view, continuation_header->size, outcomes,
@@ -2127,82 +2566,89 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             auto* const final_states = storage.final_states_data();
             auto* const final_rays = storage.final_rays_data();
             auto* const final_controls = storage.final_controls_data();
-            if (asynchronous != nullptr) {
-                if (auto status = contextual_runtime_status(
-                        asynchronous->compute_done->record(*asynchronous->compute_stream),
-                        "compute-done event record");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status = contextual_runtime_status(
-                        asynchronous->transfer_stream->wait(*asynchronous->compute_done),
-                        "compute-done event wait");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                ++transfer_counters.event_dependencies;
-                const auto enqueue_download =
-                    [&](void* const destination, const void* const source,
-                        const std::size_t byte_count,
-                        const std::string_view operation) -> core::Status {
-                    if (auto status = add_transfer_bytes(transfer_counters.download_bytes,
-                                                         byte_count, operation);
+            {
+                const auto download_range = CudaWavefrontNvtxRange{
+                    execution_context.profiling, "download", CudaWavefrontNvtxCategory::transfer,
+                    0xFF78909CU, state_bytes + ray_bytes + control_bytes};
+                if (asynchronous != nullptr) {
+                    if (auto status = contextual_runtime_status(
+                            asynchronous->compute_done->record(*asynchronous->compute_stream),
+                            "compute-done event record");
                         !status) {
-                        return status;
+                        return std::unexpected(std::move(status.error()));
                     }
-                    const auto status = cudaMemcpyAsync(destination, source, byte_count,
-                                                        cudaMemcpyDeviceToHost, transfer_stream);
-                    if (status != cudaSuccess) {
-                        return std::unexpected(cuda_transport_error(status, operation, byte_count));
+                    if (auto status = contextual_runtime_status(
+                            asynchronous->transfer_stream->wait(*asynchronous->compute_done),
+                            "compute-done event wait");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
                     }
-                    return {};
-                };
-                if (auto status = enqueue_download(final_states, stream_states, state_bytes,
-                                                   "final state download");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status = enqueue_download(final_rays, stream_rays, ray_bytes,
-                                                   "terminal ray download");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status = enqueue_download(final_controls, controls, control_bytes,
-                                                   "lane-control download");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status = contextual_runtime_status(
-                        asynchronous->downloads_ready->record(*asynchronous->transfer_stream),
-                        "download-ready event record");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status =
-                        contextual_runtime_status(asynchronous->downloads_ready->synchronize(),
-                                                  "download-ready event synchronization");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                async_drain.disarm();
-            } else {
-                if (auto status =
-                        copy_device_to_host_and_wait(final_states, stream_states, state_bytes,
-                                                     execution_context, "final state download");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status =
-                        copy_device_to_host_and_wait(final_rays, stream_rays, ray_bytes,
-                                                     execution_context, "terminal ray download");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
-                }
-                if (auto status =
-                        copy_device_to_host_and_wait(final_controls, controls, control_bytes,
-                                                     execution_context, "lane-control download");
-                    !status) {
-                    return std::unexpected(std::move(status.error()));
+                    ++transfer_counters.event_dependencies;
+                    const auto enqueue_download =
+                        [&](void* const destination, const void* const source,
+                            const std::size_t byte_count,
+                            const std::string_view operation) -> core::Status {
+                        if (auto status = add_transfer_bytes(transfer_counters.download_bytes,
+                                                             byte_count, operation);
+                            !status) {
+                            return status;
+                        }
+                        const auto status =
+                            cudaMemcpyAsync(destination, source, byte_count, cudaMemcpyDeviceToHost,
+                                            transfer_stream);
+                        if (status != cudaSuccess) {
+                            return std::unexpected(
+                                cuda_transport_error(status, operation, byte_count));
+                        }
+                        return {};
+                    };
+                    if (auto status = enqueue_download(final_states, stream_states, state_bytes,
+                                                       "final state download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status = enqueue_download(final_rays, stream_rays, ray_bytes,
+                                                       "terminal ray download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status = enqueue_download(final_controls, controls, control_bytes,
+                                                       "lane-control download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status = contextual_runtime_status(
+                            asynchronous->downloads_ready->record(*asynchronous->transfer_stream),
+                            "download-ready event record");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status =
+                            contextual_runtime_status(asynchronous->downloads_ready->synchronize(),
+                                                      "download-ready event synchronization");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    async_drain.disarm();
+                } else {
+                    if (auto status =
+                            copy_device_to_host_and_wait(final_states, stream_states, state_bytes,
+                                                         execution_context, "final state download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status = copy_device_to_host_and_wait(final_rays, stream_rays,
+                                                                   ray_bytes, execution_context,
+                                                                   "terminal ray download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
+                    if (auto status = copy_device_to_host_and_wait(final_controls, controls,
+                                                                   control_bytes, execution_context,
+                                                                   "lane-control download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
                 }
             }
 
@@ -2298,7 +2744,8 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
     }
 
     auto workspace = CudaWavefrontTransportWorkspace::create(
-        inputs.size(), options.device_memory_budget, options.transfer_mode);
+        inputs.size(), options.device_memory_budget, options.transfer_mode,
+        options.instrumentation_mode);
     if (!workspace) {
         return std::unexpected(std::move(workspace.error()));
     }
