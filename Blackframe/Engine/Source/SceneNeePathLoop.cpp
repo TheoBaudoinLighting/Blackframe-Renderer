@@ -6,6 +6,8 @@
 #include <Blackframe/Renderer/PunctualLights.hpp>
 #include <Blackframe/Renderer/ShadingNormalCorrection.hpp>
 #include <Blackframe/Renderer/ShadowRay.hpp>
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -85,6 +87,15 @@ sample_punctual_light(const ScenePunctualLight& light, const renderer::LightSamp
         light);
 }
 
+[[nodiscard]] bool is_black(const renderer::TransportSpectrum& spectrum) noexcept {
+    for (const auto value : spectrum.values) {
+        if (value != 0.0F) {
+            return false;
+        }
+    }
+    return true;
+}
+
 class ScenePunctualDirectLighting final {
   public:
     static constexpr bool enabled = true;
@@ -95,10 +106,19 @@ class ScenePunctualDirectLighting final {
         : acceleration_{acceleration}, sampler_{sampler}, scene_{std::move(scene)} {}
 
     [[nodiscard]] core::Result<renderer::TransportSpectrum>
-    estimate(const detail::ScenePathSurface& surface, const renderer::TransportSpectrum& beta,
-             const renderer::OrthonormalFrame& frame, const renderer::Vector3 outgoing_world,
+    estimate(const detail::ScenePathSurface& surface,
+             const renderer::detail::DepthFilteredClosureMixture& closures,
+             const renderer::TransportSpectrum& beta, const renderer::OrthonormalFrame& frame,
+             const renderer::Vector3 outgoing_world,
              const renderer::BounceSampleDimensions& dimensions,
              const renderer::SampleStream& sample_stream, const renderer::Ray& path_ray) const {
+        auto all_black = true;
+        for (auto index = std::size_t{}; index < closures.size(); ++index) {
+            all_black = all_black && is_black(closures.active_closure(index).weight);
+        }
+        if (all_black) {
+            return renderer::TransportSpectrum{};
+        }
         const auto context = renderer::LightSampleContext::create(surface.interaction().position(),
                                                                   surface.interaction().time());
         if (!context) {
@@ -152,8 +172,32 @@ class ScenePunctualDirectLighting final {
 
         const auto outgoing_local = frame.to_local(outgoing_world);
         const auto incoming_local = frame.to_local((**incident).direction_to_light());
-        if (!(outgoing_local.z > 0.0F) || !(incoming_local.z > 0.0F)) {
+        if (outgoing_local.z == 0.0F || incoming_local.z == 0.0F) {
             return renderer::TransportSpectrum{};
+        }
+        auto singleton_lambertian = std::optional<renderer::LambertianReflection>{};
+        auto bsdf_value = renderer::TransportSpectrum{};
+        if (closures.size() == 1U &&
+            closures.active_closure(0U).kind == renderer::ClosureKind::lambertian_reflection) {
+            const auto model =
+                renderer::LambertianReflection::create(closures.active_closure(0U).weight);
+            if (!model) {
+                return std::unexpected(model.error());
+            }
+            if (is_black(model->reflectance())) {
+                return renderer::TransportSpectrum{};
+            }
+            singleton_lambertian = *model;
+        } else {
+            const auto evaluated =
+                closures.eval(outgoing_local, incoming_local, renderer::TransportMode::radiance);
+            if (!evaluated) {
+                return std::unexpected(evaluated.error());
+            }
+            if (is_black(*evaluated)) {
+                return renderer::TransportSpectrum{};
+            }
+            bsdf_value = *evaluated;
         }
         const auto correction = renderer::shading_normal_correction(
             surface.geometric_normal(), surface.shading_normal(), outgoing_world,
@@ -175,9 +219,13 @@ class ScenePunctualDirectLighting final {
         if (!transmittance) {
             return std::unexpected(transmittance.error());
         }
-        const auto evaluated = renderer::evaluate_lambertian_direct_lighting(
-            beta, surface.reflection(), frame, outgoing_world, selection->probability(), **incident,
-            *transmittance);
+        const auto evaluated = singleton_lambertian
+                                   ? renderer::evaluate_lambertian_direct_lighting(
+                                         beta, *singleton_lambertian, frame, outgoing_world,
+                                         selection->probability(), **incident, *transmittance)
+                                   : renderer::evaluate_bsdf_direct_lighting(
+                                         beta, bsdf_value, std::abs(incoming_local.z),
+                                         selection->probability(), **incident, *transmittance);
         if (!evaluated) {
             return std::unexpected(evaluated.error());
         }
@@ -248,7 +296,7 @@ trace_scene_nee(const renderer::Ray& initial_ray, const renderer::PathState& ini
     auto direct_lighting = ScenePunctualDirectLighting{acceleration, light_sampler, scene};
     const auto resolved_environment =
         renderer::BsdfOnlyEnvironment{*environment, environment_record.wavelengths};
-    return renderer::bsdf_only_path_loop_detail::trace_lambertian_with_query(
+    return renderer::bsdf_only_path_loop_detail::trace_closure_mixture_with_query(
         initial_ray, initial_state, sample_stream, query, resolved_environment, depth_limits,
         roulette_policy, direct_lighting);
 }

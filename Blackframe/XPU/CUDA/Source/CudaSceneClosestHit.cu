@@ -105,8 +105,11 @@ bvh_descriptor(const SceneBvhHeader* const header, const std::uint32_t array) no
     if (column >= scene_column::triangle_vertex_0 && column <= scene_column::triangle_vertex_2) {
         return header.triangle_count;
     }
-    if (column >= scene_column::material_id && column < scene_column::instance_id) {
+    if (column >= scene_column::material_id && column < scene_column::closure_kind) {
         return header.material_count;
+    }
+    if (column >= scene_column::closure_kind && column < scene_column::instance_id) {
+        return header.closure_count;
     }
     if (column >= scene_column::instance_id && column < scene_column::punctual_kind) {
         return header.instance_count;
@@ -129,13 +132,16 @@ scene_column_element_size(const std::uint32_t column) noexcept {
     if (column >= scene_column::count) {
         return 0U;
     }
-    if (column >= scene_column::geometry_vertex_offset &&
-        column <= scene_column::geometry_triangle_count) {
+    if ((column >= scene_column::geometry_vertex_offset &&
+         column <= scene_column::geometry_triangle_count) ||
+        column == scene_column::material_closure_offset ||
+        column == scene_column::material_closure_count) {
         return sizeof(std::uint64_t);
     }
     if (column == scene_column::material_spectral_present ||
         (column >= scene_column::material_wavelength_measure &&
-         column < scene_column::material_reflectance) ||
+         column < scene_column::material_closure_offset) ||
+        column == scene_column::material_closure_frame_mode ||
         column == scene_column::instance_parent_present ||
         (column >= scene_column::environment_wavelength_measure &&
          column < scene_column::environment_radiance)) {
@@ -144,7 +150,10 @@ scene_column_element_size(const std::uint32_t column) noexcept {
     if ((column >= scene_column::position_x && column <= scene_column::texture_coordinate_y) ||
         (column >= scene_column::material_wavelength_nanometers &&
          column < scene_column::material_wavelength_measure) ||
-        (column >= scene_column::material_reflectance && column < scene_column::instance_id) ||
+        column == scene_column::material_closure_tangent_rotation_radians ||
+        (column >= scene_column::material_emitted_radiance &&
+         column < scene_column::closure_kind) ||
+        (column >= scene_column::closure_weight && column < scene_column::instance_id) ||
         (column >= scene_column::instance_local_to_parent &&
          column < scene_column::punctual_kind) ||
         (column >= scene_column::punctual_position_x &&

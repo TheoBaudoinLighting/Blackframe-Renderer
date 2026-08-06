@@ -8,11 +8,14 @@
 #include <Blackframe/Renderer/PathState.hpp>
 #include <Blackframe/Renderer/RussianRoulette.hpp>
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -27,6 +30,21 @@ inline constexpr auto OneDiffuseBounce = renderer::PathDepthLimits{.diffuse = 1U
     auto result = renderer::TransportSpectrum{};
     result.values.fill(value);
     return result;
+}
+
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
+[[nodiscard]] SceneClosureMixture rough_dielectric_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    if (closures.append_rough_dielectric(constant_spectrum(0.9F), 1.0F, 1.5F, 0.25F) !=
+        renderer::ClosureAppendStatus::appended) {
+        throw std::runtime_error{"The MIS rough-dielectric closure could not be constructed."};
+    }
+    constexpr auto probabilities = std::array{1.0F};
+    return SceneClosureMixture::create(std::move(closures), probabilities).value();
 }
 
 [[nodiscard]] std::shared_ptr<const TriangleMesh>
@@ -62,73 +80,78 @@ make_quad(const float half_extent, const float height, const bool faces_up) {
             .value());
 }
 
-[[nodiscard]] FrameSceneHandle make_mis_scene(const renderer::RayMask emitter_mask) {
+[[nodiscard]] FrameSceneHandle
+make_mis_scene(const renderer::RayMask emitter_mask,
+               const std::optional<SceneClosureMixture>& receiver_closure = std::nullopt) {
     const auto wavelengths = renderer::sample_uniform_visible_wavelengths(0.25F).value();
-    return FrameScene::create(FrameSceneDescription{
-                                  .objects =
-                                      {
-                                          SceneObject{.id = {.value = 1U}},
-                                          SceneObject{.id = {.value = 2U}},
-                                      },
-                                  .geometries =
-                                      {
-                                          SceneGeometry{
-                                              .id = {.value = 11U},
-                                              .mesh = make_quad(2.0F, 0.0F, true),
-                                          },
-                                          SceneGeometry{
-                                              .id = {.value = 12U},
-                                              .mesh = make_quad(0.75F, 1.0F, false),
-                                          },
-                                      },
-                                  .materials =
-                                      {
-                                          SceneMaterial{
-                                              .id = {.value = 21U},
-                                              .spectral =
-                                                  SceneSpectralMaterial{
-                                                      .wavelengths = wavelengths,
-                                                      .reflectance = constant_spectrum(0.8F),
-                                                      .emitted_radiance = {},
-                                                  },
-                                          },
-                                          SceneMaterial{
-                                              .id = {.value = 22U},
-                                              .spectral =
-                                                  SceneSpectralMaterial{
-                                                      .wavelengths = wavelengths,
-                                                      .reflectance = {},
-                                                      .emitted_radiance = constant_spectrum(1.5F),
-                                                  },
-                                          },
-                                      },
-                                  .instances =
-                                      {
-                                          SceneInstance{
-                                              .id = {.value = 31U},
-                                              .parent = std::nullopt,
-                                              .object = {.value = 1U},
-                                              .geometry = {.value = 11U},
-                                              .material = {.value = 21U},
-                                              .local_to_parent = renderer::identity_matrix<float>(),
-                                              .visibility_mask = ReceiverMask,
-                                          },
-                                          SceneInstance{
-                                              .id = {.value = 32U},
-                                              .parent = std::nullopt,
-                                              .object = {.value = 2U},
-                                              .geometry = {.value = 12U},
-                                              .material = {.value = 22U},
-                                              .local_to_parent = renderer::identity_matrix<float>(),
-                                              .visibility_mask = emitter_mask,
-                                          },
-                                      },
-                                  .spectral_environment =
-                                      SceneSpectralEnvironment{
-                                          .wavelengths = wavelengths,
-                                          .radiance = {},
-                                      },
-                              })
+    return FrameScene::create(
+               FrameSceneDescription{
+                   .objects =
+                       {
+                           SceneObject{.id = {.value = 1U}},
+                           SceneObject{.id = {.value = 2U}},
+                       },
+                   .geometries =
+                       {
+                           SceneGeometry{
+                               .id = {.value = 11U},
+                               .mesh = make_quad(2.0F, 0.0F, true),
+                           },
+                           SceneGeometry{
+                               .id = {.value = 12U},
+                               .mesh = make_quad(0.75F, 1.0F, false),
+                           },
+                       },
+                   .materials =
+                       {
+                           SceneMaterial{
+                               .id = {.value = 21U},
+                               .spectral =
+                                   SceneSpectralMaterial{
+                                       .wavelengths = wavelengths,
+                                       .closure_mixture = receiver_closure.value_or(
+                                           require_lambertian_scene_closure(
+                                               constant_spectrum(0.8F))),
+                                       .emitted_radiance = {},
+                                   },
+                           },
+                           SceneMaterial{
+                               .id = {.value = 22U},
+                               .spectral =
+                                   SceneSpectralMaterial{
+                                       .wavelengths = wavelengths,
+                                       .closure_mixture = require_lambertian_scene_closure({}),
+                                       .emitted_radiance = constant_spectrum(1.5F),
+                                   },
+                           },
+                       },
+                   .instances =
+                       {
+                           SceneInstance{
+                               .id = {.value = 31U},
+                               .parent = std::nullopt,
+                               .object = {.value = 1U},
+                               .geometry = {.value = 11U},
+                               .material = {.value = 21U},
+                               .local_to_parent = renderer::identity_matrix<float>(),
+                               .visibility_mask = ReceiverMask,
+                           },
+                           SceneInstance{
+                               .id = {.value = 32U},
+                               .parent = std::nullopt,
+                               .object = {.value = 2U},
+                               .geometry = {.value = 12U},
+                               .material = {.value = 22U},
+                               .local_to_parent = renderer::identity_matrix<float>(),
+                               .visibility_mask = emitter_mask,
+                           },
+                       },
+                   .spectral_environment =
+                       SceneSpectralEnvironment{
+                           .wavelengths = wavelengths,
+                           .radiance = {},
+                       },
+               })
         .value();
 }
 
@@ -142,8 +165,9 @@ make_quad(const float half_extent, const float height, const bool faces_up) {
 [[nodiscard]] core::Result<renderer::BsdfOnlyPathResult>
 trace(const AccelBackend& acceleration, const renderer::Ray& ray,
       const renderer::SampleStream& stream, const renderer::MisHeuristic heuristic,
-      const renderer::LightSampler& sampler, const renderer::PathState& state) {
-    return trace_scene_mis(ray, state, stream, acceleration, sampler, heuristic, OneDiffuseBounce,
+      const renderer::LightSampler& sampler, const renderer::PathState& state,
+      const renderer::PathDepthLimits& depth_limits = OneDiffuseBounce) {
+    return trace_scene_mis(ray, state, stream, acceleration, sampler, heuristic, depth_limits,
                            renderer::RussianRoulettePolicy::disabled());
 }
 
@@ -197,6 +221,45 @@ TEST(SceneMisPathLoopTest, HonorsEmitterVisibilityWithoutLeakingDirectRadiance) 
                               renderer::MisHeuristic::power, sampler, state);
     ASSERT_TRUE(result.has_value()) << result.error().message;
     EXPECT_EQ(result->state.accumulated_radiance(), renderer::TransportSpectrum{});
+}
+
+TEST(SceneMisPathLoopTest, ConditionsRoughDielectricOnReflectionWhenTransmissionDepthIsDisabled) {
+    constexpr auto reflection_only = renderer::PathDepthLimits{
+        .glossy = 1U,
+        .transmission = 0U,
+    };
+    const auto scene = make_mis_scene(ReceiverMask, rough_dielectric_scene_closure());
+    const auto acceleration = create_analytic_accel_backend(scene).value();
+    const auto sampler = renderer::LightSampler::create_uniform(1U).value();
+    const auto state = renderer::PathState::create_initial(
+                           scene->spectral_environment()->wavelengths, renderer::VacuumMedium)
+                           .value();
+
+    auto reflected = std::size_t{};
+    for (const auto heuristic : {renderer::MisHeuristic::balance, renderer::MisHeuristic::power}) {
+        for (auto sample_index = std::uint64_t{}; sample_index < 32U; ++sample_index) {
+            const auto stream = renderer::IndependentSampler{0x13198A2E03707344ULL}.make_stream(
+                0U, 0U, sample_index);
+            const auto result = trace(*acceleration, primary_ray(ReceiverMask), stream, heuristic,
+                                      sampler, state, reflection_only);
+            ASSERT_TRUE(result.has_value()) << result.error().message;
+            for (const auto lane : result->state.accumulated_radiance().values) {
+                EXPECT_TRUE(std::isfinite(lane));
+                EXPECT_GT(lane, 0.0F);
+            }
+            if (result->state.depth() == 0U) {
+                EXPECT_EQ(result->state.depth_counters(), renderer::PathDepthCounters{});
+                continue;
+            }
+            ++reflected;
+            EXPECT_EQ(result->state.depth(), 1U);
+            EXPECT_EQ(result->state.depth_counters(), (renderer::PathDepthCounters{.glossy = 1U}));
+            EXPECT_GT(result->terminal_ray.direction().z, 0.0F);
+            EXPECT_EQ(result->state.eta_scale(), 1.0F);
+            EXPECT_EQ(result->state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+        }
+    }
+    EXPECT_GT(reflected, 0U);
 }
 
 TEST(SceneMisPathLoopTest, RejectsUnknownHeuristicsRegistryMismatchAndMissingPriorPdfs) {

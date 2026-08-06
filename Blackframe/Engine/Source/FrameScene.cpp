@@ -1,6 +1,6 @@
 #include <Blackframe/Engine/FrameScene.hpp>
+#include <Blackframe/Renderer/ClosureMixture.hpp>
 #include <Blackframe/Renderer/Emission.hpp>
-#include <Blackframe/Renderer/LambertianReflection.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
 #include <Blackframe/Renderer/PunctualLights.hpp>
 #include <algorithm>
@@ -11,7 +11,9 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <numbers>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -137,6 +139,42 @@ struct DerivedMeshAreaLights final {
 [[nodiscard]] bool is_black(const renderer::TransportSpectrum& spectrum) noexcept {
     return std::ranges::all_of(spectrum.values,
                                [](const renderer::TransportScalar value) { return value == 0.0F; });
+}
+
+[[nodiscard]] bool
+canonical_tangent_rotation(const renderer::TransportScalar tangent_rotation_radians) noexcept {
+    constexpr auto pi = std::numbers::pi_v<renderer::TransportScalar>;
+    return std::isfinite(tangent_rotation_radians) && tangent_rotation_radians >= -pi &&
+           tangent_rotation_radians < pi;
+}
+
+[[nodiscard]] core::Status
+validate_scene_closure_mixture(const SceneClosureMixture& closure_mixture) {
+    const auto canonical = SceneClosureMixture::create(
+        closure_mixture.closures, closure_mixture.active_component_probabilities(),
+        closure_mixture.frame_mode, closure_mixture.tangent_rotation_radians);
+    if (!canonical) {
+        return std::unexpected(canonical.error());
+    }
+
+    const auto active_count = static_cast<std::size_t>(closure_mixture.closures.size());
+    const auto inactive_probabilities = std::span<const renderer::TransportScalar>{
+        closure_mixture.component_probabilities.data() + active_count,
+        closure_mixture.component_probabilities.size() - active_count,
+    };
+    if (std::ranges::any_of(inactive_probabilities,
+                            [](const auto probability) { return probability != 0.0F; })) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A frame scene closure mixture requires an exactly zero inactive probability tail."));
+    }
+    if (!std::ranges::equal(canonical->active_component_probabilities(),
+                            closure_mixture.active_component_probabilities())) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A frame scene closure mixture requires canonical component probabilities."));
+    }
+    return {};
 }
 
 [[nodiscard]] core::Result<TransformedMeshPositions>
@@ -321,10 +359,9 @@ derive_mesh_area_lights(const FrameSceneDescription& description,
                 core::StatusCode::invalid_argument,
                 "Frame scene materials and environment must use the same wavelength packet."));
         }
-        if (!renderer::LambertianReflection::create(material.spectral->reflectance)) {
-            return std::unexpected(
-                scene_error(core::StatusCode::invalid_argument,
-                            "A frame scene material requires finite reflectance lanes in [0, 1]."));
+        if (auto status = validate_scene_closure_mixture(material.spectral->closure_mixture);
+            !status) {
+            return std::unexpected(std::move(status.error()));
         }
         if (!renderer::OneSidedSurfaceEmission::create(material.spectral->emitted_radiance)) {
             return std::unexpected(scene_error(
@@ -437,6 +474,51 @@ resolve_instance_transforms(const std::vector<SceneInstance>& instances) {
 }
 
 } // namespace
+
+core::Result<SceneClosureMixture> SceneClosureMixture::create(
+    renderer::ClosureSet closures,
+    const std::span<const renderer::TransportScalar> component_probabilities,
+    const SceneClosureFrameMode frame_mode,
+    const renderer::TransportScalar tangent_rotation_radians) {
+    if (!is_known_scene_closure_frame_mode(frame_mode)) {
+        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
+                                           "A scene closure mixture requires a known frame mode."));
+    }
+    if (!canonical_tangent_rotation(tangent_rotation_radians)) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A scene closure mixture requires a finite tangent rotation in [-pi, pi)."));
+    }
+
+    auto validated = renderer::ClosureMixture::create(std::move(closures), component_probabilities);
+    if (!validated) {
+        return std::unexpected(std::move(validated.error()));
+    }
+
+    auto result = SceneClosureMixture{
+        .closures = validated->closure_set(),
+        .component_probabilities = {},
+        .frame_mode = frame_mode,
+        .tangent_rotation_radians = tangent_rotation_radians,
+    };
+    std::ranges::copy(validated->component_probabilities(), result.component_probabilities.begin());
+    return result;
+}
+
+core::Result<SceneClosureMixture>
+SceneClosureMixture::create_lambertian(const renderer::TransportSpectrum reflectance,
+                                       const SceneClosureFrameMode frame_mode,
+                                       const renderer::TransportScalar tangent_rotation_radians) {
+    auto closures = renderer::ClosureSet{};
+    if (closures.append_lambertian_reflection(reflectance) !=
+        renderer::ClosureAppendStatus::appended) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A Lambertian scene closure requires finite reflectance lanes in [0, 1]."));
+    }
+    constexpr auto probability = std::array<renderer::TransportScalar, 1U>{1.0F};
+    return create(std::move(closures), probability, frame_mode, tangent_rotation_radians);
+}
 
 core::Result<FrameSceneHandle> FrameScene::create(const FrameSceneDescription& description) {
     try {

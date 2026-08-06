@@ -3,11 +3,14 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/AreaLights.hpp>
+#include <Blackframe/Renderer/ClosureSet.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
 #include <Blackframe/Renderer/Transforms.hpp>
 #include <Blackframe/Renderer/WavelengthSampling.hpp>
+#include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -17,6 +20,68 @@
 #include <vector>
 
 namespace blackframe::engine {
+
+enum class SceneClosureFrameMode : std::uint8_t {
+    shading_normal = 0U,
+    surface_tangent = 1U,
+};
+
+[[nodiscard]] constexpr bool
+is_known_scene_closure_frame_mode(const SceneClosureFrameMode mode) noexcept {
+    switch (mode) {
+    case SceneClosureFrameMode::shading_normal:
+    case SceneClosureFrameMode::surface_tangent:
+        return true;
+    }
+    return false;
+}
+
+// A scene material stores an explicit bounded closure distribution. The active probability prefix
+// follows ClosureSet insertion order and the inactive tail is exactly zero. The tangent rotation is
+// canonical in [-pi, pi). shading_normal selects the deterministic frame derived from Ns;
+// surface_tangent selects the projected surface parameterization and must fail at resolution time
+// when that tangent is unusable rather than substituting the shading-normal frame.
+struct SceneClosureMixture final {
+    [[nodiscard]] static core::Result<SceneClosureMixture>
+    create(renderer::ClosureSet closures,
+           std::span<const renderer::TransportScalar> component_probabilities,
+           SceneClosureFrameMode frame_mode = SceneClosureFrameMode::shading_normal,
+           renderer::TransportScalar tangent_rotation_radians = 0.0F);
+
+    [[nodiscard]] static core::Result<SceneClosureMixture>
+    create_lambertian(renderer::TransportSpectrum reflectance,
+                      SceneClosureFrameMode frame_mode = SceneClosureFrameMode::shading_normal,
+                      renderer::TransportScalar tangent_rotation_radians = 0.0F);
+
+    renderer::ClosureSet closures{};
+    std::array<renderer::TransportScalar, renderer::MaximumClosureCount> component_probabilities{};
+    SceneClosureFrameMode frame_mode{SceneClosureFrameMode::shading_normal};
+    renderer::TransportScalar tangent_rotation_radians{};
+
+    [[nodiscard]] constexpr std::span<const renderer::TransportScalar>
+    active_component_probabilities() const noexcept {
+        return {component_probabilities.data(), static_cast<std::size_t>(closures.size())};
+    }
+
+    [[nodiscard]] constexpr bool operator==(const SceneClosureMixture& other) const noexcept {
+        if (closures.size() != other.closures.size() ||
+            component_probabilities != other.component_probabilities ||
+            frame_mode != other.frame_mode ||
+            tangent_rotation_radians != other.tangent_rotation_radians) {
+            return false;
+        }
+        const auto closure_count = static_cast<std::size_t>(closures.size());
+        for (auto index = std::size_t{}; index < closure_count; ++index) {
+            const auto& left = closures.closures()[index];
+            const auto& right = other.closures.closures()[index];
+            if (left.kind != right.kind || left.lobes != right.lobes ||
+                left.weight != right.weight || left.parameters != right.parameters) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
 
 struct SceneObject final {
     renderer::ObjectId id{};
@@ -31,17 +96,19 @@ struct SceneGeometry final {
     [[nodiscard]] bool operator==(const SceneGeometry&) const noexcept = default;
 };
 
-// The current scalar transport resolves its only supported surface closure
-// (Lambertian reflection plus one-sided emission) at one explicit wavelength
-// packet. Wavelength-resolved values stay in the immutable scene record;
+// Wavelength-resolved closure parameters and emission stay in the immutable scene record;
 // construction validates them before a render can observe the snapshot.
 struct SceneSpectralMaterial final {
     renderer::SampledWavelengths wavelengths{};
-    renderer::TransportSpectrum reflectance{};
+    SceneClosureMixture closure_mixture{};
     renderer::TransportSpectrum emitted_radiance{};
 
     [[nodiscard]] constexpr bool operator==(const SceneSpectralMaterial&) const noexcept = default;
 };
+
+static_assert(sizeof(SceneClosureFrameMode) == sizeof(std::uint8_t));
+static_assert(std::is_standard_layout_v<SceneClosureMixture>);
+static_assert(std::is_trivially_copyable_v<SceneClosureMixture>);
 
 struct SceneMaterial final {
     renderer::MaterialId id{};

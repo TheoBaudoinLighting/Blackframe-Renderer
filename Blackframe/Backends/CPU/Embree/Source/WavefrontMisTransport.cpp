@@ -3,6 +3,7 @@
 #include <Blackframe/Engine/SceneSurfaceInteraction.hpp>
 #include <Blackframe/Renderer/ClosureMixture.hpp>
 #include <Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp>
+#include <Blackframe/Renderer/Detail/DepthFilteredClosureMixture.hpp>
 #include <Blackframe/Renderer/DirectLighting.hpp>
 #include <Blackframe/Renderer/PathStateSoA.hpp>
 #include <Blackframe/Renderer/PunctualLights.hpp>
@@ -140,7 +141,10 @@ struct PreviousBsdfSample final {
 struct PendingShadow final {
     renderer::Ray ray;
     renderer::TransportSpectrum beta;
-    renderer::LambertianReflection reflection;
+    renderer::TransportSpectrum bsdf_value;
+    renderer::TransportScalar absolute_incoming_cosine;
+    bool singleton_lambertian;
+    renderer::TransportSpectrum lambertian_reflectance;
     renderer::OrthonormalFrame frame;
     renderer::Vector3 outgoing_world;
     renderer::LightSelectionProbability selection_probability;
@@ -321,25 +325,6 @@ initial_queue_statistics_set(const std::uint64_t capacity) noexcept {
     return {};
 }
 
-[[nodiscard]] core::Result<renderer::ClosureMixture>
-make_scene_closure_mixture(const ResolvedSceneSurface& surface) {
-    auto closures = renderer::ClosureSet{};
-    if (closures.append_lambertian_reflection(surface.reflection.reflectance()) !=
-        renderer::ClosureAppendStatus::appended) {
-        return std::unexpected(wavefront_error(
-            core::StatusCode::internal_error,
-            "A validated scene Lambertian material could not enter the CPU closure set."));
-    }
-    constexpr auto probabilities = std::array{renderer::TransportScalar{1}};
-    auto mixture = renderer::ClosureMixture::create(std::move(closures), probabilities);
-    if (!mixture) {
-        return std::unexpected(wavefront_error(
-            core::StatusCode::internal_error,
-            "A validated scene Lambertian material could not create its CPU closure mixture."));
-    }
-    return mixture;
-}
-
 class WavefrontDirectLighting final {
   public:
     struct Preparation final {
@@ -352,12 +337,20 @@ class WavefrontDirectLighting final {
         : sampler_{sampler}, scene_{std::move(scene)}, heuristic_{heuristic} {}
 
     [[nodiscard]] core::Result<Preparation>
-    prepare(const ResolvedSceneSurface& surface, const renderer::ClosureMixture& closures,
+    prepare(const ResolvedSceneSurface& surface,
+            const renderer::detail::DepthFilteredClosureMixture& closures,
             const renderer::TransportSpectrum& beta, const renderer::OrthonormalFrame& frame,
             const renderer::Vector3 outgoing_world,
             const renderer::BounceSampleDimensions& dimensions,
             const renderer::SampleStream& sample_stream, const renderer::Ray& path_ray) const {
-        if (is_black(beta) || is_black(surface.reflection.reflectance())) {
+        if (is_black(beta)) {
+            return Preparation{};
+        }
+        auto all_black = true;
+        for (auto index = std::size_t{}; index < closures.size(); ++index) {
+            all_black = all_black && is_black(closures.active_closure(index).weight);
+        }
+        if (all_black) {
             return Preparation{};
         }
 
@@ -402,8 +395,34 @@ class WavefrontDirectLighting final {
 
         const auto outgoing_local = frame.to_local(outgoing_world);
         const auto incoming_local = frame.to_local((**incident).direction_to_light());
-        if (!(outgoing_local.z > 0.0F) || !(incoming_local.z > 0.0F)) {
+        if (outgoing_local.z == 0.0F || incoming_local.z == 0.0F) {
             return preparation;
+        }
+        auto singleton_lambertian = false;
+        auto lambertian_reflectance = renderer::TransportSpectrum{};
+        auto bsdf_value = renderer::TransportSpectrum{};
+        if (closures.size() == 1U &&
+            closures.active_closure(0U).kind == renderer::ClosureKind::lambertian_reflection) {
+            const auto model =
+                renderer::LambertianReflection::create(closures.active_closure(0U).weight);
+            if (!model) {
+                return std::unexpected(model.error());
+            }
+            if (is_black(model->reflectance())) {
+                return preparation;
+            }
+            singleton_lambertian = true;
+            lambertian_reflectance = model->reflectance();
+        } else {
+            const auto evaluated =
+                closures.eval(outgoing_local, incoming_local, renderer::TransportMode::radiance);
+            if (!evaluated) {
+                return std::unexpected(evaluated.error());
+            }
+            if (is_black(*evaluated)) {
+                return preparation;
+            }
+            bsdf_value = *evaluated;
         }
         const auto correction = renderer::shading_normal_correction(
             surface.interaction.geometric_normal(), surface.interaction.shading_normal(),
@@ -449,7 +468,10 @@ class WavefrontDirectLighting final {
         preparation.shadow.emplace(PendingShadow{
             .ray = *shadow_ray,
             .beta = beta,
-            .reflection = surface.reflection,
+            .bsdf_value = bsdf_value,
+            .absolute_incoming_cosine = std::abs(incoming_local.z),
+            .singleton_lambertian = singleton_lambertian,
+            .lambertian_reflectance = lambertian_reflectance,
             .frame = frame,
             .outgoing_world = outgoing_world,
             .selection_probability = selection->probability(),
@@ -532,10 +554,19 @@ class WavefrontDirectLighting final {
             heuristic_, previous_bsdf_sample->probability, *light_probability);
     }
 
-    [[nodiscard]] core::Result<PreviousBsdfSample>
-    record_bsdf_sample(const ResolvedSceneSurface& surface,
-                       const renderer::ProbabilityDensity probability,
-                       const renderer::Vector3 incoming_world) const {
+    [[nodiscard]] core::Result<std::optional<PreviousBsdfSample>> record_bsdf_sample(
+        const ResolvedSceneSurface& surface, const renderer::ProbabilityDensity probability,
+        const renderer::Vector3 incoming_world, const renderer::ScatteringLobe lobes) const {
+        if (renderer::is_delta_surface_scattering_event(lobes)) {
+            if (probability.measure != renderer::DeltaBsdfProbabilityMeasure ||
+                !std::isfinite(probability.value) || !(probability.value > 0.0F) ||
+                probability.value > 1.0F) {
+                return std::unexpected(wavefront_error(
+                    core::StatusCode::incompatible,
+                    "A delta CPU wavefront continuation requires a positive discrete mass."));
+            }
+            return std::optional<PreviousBsdfSample>{};
+        }
         if (probability.measure != renderer::ProbabilityMeasure::solid_angle ||
             !std::isfinite(probability.value) || !(probability.value > 0.0F)) {
             return std::unexpected(wavefront_error(
@@ -547,11 +578,11 @@ class WavefrontDirectLighting final {
         if (!context) {
             return std::unexpected(context.error());
         }
-        return PreviousBsdfSample{
+        return std::optional<PreviousBsdfSample>{PreviousBsdfSample{
             .context = *context,
             .probability = probability,
             .incoming_world = incoming_world,
-        };
+        }};
     }
 
   private:
@@ -727,20 +758,6 @@ next_delta_flags(const renderer::PathDeltaFlags current,
     }
     runtime.radiance = *accumulated;
 
-    constexpr auto diffuse_reflection =
-        renderer::ScatteringLobe::diffuse | renderer::ScatteringLobe::reflection;
-    const auto depth_event = renderer::evaluate_path_depth_event(
-        depth_limits, runtime.depth_counters, diffuse_reflection);
-    if (!depth_event) {
-        return std::unexpected(depth_event.error());
-    }
-    if (!depth_event->accepted()) {
-        runtime.pending_termination = PendingTermination{
-            .reason = renderer::BsdfOnlyPathTermination::depth_limit,
-            .blocked_depth_limits = depth_event->blocked_limits,
-        };
-        return {};
-    }
     if (renderer::bsdf_only_path_loop_detail::zero_spectrum(runtime.beta)) {
         runtime.pending_termination = PendingTermination{
             .reason = renderer::BsdfOnlyPathTermination::zero_throughput,
@@ -749,17 +766,30 @@ next_delta_flags(const renderer::PathDeltaFlags current,
         return {};
     }
 
-    const auto frame =
-        renderer::OrthonormalFrame::from_normal(surface.interaction.shading_normal());
-    if (!frame) {
-        return std::unexpected(frame.error());
+    const auto filtered_closures = renderer::detail::DepthFilteredClosureMixture::create(
+        surface.closures, depth_limits, runtime.depth_counters);
+    if (!filtered_closures) {
+        return std::unexpected(filtered_closures.error());
     }
+    if (filtered_closures->empty()) {
+        runtime.pending_termination = PendingTermination{
+            .reason = filtered_closures->source_empty()
+                          ? renderer::BsdfOnlyPathTermination::outside_bsdf_support
+                          : renderer::BsdfOnlyPathTermination::depth_limit,
+            .blocked_depth_limits = filtered_closures->source_empty()
+                                        ? renderer::ScatteringLobe::none
+                                        : filtered_closures->blocked_lobes(),
+        };
+        return {};
+    }
+
+    const auto& frame = surface.closure_frame;
     const auto outgoing_world =
         renderer::bsdf_only_path_loop_detail::robust_unit_direction(-runtime.ray->direction());
     if (!outgoing_world) {
         return std::unexpected(outgoing_world.error());
     }
-    const auto outgoing_local = frame->to_local(*outgoing_world);
+    const auto outgoing_local = frame.to_local(*outgoing_world);
     const auto current_depth = renderer::path_depth_total(runtime.depth_counters);
     if (!current_depth) {
         return std::unexpected(current_depth.error());
@@ -768,12 +798,39 @@ next_delta_flags(const renderer::PathDeltaFlags current,
     if (!dimensions) {
         return std::unexpected(dimensions.error());
     }
-    const auto closures = make_scene_closure_mixture(surface);
-    if (!closures) {
-        return std::unexpected(closures.error());
-    }
     const auto stream = renderer::SampleStream{runtime.sample};
-    const auto direct = direct_lighting.prepare(surface, *closures, runtime.beta, *frame,
+    const auto sampled =
+        filtered_closures->sample(outgoing_local, stream.sample_1d(dimensions->bsdf_component),
+                                  renderer::Point2{
+                                      .x = stream.sample_1d(dimensions->bsdf_u),
+                                      .y = stream.sample_1d(dimensions->bsdf_v),
+                                  },
+                                  renderer::TransportMode::radiance);
+    if (!sampled) {
+        return std::unexpected(sampled.error());
+    }
+    ++runtime.closure_samples;
+    auto depth_event = renderer::PathDepthEventResult{};
+    if (*sampled) {
+        const auto& candidate = **sampled;
+        if (!renderer::is_valid_surface_scattering_event(candidate.lobes)) {
+            return std::unexpected(wavefront_error(
+                core::StatusCode::incompatible, "A CPU closure produced an invalid event mask."));
+        }
+        const auto evaluated_depth = renderer::evaluate_path_depth_event(
+            depth_limits, runtime.depth_counters, candidate.lobes);
+        if (!evaluated_depth) {
+            return std::unexpected(evaluated_depth.error());
+        }
+        if (!evaluated_depth->accepted()) {
+            return std::unexpected(wavefront_error(
+                core::StatusCode::internal_error,
+                "A depth-filtered CPU closure selected a blocked continuation event."));
+        }
+        depth_event = *evaluated_depth;
+    }
+
+    const auto direct = direct_lighting.prepare(surface, *filtered_closures, runtime.beta, frame,
                                                 *outgoing_world, *dimensions, stream, *runtime.ray);
     if (!direct) {
         return std::unexpected(direct.error());
@@ -783,17 +840,6 @@ next_delta_flags(const renderer::PathDeltaFlags current,
     }
     runtime.pending_shadow = direct->shadow;
 
-    const auto sampled =
-        closures->sample(outgoing_local, stream.sample_1d(dimensions->bsdf_component),
-                         renderer::Point2{
-                             .x = stream.sample_1d(dimensions->bsdf_u),
-                             .y = stream.sample_1d(dimensions->bsdf_v),
-                         },
-                         renderer::TransportMode::radiance);
-    if (!sampled) {
-        return std::unexpected(sampled.error());
-    }
-    ++runtime.closure_samples;
     if (!*sampled) {
         runtime.pending_termination = PendingTermination{
             .reason = renderer::BsdfOnlyPathTermination::outside_bsdf_support,
@@ -802,13 +848,9 @@ next_delta_flags(const renderer::PathDeltaFlags current,
         return {};
     }
     const auto& closure_sample = **sampled;
-    if (closure_sample.lobes != diffuse_reflection) {
-        return std::unexpected(wavefront_error(
-            core::StatusCode::incompatible,
-            "The current frame-scene material produced a non-Lambertian CPU closure event."));
-    }
+
     const auto incoming_world = renderer::bsdf_only_path_loop_detail::robust_unit_direction(
-        frame->to_world(closure_sample.incoming_local));
+        frame.to_world(closure_sample.incoming_local));
     if (!incoming_world) {
         return std::unexpected(incoming_world.error());
     }
@@ -825,28 +867,12 @@ next_delta_flags(const renderer::PathDeltaFlags current,
         };
         return {};
     }
-    if (*correction != 1.0F) {
-        return std::unexpected(wavefront_error(
-            core::StatusCode::invalid_argument,
-            "A radiance CPU wavefront path received a non-unit shading-normal correction."));
-    }
-    if (closure_sample.probability.measure != renderer::ContinuousBsdfProbabilityMeasure ||
-        !std::isfinite(closure_sample.probability.value) ||
-        !(closure_sample.probability.value > 0.0F)) {
-        return std::unexpected(wavefront_error(
-            core::StatusCode::invalid_argument,
-            "A CPU wavefront closure returned an invalid continuous transport sample."));
-    }
-    // The current FrameScene schema can encode only a Lambertian closure. Keep its albedo as a
-    // separate factor instead of reconstructing it as f * cos / pdf: multiplying by inv_pi before
-    // the matching PDF division can erase a valid subnormal reflectance.
-    const auto updated_beta = renderer::bsdf_only_path_loop_detail::checked_product(
-        runtime.beta, surface.reflection.reflectance(),
-        "CPU wavefront Lambertian throughput is not representable.");
+    const auto updated_beta = renderer::bsdf_only_path_loop_detail::update_closure_throughput(
+        runtime.beta, closure_sample, *correction, *filtered_closures);
     if (!updated_beta) {
         return std::unexpected(updated_beta.error());
     }
-    const auto next_depth = renderer::path_depth_total(depth_event->counters);
+    const auto next_depth = renderer::path_depth_total(depth_event.counters);
     if (!next_depth) {
         return std::unexpected(next_depth.error());
     }
@@ -873,18 +899,18 @@ next_delta_flags(const renderer::PathDeltaFlags current,
     if (!next_ray) {
         return std::unexpected(next_ray.error());
     }
-    const auto previous =
-        direct_lighting.record_bsdf_sample(surface, closure_sample.probability, *incoming_world);
+    const auto previous = direct_lighting.record_bsdf_sample(surface, closure_sample.probability,
+                                                             *incoming_world, closure_sample.lobes);
     if (!previous) {
         return std::unexpected(previous.error());
     }
 
     runtime.beta = *updated_beta;
-    runtime.depth_counters = depth_event->counters;
+    runtime.depth_counters = depth_event.counters;
     runtime.eta_scale = next_eta_scale;
     runtime.delta_flags = next_delta_flags(runtime.delta_flags, closure_sample.lobes);
     runtime.ray = *next_ray;
-    runtime.previous_bsdf_sample = *previous;
+    runtime.previous_bsdf_sample = std::move(*previous);
     if (renderer::bsdf_only_path_loop_detail::zero_spectrum(runtime.beta)) {
         runtime.pending_termination = PendingTermination{
             .reason = renderer::BsdfOnlyPathTermination::zero_throughput,
@@ -1432,13 +1458,30 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
                         if (!*occluded) {
                             auto visible_transmittance = renderer::TransportSpectrum{};
                             visible_transmittance.values.fill(1.0F);
-                            const auto direct = renderer::evaluate_lambertian_direct_lighting(
-                                runtime.pending_shadow->beta, runtime.pending_shadow->reflection,
-                                runtime.pending_shadow->frame,
-                                runtime.pending_shadow->outgoing_world,
-                                runtime.pending_shadow->selection_probability,
-                                runtime.pending_shadow->incident_light, visible_transmittance,
-                                runtime.pending_shadow->estimator_weight);
+                            const auto direct = [&]() -> core::Result<renderer::TransportSpectrum> {
+                                if (!runtime.pending_shadow->singleton_lambertian) {
+                                    return renderer::evaluate_bsdf_direct_lighting(
+                                        runtime.pending_shadow->beta,
+                                        runtime.pending_shadow->bsdf_value,
+                                        runtime.pending_shadow->absolute_incoming_cosine,
+                                        runtime.pending_shadow->selection_probability,
+                                        runtime.pending_shadow->incident_light,
+                                        visible_transmittance,
+                                        runtime.pending_shadow->estimator_weight);
+                                }
+                                const auto model = renderer::LambertianReflection::create(
+                                    runtime.pending_shadow->lambertian_reflectance);
+                                if (!model) {
+                                    return std::unexpected(model.error());
+                                }
+                                return renderer::evaluate_lambertian_direct_lighting(
+                                    runtime.pending_shadow->beta, *model,
+                                    runtime.pending_shadow->frame,
+                                    runtime.pending_shadow->outgoing_world,
+                                    runtime.pending_shadow->selection_probability,
+                                    runtime.pending_shadow->incident_light, visible_transmittance,
+                                    runtime.pending_shadow->estimator_weight);
+                            }();
                             if (!direct) {
                                 return core::Status{std::unexpected(direct.error())};
                             }

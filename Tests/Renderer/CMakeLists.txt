@@ -11,6 +11,7 @@ add_executable(
     DebugIntegratorsTest.cpp
     DisplayPsnrTest.cpp
     DirectLightingTest.cpp
+    DepthFilteredClosureMixtureTest.cpp
     EmissionTest.cpp
     ExrWriterTest.cpp
     FilmTest.cpp

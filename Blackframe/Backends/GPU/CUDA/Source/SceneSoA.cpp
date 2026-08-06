@@ -25,6 +25,8 @@ static_assert(std::endian::native == std::endian::little,
 static_assert(std::numeric_limits<float>::is_iec559);
 static_assert(sizeof(std::size_t) <= sizeof(std::uint64_t));
 static_assert(renderer::TransportSpectrumSampleCount == xpu::shared::SceneSoaSpectrumLaneCount);
+static_assert(renderer::ClosureParameterScalarCount ==
+              xpu::shared::SceneSoaClosureParameterScalarCount);
 static_assert(std::variant_size_v<ScenePunctualLight> == 3U);
 static_assert(std::is_same_v<std::variant_alternative_t<0, ScenePunctualLight>, ScenePointLight>);
 static_assert(
@@ -319,6 +321,23 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
     header.mesh_area_light_count = mesh_area_light_ids.size();
     header.environment_count = environment.has_value() ? 1U : 0U;
 
+    auto material_closure_offsets = std::vector<std::uint64_t>{};
+    material_closure_offsets.reserve(materials.size());
+    for (const auto& material : materials) {
+        material_closure_offsets.push_back(header.closure_count);
+        if (!material.spectral) {
+            continue;
+        }
+        const auto material_closure_count =
+            static_cast<std::uint64_t>(material.spectral->closure_mixture.closures.size());
+        if (add_overflows(header.closure_count, material_closure_count)) {
+            return std::unexpected(
+                scene_soa_error(core::StatusCode::resource_exhausted,
+                                "CUDA scene aggregate closure count exceeds the 64-bit schema."));
+        }
+        header.closure_count += material_closure_count;
+    }
+
     for (const auto& geometry : geometries) {
         if (!geometry.mesh) {
             return std::unexpected(scene_soa_error(
@@ -504,14 +523,36 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
                 }
             });
     }
-    for (auto lane = std::uint32_t{0}; lane < xpu::shared::SceneSoaSpectrumLaneCount; ++lane) {
-        BLACKFRAME_APPEND_SCENE_COLUMN(
-            float, column::material_reflectance + lane, header.material_count, [&](auto&& emit) {
-                for (const auto& material : materials) {
-                    emit(material.spectral ? material.spectral->reflectance[lane] : 0.0F);
-                }
-            });
-    }
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint64_t, column::material_closure_offset,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto offset : material_closure_offsets) {
+                                           emit(offset);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint64_t, column::material_closure_count, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                emit(material.spectral ? static_cast<std::uint64_t>(
+                                             material.spectral->closure_mixture.closures.size())
+                                       : std::uint64_t{0});
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint8_t, column::material_closure_frame_mode, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                emit(material.spectral
+                         ? static_cast<std::uint8_t>(material.spectral->closure_mixture.frame_mode)
+                         : std::uint8_t{0});
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        float, column::material_closure_tangent_rotation_radians, header.material_count,
+        [&](auto&& emit) {
+            for (const auto& material : materials) {
+                emit(material.spectral ? material.spectral->closure_mixture.tangent_rotation_radians
+                                       : 0.0F);
+            }
+        });
     for (auto lane = std::uint32_t{0}; lane < xpu::shared::SceneSoaSpectrumLaneCount; ++lane) {
         BLACKFRAME_APPEND_SCENE_COLUMN(
             float, column::material_emitted_radiance + lane, header.material_count,
@@ -521,6 +562,70 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
                 }
             });
     }
+
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::closure_kind, header.closure_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                if (!material.spectral) {
+                    continue;
+                }
+                for (const auto& closure : material.spectral->closure_mixture.closures.closures()) {
+                    emit(static_cast<std::uint32_t>(closure.kind));
+                }
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::closure_lobes, header.closure_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                if (!material.spectral) {
+                    continue;
+                }
+                for (const auto& closure : material.spectral->closure_mixture.closures.closures()) {
+                    emit(renderer::scattering_lobe_bits(closure.lobes));
+                }
+            }
+        });
+    for (auto lane = std::uint32_t{0}; lane < xpu::shared::SceneSoaSpectrumLaneCount; ++lane) {
+        BLACKFRAME_APPEND_SCENE_COLUMN(
+            float, column::closure_weight + lane, header.closure_count, [&](auto&& emit) {
+                for (const auto& material : materials) {
+                    if (!material.spectral) {
+                        continue;
+                    }
+                    for (const auto& closure :
+                         material.spectral->closure_mixture.closures.closures()) {
+                        emit(closure.weight[lane]);
+                    }
+                }
+            });
+    }
+    for (auto parameter = std::uint32_t{0};
+         parameter < xpu::shared::SceneSoaClosureParameterScalarCount; ++parameter) {
+        BLACKFRAME_APPEND_SCENE_COLUMN(
+            float, column::closure_parameters + parameter, header.closure_count, [&](auto&& emit) {
+                for (const auto& material : materials) {
+                    if (!material.spectral) {
+                        continue;
+                    }
+                    for (const auto& closure :
+                         material.spectral->closure_mixture.closures.closures()) {
+                        emit(closure.parameters[parameter]);
+                    }
+                }
+            });
+    }
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        float, column::closure_probability, header.closure_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                if (!material.spectral) {
+                    continue;
+                }
+                for (const auto probability :
+                     material.spectral->closure_mixture.active_component_probabilities()) {
+                    emit(probability);
+                }
+            }
+        });
 
     BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::instance_id, header.instance_count,
                                    [&](auto&& emit) {

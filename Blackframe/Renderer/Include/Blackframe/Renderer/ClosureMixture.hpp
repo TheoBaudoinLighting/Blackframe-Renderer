@@ -6,6 +6,7 @@
 #include <Blackframe/Renderer/RoughConductorReflection.hpp>
 #include <Blackframe/Renderer/RoughDielectric.hpp>
 #include <Blackframe/Renderer/RoughDiffuseReflection.hpp>
+#include <Blackframe/Renderer/SpecularDelta.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -425,6 +426,51 @@ rough_dielectric_from_record(const ClosureT<Scalar>& closure) {
 }
 
 template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<SpecularReflectionT<Scalar>>
+specular_reflection_from_record(const ClosureT<Scalar>& closure) {
+    constexpr auto specular_reflection_lobes =
+        ScatteringLobe::specular | ScatteringLobe::reflection;
+    if (closure.kind != ClosureKind::specular_reflection) {
+        return std::unexpected(
+            invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+    }
+    if (closure.lobes != specular_reflection_lobes) {
+        return std::unexpected(invalid_closure_mixture(
+            "A specular-reflection closure record has an incompatible lobe mask."));
+    }
+    for (const auto parameter : closure.parameters) {
+        if (parameter != Scalar{0}) {
+            return std::unexpected(invalid_closure_mixture(
+                "A specular-reflection closure record has a non-zero reserved payload."));
+        }
+    }
+    return SpecularReflectionT<Scalar>::create(closure.weight);
+}
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<SpecularTransmissionT<Scalar>>
+specular_transmission_from_record(const ClosureT<Scalar>& closure) {
+    constexpr auto specular_transmission_lobes =
+        ScatteringLobe::specular | ScatteringLobe::transmission;
+    if (closure.kind != ClosureKind::specular_transmission) {
+        return std::unexpected(
+            invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+    }
+    if (closure.lobes != specular_transmission_lobes) {
+        return std::unexpected(invalid_closure_mixture(
+            "A specular-transmission closure record has an incompatible lobe mask."));
+    }
+    for (auto index = std::size_t{2}; index < closure.parameters.size(); ++index) {
+        if (closure.parameters[index] != Scalar{0}) {
+            return std::unexpected(invalid_closure_mixture(
+                "A specular-transmission closure record has a non-zero reserved payload."));
+        }
+    }
+    return SpecularTransmissionT<Scalar>::create(closure.weight, closure.parameters[0],
+                                                 closure.parameters[1]);
+}
+
+template <SpectrumScalar Scalar>
 [[nodiscard]] core::Status validate_closure_record(const ClosureT<Scalar>& closure) {
     switch (closure.kind) {
     case ClosureKind::lambertian_reflection: {
@@ -450,6 +496,20 @@ template <SpectrumScalar Scalar>
     }
     case ClosureKind::rough_dielectric: {
         const auto model = rough_dielectric_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return {};
+    }
+    case ClosureKind::specular_reflection: {
+        const auto model = specular_reflection_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return {};
+    }
+    case ClosureKind::specular_transmission: {
+        const auto model = specular_transmission_from_record(closure);
         if (!model) {
             return std::unexpected(model.error());
         }
@@ -495,6 +555,20 @@ eval_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outg
         }
         return model->eval(outgoing_local, incoming_local, mode);
     }
+    case ClosureKind::specular_reflection: {
+        const auto model = specular_reflection_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->eval(outgoing_local, incoming_local);
+    }
+    case ClosureKind::specular_transmission: {
+        const auto model = specular_transmission_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->eval(outgoing_local, incoming_local, mode);
+    }
     case ClosureKind::none:
         break;
     }
@@ -530,6 +604,20 @@ pdf_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> outgo
     }
     case ClosureKind::rough_dielectric: {
         const auto model = rough_dielectric_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->pdf(outgoing_local, incoming_local, mode);
+    }
+    case ClosureKind::specular_reflection: {
+        const auto model = specular_reflection_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        return model->pdf(outgoing_local, incoming_local);
+    }
+    case ClosureKind::specular_transmission: {
+        const auto model = specular_transmission_from_record(closure);
         if (!model) {
             return std::unexpected(model.error());
         }
@@ -627,11 +715,148 @@ sample_closure_record(const ClosureT<Scalar>& closure, const Vector3T<Scalar> ou
             .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
         }};
     }
+    case ClosureKind::specular_reflection: {
+        const auto model = specular_reflection_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        const auto sampled = model->sample(outgoing_local);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        if (!sampled->has_value()) {
+            return std::optional<ClosureDirectionSampleT<Scalar>>{};
+        }
+        return std::optional<ClosureDirectionSampleT<Scalar>>{ClosureDirectionSampleT<Scalar>{
+            .incoming_local = (**sampled).incoming_local,
+            .value = (**sampled).value,
+            .probability = (**sampled).probability,
+            .lobes = (**sampled).lobes,
+            .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
+        }};
+    }
+    case ClosureKind::specular_transmission: {
+        const auto model = specular_transmission_from_record(closure);
+        if (!model) {
+            return std::unexpected(model.error());
+        }
+        const auto sampled = model->sample(outgoing_local, mode);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        if (!sampled->has_value()) {
+            return std::optional<ClosureDirectionSampleT<Scalar>>{};
+        }
+        return std::optional<ClosureDirectionSampleT<Scalar>>{ClosureDirectionSampleT<Scalar>{
+            .incoming_local = (**sampled).incoming_local,
+            .value = (**sampled).value,
+            .probability = (**sampled).probability,
+            .lobes = (**sampled).lobes,
+            .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
+        }};
+    }
     case ClosureKind::none:
         break;
     }
     return std::unexpected(
         invalid_closure_mixture("A closure mixture contains an unsupported closure record."));
+}
+
+[[nodiscard]] constexpr bool is_delta_closure_kind(const ClosureKind kind) noexcept {
+    return kind == ClosureKind::specular_reflection || kind == ClosureKind::specular_transmission;
+}
+
+template <SpectrumScalar Scalar> struct DeltaAtomT final {
+    SampledSpectrum<TransportSpectrumSampleCount, Scalar> value{};
+    ClosureProbabilityDensityT<Scalar> probability{
+        .value = Scalar{0},
+        .measure = DeltaBsdfProbabilityMeasure,
+    };
+};
+
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<DeltaAtomT<Scalar>>
+aggregate_delta_atom(const std::span<const ClosureT<Scalar>> closures,
+                     const std::span<const Scalar> component_probabilities,
+                     const Vector3T<Scalar> outgoing_local, const Vector3T<Scalar> incoming_local,
+                     const TransportMode mode) {
+    if (closures.empty() || closures.size() != component_probabilities.size()) {
+        return std::unexpected(invalid_closure_mixture(
+            "A delta atom requires a non-empty matching sampling distribution."));
+    }
+
+    auto value_sums = std::array<Scalar, TransportSpectrumSampleCount>{};
+    auto value_corrections = std::array<Scalar, TransportSpectrumSampleCount>{};
+    auto probability_sum = Scalar{0};
+    auto probability_correction = Scalar{0};
+    auto matching_count = std::size_t{};
+    for (auto index = std::size_t{}; index < closures.size(); ++index) {
+        if (!is_delta_closure_kind(closures[index].kind)) {
+            continue;
+        }
+
+        // Delta closures are deterministic. Exact comparison deliberately merges only identical
+        // representable atoms; nearby directions remain distinct discrete outcomes.
+        const auto candidate = sample_closure_record(closures[index], outgoing_local, Scalar{0},
+                                                     Point2T<Scalar>{}, mode);
+        if (!candidate) {
+            return std::unexpected(candidate.error());
+        }
+        if (!candidate->has_value() || (**candidate).incoming_local.x != incoming_local.x ||
+            (**candidate).incoming_local.y != incoming_local.y ||
+            (**candidate).incoming_local.z != incoming_local.z) {
+            continue;
+        }
+        if ((**candidate).probability.measure != DeltaBsdfProbabilityMeasure ||
+            !std::isfinite((**candidate).probability.value) ||
+            !((**candidate).probability.value > Scalar{0}) ||
+            (**candidate).probability.value > Scalar{1}) {
+            return std::unexpected(invalid_closure_mixture(
+                "A sampled delta closure requires a finite positive discrete probability."));
+        }
+
+        for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+            if (!add_compensated((**candidate).value[lane], value_sums[lane],
+                                 value_corrections[lane])) {
+                return std::unexpected(invalid_closure_mixture(
+                    "A coincident delta value is not representable in the requested precision."));
+            }
+        }
+        const auto weighted_probability = positive_probability_product(
+            component_probabilities[index], (**candidate).probability.value);
+        if (!weighted_probability) {
+            return std::unexpected(weighted_probability.error());
+        }
+        if (!add_compensated(*weighted_probability, probability_sum, probability_correction)) {
+            return std::unexpected(invalid_closure_mixture(
+                "A coincident delta probability is not representable in the requested precision."));
+        }
+        ++matching_count;
+    }
+
+    const auto probability = probability_sum + probability_correction;
+    if (matching_count == 0U || !std::isfinite(probability) || !(probability > Scalar{0}) ||
+        probability > Scalar{1}) {
+        return std::unexpected(
+            invalid_closure_mixture("The sampled delta atom is absent from the closure mixture."));
+    }
+
+    auto value = SampledSpectrum<TransportSpectrumSampleCount, Scalar>{};
+    for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+        value[lane] = value_sums[lane] + value_corrections[lane];
+        if (!std::isfinite(value[lane]) || value[lane] < Scalar{0}) {
+            return std::unexpected(invalid_closure_mixture(
+                "A coincident delta value is not representable in the requested precision."));
+        }
+    }
+    return DeltaAtomT<Scalar>{
+        .value = value,
+        .probability =
+            {
+                .value = probability,
+                .measure = DeltaBsdfProbabilityMeasure,
+            },
+    };
 }
 
 } // namespace closure_mixture_detail
@@ -830,13 +1055,31 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
             }};
         }
 
-        const auto value = eval(outgoing_local, (**sampled).incoming_local, mode);
-        if (!value) {
-            return std::unexpected(value.error());
-        }
-        const auto probability = pdf(outgoing_local, (**sampled).incoming_local, mode);
-        if (!probability) {
-            return std::unexpected(probability.error());
+        auto value = spectrum_type{};
+        auto probability = probability_density_type{};
+        if ((**sampled).probability.measure == ContinuousBsdfProbabilityMeasure) {
+            const auto mixed_value = eval(outgoing_local, (**sampled).incoming_local, mode);
+            if (!mixed_value) {
+                return std::unexpected(mixed_value.error());
+            }
+            const auto mixed_probability = pdf(outgoing_local, (**sampled).incoming_local, mode);
+            if (!mixed_probability) {
+                return std::unexpected(mixed_probability.error());
+            }
+            value = *mixed_value;
+            probability = *mixed_probability;
+        } else if ((**sampled).probability.measure == DeltaBsdfProbabilityMeasure) {
+            const auto atom = closure_mixture_detail::aggregate_delta_atom(
+                closures_.closures(), component_probabilities(), outgoing_local,
+                (**sampled).incoming_local, mode);
+            if (!atom) {
+                return std::unexpected(atom.error());
+            }
+            value = atom->value;
+            probability = atom->probability;
+        } else {
+            return std::unexpected(closure_mixture_detail::invalid_closure_mixture(
+                "A sampled closure returned an unsupported probability measure."));
         }
         return std::optional<sample_type>{sample_type{
             .selected_closure = static_cast<std::uint32_t>(*selected),
@@ -847,8 +1090,8 @@ template <SpectrumScalar Scalar> class ClosureMixtureT final {
                     .measure = ProbabilityMeasure::discrete,
                 },
             .incoming_local = (**sampled).incoming_local,
-            .value = *value,
-            .probability = *probability,
+            .value = value,
+            .probability = probability,
             .eta_scale_multiplier = (**sampled).eta_scale_multiplier,
         }};
     }

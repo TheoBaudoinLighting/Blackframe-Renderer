@@ -6,6 +6,7 @@
 #include <Blackframe/Renderer/PunctualLights.hpp>
 #include <Blackframe/Renderer/ShadingNormalCorrection.hpp>
 #include <Blackframe/Renderer/ShadowRay.hpp>
+#include <algorithm>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
@@ -33,6 +34,21 @@ namespace {
         }
     }
     return true;
+}
+
+[[nodiscard]] renderer::PathDeltaFlags
+next_delta_flags(const renderer::PathDeltaFlags current,
+                 const renderer::ScatteringLobe event) noexcept {
+    auto flags =
+        renderer::has_path_delta_flag(current, renderer::PathDeltaFlags::any_non_delta_bounces)
+            ? renderer::PathDeltaFlags::any_non_delta_bounces
+            : renderer::PathDeltaFlags::none;
+    if (renderer::is_delta_surface_scattering_event(event)) {
+        flags = flags | renderer::PathDeltaFlags::previous_bounce_was_delta;
+    } else {
+        flags = flags | renderer::PathDeltaFlags::any_non_delta_bounces;
+    }
+    return flags;
 }
 
 [[nodiscard]] bool is_black(const ScenePunctualLight& light) noexcept {
@@ -117,11 +133,20 @@ class SceneMisDirectLighting final {
           heuristic_{heuristic} {}
 
     [[nodiscard]] core::Result<renderer::TransportSpectrum>
-    estimate(const detail::ScenePathSurface& surface, const renderer::TransportSpectrum& beta,
-             const renderer::OrthonormalFrame& frame, const renderer::Vector3 outgoing_world,
+    estimate(const detail::ScenePathSurface& surface,
+             const renderer::detail::DepthFilteredClosureMixture& closures,
+             const renderer::TransportSpectrum& beta, const renderer::OrthonormalFrame& frame,
+             const renderer::Vector3 outgoing_world,
              const renderer::BounceSampleDimensions& dimensions,
              const renderer::SampleStream& sample_stream, const renderer::Ray& path_ray) const {
-        if (is_black(beta) || is_black(surface.reflection().reflectance())) {
+        if (is_black(beta)) {
+            return renderer::TransportSpectrum{};
+        }
+        auto all_black = true;
+        for (auto index = std::size_t{}; index < closures.size(); ++index) {
+            all_black = all_black && is_black(closures.active_closure(index).weight);
+        }
+        if (all_black) {
             return renderer::TransportSpectrum{};
         }
 
@@ -162,8 +187,32 @@ class SceneMisDirectLighting final {
 
         const auto outgoing_local = frame.to_local(outgoing_world);
         const auto incoming_local = frame.to_local((**incident).direction_to_light());
-        if (!(outgoing_local.z > 0.0F) || !(incoming_local.z > 0.0F)) {
+        if (outgoing_local.z == 0.0F || incoming_local.z == 0.0F) {
             return renderer::TransportSpectrum{};
+        }
+        auto singleton_lambertian = std::optional<renderer::LambertianReflection>{};
+        auto bsdf_value = renderer::TransportSpectrum{};
+        if (closures.size() == 1U &&
+            closures.active_closure(0U).kind == renderer::ClosureKind::lambertian_reflection) {
+            const auto model =
+                renderer::LambertianReflection::create(closures.active_closure(0U).weight);
+            if (!model) {
+                return std::unexpected(model.error());
+            }
+            if (is_black(model->reflectance())) {
+                return renderer::TransportSpectrum{};
+            }
+            singleton_lambertian = *model;
+        } else {
+            const auto evaluated =
+                closures.eval(outgoing_local, incoming_local, renderer::TransportMode::radiance);
+            if (!evaluated) {
+                return std::unexpected(evaluated.error());
+            }
+            if (is_black(*evaluated)) {
+                return renderer::TransportSpectrum{};
+            }
+            bsdf_value = *evaluated;
         }
         const auto correction = renderer::shading_normal_correction(
             surface.geometric_normal(), surface.shading_normal(), outgoing_world,
@@ -178,7 +227,8 @@ class SceneMisDirectLighting final {
         auto weight = renderer::TransportScalar{1};
         const auto conditional_probability = (**incident).probability();
         if (conditional_probability.measure == renderer::ProbabilityMeasure::solid_angle) {
-            const auto bsdf_probability = surface.reflection().pdf(outgoing_local, incoming_local);
+            const auto bsdf_probability =
+                closures.pdf(outgoing_local, incoming_local, renderer::TransportMode::radiance);
             if (!bsdf_probability) {
                 return std::unexpected(bsdf_probability.error());
             }
@@ -209,9 +259,14 @@ class SceneMisDirectLighting final {
         if (!transmittance) {
             return std::unexpected(transmittance.error());
         }
-        const auto evaluated = renderer::evaluate_lambertian_direct_lighting(
-            beta, surface.reflection(), frame, outgoing_world, selection->probability(), **incident,
-            *transmittance, weight);
+        const auto evaluated =
+            singleton_lambertian
+                ? renderer::evaluate_lambertian_direct_lighting(
+                      beta, *singleton_lambertian, frame, outgoing_world, selection->probability(),
+                      **incident, *transmittance, weight)
+                : renderer::evaluate_bsdf_direct_lighting(
+                      beta, bsdf_value, std::abs(incoming_local.z), selection->probability(),
+                      **incident, *transmittance, weight);
         if (!evaluated) {
             return std::unexpected(evaluated.error());
         }
@@ -301,7 +356,19 @@ class SceneMisDirectLighting final {
 
     [[nodiscard]] core::Status record_bsdf_sample(const detail::ScenePathSurface& surface,
                                                   const renderer::ProbabilityDensity probability,
-                                                  const renderer::Vector3 incoming_world) {
+                                                  const renderer::Vector3 incoming_world,
+                                                  const renderer::ScatteringLobe lobes) {
+        if (renderer::is_delta_surface_scattering_event(lobes)) {
+            if (probability.measure != renderer::DeltaBsdfProbabilityMeasure ||
+                !std::isfinite(probability.value) || !(probability.value > 0.0F) ||
+                probability.value > 1.0F) {
+                return std::unexpected(scene_mis_error(
+                    core::StatusCode::incompatible,
+                    "A delta MIS continuation requires a positive discrete BSDF mass."));
+            }
+            previous_bsdf_sample_.reset();
+            return {};
+        }
         if (probability.measure != renderer::ProbabilityMeasure::solid_angle ||
             !std::isfinite(probability.value) || !(probability.value > 0.0F)) {
             return std::unexpected(scene_mis_error(
@@ -500,7 +567,7 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
     auto radiance = initial_state.accumulated_radiance();
     auto depth = initial_state.depth();
     auto depth_counters = initial_state.depth_counters();
-    const auto eta_scale = initial_state.eta_scale();
+    auto eta_scale = initial_state.eta_scale();
     const auto wavelengths = initial_state.wavelengths();
     auto delta_flags = initial_state.delta_flags();
     const auto current_medium = initial_state.current_medium();
@@ -551,39 +618,74 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
         }
         radiance = *accumulated;
 
-        constexpr auto diffuse_reflection =
-            renderer::ScatteringLobe::diffuse | renderer::ScatteringLobe::reflection;
-        const auto depth_event =
-            renderer::evaluate_path_depth_event(depth_limits, depth_counters, diffuse_reflection);
-        if (!depth_event) {
-            return std::unexpected(depth_event.error());
-        }
-        if (!depth_event->accepted()) {
-            return finish(renderer::BsdfOnlyPathTermination::depth_limit,
-                          depth_event->blocked_limits);
-        }
         if (renderer::bsdf_only_path_loop_detail::zero_spectrum(beta)) {
             return finish(renderer::BsdfOnlyPathTermination::zero_throughput,
                           renderer::ScatteringLobe::none);
         }
 
-        const auto frame = renderer::OrthonormalFrame::from_normal(surface.shading_normal());
-        if (!frame) {
-            return std::unexpected(frame.error());
+        const auto filtered_closures = renderer::detail::DepthFilteredClosureMixture::create(
+            surface.closures(), depth_limits, depth_counters);
+        if (!filtered_closures) {
+            return std::unexpected(filtered_closures.error());
         }
+        if (filtered_closures->empty()) {
+            if (filtered_closures->source_empty()) {
+                return finish(renderer::BsdfOnlyPathTermination::outside_bsdf_support,
+                              renderer::ScatteringLobe::none);
+            }
+            return finish(renderer::BsdfOnlyPathTermination::depth_limit,
+                          filtered_closures->blocked_lobes());
+        }
+
+        const auto& frame = surface.closure_frame();
         const auto outgoing_world =
             renderer::bsdf_only_path_loop_detail::robust_unit_direction(-ray.direction());
         if (!outgoing_world) {
             return std::unexpected(outgoing_world.error());
         }
-        const auto outgoing_local = frame->to_local(*outgoing_world);
+        const auto outgoing_local = frame.to_local(*outgoing_world);
 
         const auto dimensions = renderer::sample_dimensions_for_bounce(depth);
         if (!dimensions) {
             return std::unexpected(dimensions.error());
         }
-        const auto direct = direct_lighting.estimate(surface, beta, *frame, *outgoing_world,
-                                                     *dimensions, sample_stream, ray);
+        const auto canonical_sample = renderer::Point2{
+            .x = sample_stream.sample_1d(dimensions->bsdf_u),
+            .y = sample_stream.sample_1d(dimensions->bsdf_v),
+        };
+        const auto sampled = filtered_closures->sample(
+            outgoing_local, sample_stream.sample_1d(dimensions->bsdf_component), canonical_sample,
+            renderer::TransportMode::radiance);
+        if (!sampled) {
+            return std::unexpected(sampled.error());
+        }
+        auto depth_event = renderer::PathDepthEventResult{};
+        if (*sampled) {
+            const auto& candidate = **sampled;
+            if (!renderer::is_valid_surface_scattering_event(candidate.lobes) ||
+                !renderer::bsdf_only_path_loop_detail::finite_non_negative(candidate.value) ||
+                !std::isfinite(candidate.probability.value) ||
+                !(candidate.probability.value > 0.0F) || candidate.incoming_local.z == 0.0F) {
+                return std::unexpected(scene_mis_error(
+                    core::StatusCode::invalid_argument,
+                    "The closure mixture returned an invalid MIS continuation sample."));
+            }
+            const auto evaluated_depth =
+                renderer::evaluate_path_depth_event(depth_limits, depth_counters, candidate.lobes);
+            if (!evaluated_depth) {
+                return std::unexpected(evaluated_depth.error());
+            }
+            if (!evaluated_depth->accepted()) {
+                return std::unexpected(scene_mis_error(
+                    core::StatusCode::internal_error,
+                    "A depth-filtered closure selected a blocked MIS continuation event."));
+            }
+            depth_event = *evaluated_depth;
+        }
+
+        const auto direct =
+            direct_lighting.estimate(surface, *filtered_closures, beta, frame, *outgoing_world,
+                                     *dimensions, sample_stream, ray);
         if (!direct) {
             return std::unexpected(direct.error());
         }
@@ -594,30 +696,14 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
         }
         radiance = *accumulated_direct;
 
-        const auto canonical_sample = renderer::Point2{
-            .x = sample_stream.sample_1d(dimensions->bsdf_u),
-            .y = sample_stream.sample_1d(dimensions->bsdf_v),
-        };
-        const auto sampled = surface.reflection().sample(outgoing_local, canonical_sample);
-        if (!sampled) {
-            return std::unexpected(sampled.error());
-        }
         if (!*sampled) {
             return finish(renderer::BsdfOnlyPathTermination::outside_bsdf_support,
                           renderer::ScatteringLobe::none);
         }
-
         const auto& bsdf_sample = **sampled;
-        if (!renderer::bsdf_only_path_loop_detail::finite_non_negative(bsdf_sample.value) ||
-            bsdf_sample.probability.measure != renderer::ContinuousBsdfProbabilityMeasure ||
-            !std::isfinite(bsdf_sample.probability.value) ||
-            !(bsdf_sample.probability.value > 0.0F) || !(bsdf_sample.incoming_local.z > 0.0F)) {
-            return std::unexpected(scene_mis_error(
-                core::StatusCode::invalid_argument,
-                "The Lambertian BSDF returned an invalid MIS continuation sample."));
-        }
+
         const auto incoming_world = renderer::bsdf_only_path_loop_detail::robust_unit_direction(
-            frame->to_world(bsdf_sample.incoming_local));
+            frame.to_world(bsdf_sample.incoming_local));
         if (!incoming_world) {
             return std::unexpected(incoming_world.error());
         }
@@ -631,23 +717,22 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
             return finish(renderer::BsdfOnlyPathTermination::outside_bsdf_support,
                           renderer::ScatteringLobe::none);
         }
-        if (*correction != 1.0F) {
-            return std::unexpected(scene_mis_error(
-                core::StatusCode::invalid_argument,
-                "A radiance MIS path received a non-unit shading-normal correction."));
-        }
-        const auto updated_beta = renderer::bsdf_only_path_loop_detail::checked_product(
-            beta, surface.reflection().reflectance(),
-            "MIS Lambertian throughput is not representable.");
+        const auto updated_beta = renderer::bsdf_only_path_loop_detail::update_closure_throughput(
+            beta, bsdf_sample, *correction, *filtered_closures);
         if (!updated_beta) {
             return std::unexpected(updated_beta.error());
         }
 
-        const auto next_depth = renderer::path_depth_total(depth_event->counters);
+        const auto next_depth = renderer::path_depth_total(depth_event.counters);
         if (!next_depth) {
             return std::unexpected(next_depth.error());
         }
-        constexpr auto next_delta_flags = renderer::PathDeltaFlags::any_non_delta_bounces;
+        const auto next_eta_scale = eta_scale * bsdf_sample.eta_scale_multiplier;
+        if (!std::isfinite(next_eta_scale) || !(next_eta_scale > 0.0F)) {
+            return std::unexpected(
+                scene_mis_error(core::StatusCode::resource_exhausted,
+                                "A closure eta-scale update is not representable."));
+        }
         const auto origin =
             renderer::offset_ray_origin(surface.position(), surface.position_error(),
                                         surface.geometric_normal(), *incoming_world);
@@ -666,16 +751,17 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
         if (!next_ray) {
             return std::unexpected(next_ray.error());
         }
-        const auto recorded =
-            direct_lighting.record_bsdf_sample(surface, bsdf_sample.probability, *incoming_world);
+        const auto recorded = direct_lighting.record_bsdf_sample(
+            surface, bsdf_sample.probability, *incoming_world, bsdf_sample.lobes);
         if (!recorded) {
             return std::unexpected(recorded.error());
         }
 
         beta = *updated_beta;
         depth = *next_depth;
-        depth_counters = depth_event->counters;
-        delta_flags = next_delta_flags;
+        depth_counters = depth_event.counters;
+        eta_scale = next_eta_scale;
+        delta_flags = next_delta_flags(delta_flags, bsdf_sample.lobes);
         ray = *next_ray;
         if (renderer::bsdf_only_path_loop_detail::zero_spectrum(beta)) {
             return finish(renderer::BsdfOnlyPathTermination::zero_throughput,

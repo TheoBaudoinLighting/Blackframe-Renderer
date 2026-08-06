@@ -38,6 +38,11 @@ inline constexpr auto MaximumExpectedMse = renderer::ReferenceScalar{1.0e-10};
 inline constexpr auto MaximumExpectedRmse = renderer::ReferenceScalar{1.0e-5};
 inline constexpr auto MinimumExpectedPsnr = renderer::ReferenceScalar{80};
 
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 [[nodiscard]] core::Error integration_error(const char* const message) {
     return core::Error{
         .code = core::StatusCode::invalid_argument,
@@ -191,7 +196,8 @@ make_cornell_frame_scene(const cornell::CornellImageScene<renderer::TransportSca
             .spectral =
                 SceneSpectralMaterial{
                     .wavelengths = first.wavelengths(),
-                    .reflectance = first.reflection().reflectance(),
+                    .closure_mixture =
+                        require_lambertian_scene_closure(first.reflection().reflectance()),
                     .emitted_radiance = first.emission().radiance(),
                 },
         });

@@ -27,7 +27,7 @@ namespace column = xpu::shared::scene_soa_column;
 using core::StatusCode;
 using xpu::shared::SceneSoaHeader;
 
-inline constexpr std::uint64_t FrozenRichSceneHash = 0x11460E65A124D659ULL;
+inline constexpr std::uint64_t FrozenRichSceneHash = 0x0D31C3D2420A23DBULL;
 
 [[nodiscard]] testing::AssertionResult select_test_device() {
     int device_count = 0;
@@ -95,10 +95,43 @@ inline constexpr std::uint64_t FrozenRichSceneHash = 0x11460E65A124D659ULL;
 
 [[nodiscard]] SceneSpectralMaterial make_material(const renderer::SampledWavelengths wavelengths,
                                                   const renderer::TransportSpectrum reflectance,
-                                                  const renderer::TransportSpectrum emission) {
+                                                  const renderer::TransportSpectrum emission,
+                                                  const bool add_rough_conductor) {
+    auto closures = renderer::ClosureSet{};
+    if (closures.append_lambertian_reflection(reflectance) !=
+        renderer::ClosureAppendStatus::appended) {
+        throw std::runtime_error{"Failed to build the test Lambertian closure."};
+    }
+
+    auto probabilities = std::array<renderer::TransportScalar, 2U>{1.0F, 0.0F};
+    auto probability_count = std::size_t{1};
+    auto frame_mode = SceneClosureFrameMode::shading_normal;
+    auto tangent_rotation_radians = 0.25F;
+    if (add_rough_conductor) {
+        const auto coefficient = renderer::TransportSpectrum{.values = {0.2F, 0.3F, 0.4F, 0.5F}};
+        const auto relative_eta = renderer::TransportSpectrum{.values = {0.25F, 0.5F, 1.0F, 1.5F}};
+        const auto relative_k = renderer::TransportSpectrum{.values = {3.0F, 2.5F, 2.0F, 1.5F}};
+        if (closures.append_rough_conductor_reflection(coefficient, relative_eta, relative_k, 0.2F,
+                                                       0.7F) !=
+            renderer::ClosureAppendStatus::appended) {
+            throw std::runtime_error{"Failed to build the test conductor closure."};
+        }
+        probabilities = {0.25F, 0.75F};
+        probability_count = probabilities.size();
+        frame_mode = SceneClosureFrameMode::surface_tangent;
+        tangent_rotation_radians = -0.375F;
+    }
+
+    const auto closure_mixture = SceneClosureMixture::create(
+        std::move(closures),
+        std::span<const renderer::TransportScalar>{probabilities}.first(probability_count),
+        frame_mode, tangent_rotation_radians);
+    if (!closure_mixture) {
+        throw std::runtime_error{closure_mixture.error().message};
+    }
     return SceneSpectralMaterial{
         .wavelengths = wavelengths,
-        .reflectance = reflectance,
+        .closure_mixture = *closure_mixture,
         .emitted_radiance = emission,
     };
 }
@@ -128,14 +161,14 @@ inline constexpr std::uint64_t FrozenRichSceneHash = 0x11460E65A124D659ULL;
                         .spectral = make_material(
                             wavelengths,
                             renderer::TransportSpectrum{.values = {0.15F, 0.25F, 0.35F, 0.45F}},
-                            renderer::TransportSpectrum{.values = {1.0F, 2.0F, 3.0F, 4.0F}}),
+                            renderer::TransportSpectrum{.values = {1.0F, 2.0F, 3.0F, 4.0F}}, true),
                     },
                     SceneMaterial{
                         .id = {.value = 0U},
                         .spectral = make_material(
                             wavelengths,
                             renderer::TransportSpectrum{.values = {0.65F, 0.55F, 0.45F, 0.35F}},
-                            renderer::TransportSpectrum{}),
+                            renderer::TransportSpectrum{}, false),
                     },
                 },
             .instances =
@@ -363,6 +396,49 @@ expected_punctual_spectrum(const ScenePunctualLight& light) {
     return std::get<SceneSpotLight>(light).on_axis_spectral_radiant_intensity;
 }
 
+TEST(CudaSceneSoAAbi, FreezesVersionTwoMaterialClosureColumns) {
+    EXPECT_EQ(xpu::shared::SceneSoaMagic, 0x32414F53464B4C42ULL);
+    EXPECT_EQ(xpu::shared::SceneSoaAbiMajor, 2U);
+    EXPECT_EQ(xpu::shared::SceneSoaAbiMinor, 0U);
+    EXPECT_EQ(xpu::shared::SceneSoaClosureParameterScalarCount, 10U);
+    EXPECT_EQ(sizeof(SceneSoaHeader), 4000U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, closure_count), 80U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, columns), 120U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, reserved), 3960U);
+
+    EXPECT_EQ(column::material_closure_offset, 31U);
+    EXPECT_EQ(column::material_closure_count, 32U);
+    EXPECT_EQ(column::material_closure_frame_mode, 33U);
+    EXPECT_EQ(column::material_closure_tangent_rotation_radians, 34U);
+    EXPECT_EQ(column::material_emitted_radiance, 35U);
+    EXPECT_EQ(column::closure_kind, 39U);
+    EXPECT_EQ(column::closure_lobes, 40U);
+    EXPECT_EQ(column::closure_weight, 41U);
+    EXPECT_EQ(column::closure_parameters, 45U);
+    EXPECT_EQ(column::closure_probability, 55U);
+    EXPECT_EQ(column::instance_id, 56U);
+    EXPECT_EQ(column::count, 160U);
+
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_closure_offset),
+              sizeof(std::uint64_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_closure_count),
+              sizeof(std::uint64_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_closure_frame_mode),
+              sizeof(std::uint8_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(
+                  column::material_closure_tangent_rotation_radians),
+              sizeof(float));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::closure_kind),
+              sizeof(std::uint32_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::closure_lobes),
+              sizeof(std::uint32_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::closure_weight), sizeof(float));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::closure_parameters),
+              sizeof(float));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::closure_probability),
+              sizeof(float));
+}
+
 TEST(CudaSceneSoAAbi, RejectsIncompatibleAndMalformedHeaders) {
     auto header = SceneSoaHeader{};
     header.magic = xpu::shared::SceneSoaMagic;
@@ -379,9 +455,13 @@ TEST(CudaSceneSoAAbi, RejectsIncompatibleAndMalformedHeaders) {
               xpu::shared::SceneSoaHeaderValidationStatus::valid);
 
     auto invalid = header;
-    invalid.abi_major = 2U;
+    invalid.abi_major = 1U;
     EXPECT_EQ(xpu::shared::validate_scene_soa_header(invalid),
               xpu::shared::SceneSoaHeaderValidationStatus::incompatible_version);
+    invalid = header;
+    invalid.reserved[2] = 1U;
+    EXPECT_EQ(xpu::shared::validate_scene_soa_header(invalid),
+              xpu::shared::SceneSoaHeaderValidationStatus::nonzero_reserved);
     invalid = header;
     invalid.environment_count = 2U;
     EXPECT_EQ(xpu::shared::validate_scene_soa_header(invalid),
@@ -402,6 +482,17 @@ TEST(CudaSceneSoAAbi, RejectsIncompatibleAndMalformedHeaders) {
     overflowing.columns[column::geometry_id] = {
         .offset_bytes = 0U,
         .element_count = 1U,
+        .element_size = sizeof(std::uint32_t),
+    };
+    EXPECT_EQ(xpu::shared::validate_scene_soa_header(overflowing),
+              xpu::shared::SceneSoaHeaderValidationStatus::size_overflow);
+
+    overflowing = header;
+    overflowing.closure_count =
+        std::numeric_limits<std::uint64_t>::max() / sizeof(std::uint32_t) + std::uint64_t{1};
+    overflowing.columns[column::closure_kind] = {
+        .offset_bytes = sizeof(SceneSoaHeader),
+        .element_count = overflowing.closure_count,
         .element_size = sizeof(std::uint32_t),
     };
     EXPECT_EQ(xpu::shared::validate_scene_soa_header(overflowing),
@@ -539,15 +630,73 @@ TEST(CudaSceneSoA, MapsEveryCpuFieldToDeviceColumnsBitForBit) {
                                            value.spectral->wavelengths[lane].probability.measure)
                                      : std::uint8_t{0};
                       }));
-        expect_column(bytes, header, column::material_reflectance + lane,
-                      projected<float>(materials, [lane](const auto& value) {
-                          return value.spectral ? value.spectral->reflectance[lane] : 0.0F;
-                      }));
         expect_column(bytes, header, column::material_emitted_radiance + lane,
                       projected<float>(materials, [lane](const auto& value) {
                           return value.spectral ? value.spectral->emitted_radiance[lane] : 0.0F;
                       }));
     }
+
+    auto material_closure_offsets = std::vector<std::uint64_t>{};
+    auto material_closure_counts = std::vector<std::uint64_t>{};
+    auto material_closure_frame_modes = std::vector<std::uint8_t>{};
+    auto material_closure_rotations = std::vector<float>{};
+    auto closure_kinds = std::vector<std::uint32_t>{};
+    auto closure_lobes = std::vector<std::uint32_t>{};
+    auto closure_weights = std::array<std::vector<float>, renderer::TransportSpectrumSampleCount>{};
+    auto closure_parameters =
+        std::array<std::vector<float>, renderer::ClosureParameterScalarCount>{};
+    auto closure_probabilities = std::vector<float>{};
+    auto closure_offset = std::uint64_t{0};
+    for (const auto& material : materials) {
+        material_closure_offsets.push_back(closure_offset);
+        if (!material.spectral) {
+            material_closure_counts.push_back(0U);
+            material_closure_frame_modes.push_back(0U);
+            material_closure_rotations.push_back(0.0F);
+            continue;
+        }
+
+        const auto& mixture = material.spectral->closure_mixture;
+        const auto closures = mixture.closures.closures();
+        material_closure_counts.push_back(closures.size());
+        material_closure_frame_modes.push_back(static_cast<std::uint8_t>(mixture.frame_mode));
+        material_closure_rotations.push_back(mixture.tangent_rotation_radians);
+        closure_offset += closures.size();
+        for (auto closure_index = std::size_t{}; closure_index < closures.size(); ++closure_index) {
+            const auto& closure = closures[closure_index];
+            closure_kinds.push_back(static_cast<std::uint32_t>(closure.kind));
+            closure_lobes.push_back(renderer::scattering_lobe_bits(closure.lobes));
+            for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+                closure_weights[lane].push_back(closure.weight[lane]);
+            }
+            for (auto parameter = std::size_t{}; parameter < renderer::ClosureParameterScalarCount;
+                 ++parameter) {
+                closure_parameters[parameter].push_back(closure.parameters[parameter]);
+            }
+            closure_probabilities.push_back(mixture.component_probabilities[closure_index]);
+        }
+        for (auto tail = closures.size(); tail < mixture.component_probabilities.size(); ++tail) {
+            EXPECT_EQ(mixture.component_probabilities[tail], 0.0F)
+                << "material " << material.id.value << ", inactive probability " << tail;
+        }
+    }
+    EXPECT_EQ(header.closure_count, closure_offset);
+    expect_column(bytes, header, column::material_closure_offset, material_closure_offsets);
+    expect_column(bytes, header, column::material_closure_count, material_closure_counts);
+    expect_column(bytes, header, column::material_closure_frame_mode, material_closure_frame_modes);
+    expect_column(bytes, header, column::material_closure_tangent_rotation_radians,
+                  material_closure_rotations);
+    expect_column(bytes, header, column::closure_kind, closure_kinds);
+    expect_column(bytes, header, column::closure_lobes, closure_lobes);
+    for (auto lane = std::uint32_t{0}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+        expect_column(bytes, header, column::closure_weight + lane, closure_weights[lane]);
+    }
+    for (auto parameter = std::uint32_t{0}; parameter < renderer::ClosureParameterScalarCount;
+         ++parameter) {
+        expect_column(bytes, header, column::closure_parameters + parameter,
+                      closure_parameters[parameter]);
+    }
+    expect_column(bytes, header, column::closure_probability, closure_probabilities);
 
     expect_column(
         bytes, header, column::instance_id,
@@ -731,7 +880,7 @@ TEST(CudaSceneSoA, SerializesAnEmptySceneAndRejectsAnInsufficientBudget) {
     EXPECT_NE(rejected.error().message.find("explicit device-memory budget"), std::string::npos);
 
     const auto incompatible =
-        CudaSceneSoA::upload(*rich_scene, CudaSceneSoAUploadOptions{.abi_major = 2U});
+        CudaSceneSoA::upload(*rich_scene, CudaSceneSoAUploadOptions{.abi_major = 1U});
     ASSERT_FALSE(incompatible);
     EXPECT_EQ(incompatible.error().code, StatusCode::incompatible);
 }
@@ -761,21 +910,36 @@ TEST(CudaSceneSoA, EncodesAbsentSpectralDataWithoutInventingAnEnvironment) {
     const auto header = read_header(bytes);
 
     EXPECT_EQ(header.environment_count, 0U);
+    EXPECT_EQ(header.closure_count, 0U);
     EXPECT_EQ(header.punctual_light_count, 0U);
     EXPECT_EQ(header.mesh_area_light_count, 0U);
     expect_column(bytes, header, column::material_spectral_present, std::vector<std::uint8_t>{0U});
+    expect_column(bytes, header, column::material_closure_offset, std::vector<std::uint64_t>{0U});
+    expect_column(bytes, header, column::material_closure_count, std::vector<std::uint64_t>{0U});
+    expect_column(bytes, header, column::material_closure_frame_mode,
+                  std::vector<std::uint8_t>{0U});
+    expect_column(bytes, header, column::material_closure_tangent_rotation_radians,
+                  std::vector{0.0F});
+    EXPECT_TRUE(read_column<std::uint32_t>(bytes, header, column::closure_kind).empty());
+    EXPECT_TRUE(read_column<std::uint32_t>(bytes, header, column::closure_lobes).empty());
+    EXPECT_TRUE(read_column<float>(bytes, header, column::closure_probability).empty());
     for (auto lane = std::uint32_t{0}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
         expect_column(bytes, header, column::material_wavelength_nanometers + lane,
                       std::vector{0.0F});
         expect_column(bytes, header, column::material_wavelength_pdf + lane, std::vector{0.0F});
         expect_column(bytes, header, column::material_wavelength_measure + lane,
                       std::vector<std::uint8_t>{0U});
-        expect_column(bytes, header, column::material_reflectance + lane, std::vector{0.0F});
         expect_column(bytes, header, column::material_emitted_radiance + lane, std::vector{0.0F});
+        EXPECT_TRUE(read_column<float>(bytes, header, column::closure_weight + lane).empty());
         EXPECT_TRUE(
             read_column<float>(bytes, header, column::environment_wavelength_nanometers + lane)
                 .empty());
         EXPECT_TRUE(read_column<float>(bytes, header, column::environment_radiance + lane).empty());
+    }
+    for (auto parameter = std::uint32_t{0}; parameter < renderer::ClosureParameterScalarCount;
+         ++parameter) {
+        EXPECT_TRUE(
+            read_column<float>(bytes, header, column::closure_parameters + parameter).empty());
     }
 }
 

@@ -7,7 +7,7 @@
 
 namespace blackframe::engine {
 
-// Traces the existing scalar Lambertian path loop and samples exactly one
+// Traces the scalar bounded-closure path loop and samples exactly one
 // punctual-light registry slot at every accepted non-delta surface vertex.
 // Point, directional, and spot lights are delta emitters that cannot also be
 // reached as emissive geometry, so this pre-MIS estimator remains disjoint

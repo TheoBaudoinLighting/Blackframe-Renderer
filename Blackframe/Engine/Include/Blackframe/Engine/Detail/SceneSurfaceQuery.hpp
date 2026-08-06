@@ -24,8 +24,12 @@ struct ScenePathSurface final {
         return surface.interaction.shading_normal();
     }
 
-    [[nodiscard]] const renderer::LambertianReflection& reflection() const noexcept {
-        return surface.reflection;
+    [[nodiscard]] const renderer::ClosureMixture& closures() const noexcept {
+        return surface.closures;
+    }
+
+    [[nodiscard]] const renderer::OrthonormalFrame& closure_frame() const noexcept {
+        return surface.closure_frame;
     }
 
     [[nodiscard]] const renderer::OneSidedSurfaceEmission& emission() const noexcept {

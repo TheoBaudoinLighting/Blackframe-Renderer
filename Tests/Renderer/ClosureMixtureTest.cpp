@@ -10,6 +10,7 @@
 #include <limits>
 #include <numbers>
 #include <span>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -681,6 +682,171 @@ TEST(ClosureMixtureTest, DispatchesRoughDielectricBranchesWithoutDoubleCountingF
     expect_rough_dielectric_dispatch<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_specular_delta_dispatch() {
+    const auto outgoing = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
+    constexpr auto canonical = Point2T<Scalar>{.x = Scalar{0.25}, .y = Scalar{0.75}};
+    const auto singleton_probability = std::array{Scalar{1}};
+
+    const auto reflectance = SpectrumFor<Scalar>{
+        .values = {Scalar{0.25}, Scalar{0.5}, Scalar{0.75}, Scalar{1}},
+    };
+    auto reflection_set = SetFor<Scalar>{};
+    ASSERT_EQ(reflection_set.append_specular_reflection(reflectance),
+              ClosureAppendStatus::appended);
+    const auto reflection = MixtureFor<Scalar>::create(reflection_set, singleton_probability);
+    const auto direct_reflection = SpecularReflectionT<Scalar>::create(reflectance);
+    ASSERT_TRUE(reflection.has_value());
+    ASSERT_TRUE(direct_reflection.has_value());
+    const auto direct_reflection_sample = direct_reflection->sample(outgoing);
+    const auto reflection_sample =
+        reflection->sample(outgoing, Scalar{0.5}, canonical, TransportMode::radiance);
+    ASSERT_TRUE(direct_reflection_sample.has_value());
+    ASSERT_TRUE(direct_reflection_sample->has_value());
+    ASSERT_TRUE(reflection_sample.has_value());
+    ASSERT_TRUE(reflection_sample->has_value());
+    EXPECT_EQ((**reflection_sample).incoming_local, (**direct_reflection_sample).incoming_local);
+    EXPECT_EQ((**reflection_sample).value, (**direct_reflection_sample).value);
+    EXPECT_EQ((**reflection_sample).probability.value, Scalar{1});
+    EXPECT_EQ((**reflection_sample).probability.measure, DeltaBsdfProbabilityMeasure);
+    EXPECT_EQ((**reflection_sample).lobes, ScatteringLobe::specular | ScatteringLobe::reflection);
+    EXPECT_EQ((**reflection_sample).eta_scale_multiplier, Scalar{1});
+    const auto reflection_eval =
+        reflection->eval(outgoing, (**reflection_sample).incoming_local, TransportMode::radiance);
+    const auto reflection_pdf =
+        reflection->pdf(outgoing, (**reflection_sample).incoming_local, TransportMode::radiance);
+    ASSERT_TRUE(reflection_eval.has_value());
+    ASSERT_TRUE(reflection_pdf.has_value());
+    EXPECT_EQ(*reflection_eval, SpectrumFor<Scalar>{});
+    EXPECT_EQ(reflection_pdf->value, Scalar{0});
+    EXPECT_EQ(reflection_pdf->measure, ContinuousBsdfProbabilityMeasure);
+
+    const auto transmittance = SpectrumFor<Scalar>{
+        .values = {Scalar{1}, Scalar{0.75}, Scalar{0.5}, Scalar{0.25}},
+    };
+    constexpr auto exterior_eta = Scalar{1};
+    constexpr auto interior_eta = Scalar{1.5};
+    auto transmission_set = SetFor<Scalar>{};
+    ASSERT_EQ(
+        transmission_set.append_specular_transmission(transmittance, exterior_eta, interior_eta),
+        ClosureAppendStatus::appended);
+    const auto transmission = MixtureFor<Scalar>::create(transmission_set, singleton_probability);
+    const auto direct_transmission =
+        SpecularTransmissionT<Scalar>::create(transmittance, exterior_eta, interior_eta);
+    ASSERT_TRUE(transmission.has_value());
+    ASSERT_TRUE(direct_transmission.has_value());
+    const auto direct_transmission_sample =
+        direct_transmission->sample(outgoing, TransportMode::radiance);
+    const auto transmission_sample =
+        transmission->sample(outgoing, Scalar{0.5}, canonical, TransportMode::radiance);
+    ASSERT_TRUE(direct_transmission_sample.has_value());
+    ASSERT_TRUE(direct_transmission_sample->has_value());
+    ASSERT_TRUE(transmission_sample.has_value());
+    ASSERT_TRUE(transmission_sample->has_value());
+    EXPECT_EQ((**transmission_sample).incoming_local,
+              (**direct_transmission_sample).incoming_local);
+    EXPECT_EQ((**transmission_sample).value, (**direct_transmission_sample).value);
+    EXPECT_EQ((**transmission_sample).probability.value, Scalar{1});
+    EXPECT_EQ((**transmission_sample).probability.measure, DeltaBsdfProbabilityMeasure);
+    EXPECT_EQ((**transmission_sample).lobes,
+              ScatteringLobe::specular | ScatteringLobe::transmission);
+    EXPECT_EQ((**transmission_sample).eta_scale_multiplier,
+              (**direct_transmission_sample).eta_scale_multiplier);
+
+    const auto inside_outgoing = Vector3T<Scalar>{.x = Scalar{0.8}, .z = Scalar{-0.6}};
+    const auto tir =
+        transmission->sample(inside_outgoing, Scalar{0.5}, canonical, TransportMode::radiance);
+    ASSERT_TRUE(tir.has_value());
+    EXPECT_FALSE(tir->has_value());
+}
+
+TEST(ClosureMixtureTest, DispatchesSpecularDeltaClosuresWithTheirDiscreteMeasure) {
+    expect_specular_delta_dispatch<TransportScalar>();
+    expect_specular_delta_dispatch<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_continuous_and_delta_measures_stay_separate() {
+    const auto diffuse = constant_spectrum<Scalar>(Scalar{0.2});
+    const auto mirror = constant_spectrum<Scalar>(Scalar{0.8});
+    auto set = SetFor<Scalar>{};
+    ASSERT_EQ(set.append_lambertian_reflection(diffuse), ClosureAppendStatus::appended);
+    ASSERT_EQ(set.append_specular_reflection(mirror), ClosureAppendStatus::appended);
+    const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
+    const auto mixture = MixtureFor<Scalar>::create(set, probabilities);
+    const auto direct_diffuse = LambertianReflectionT<Scalar>::create(diffuse);
+    const auto direct_mirror = SpecularReflectionT<Scalar>::create(mirror);
+    ASSERT_TRUE(mixture.has_value());
+    ASSERT_TRUE(direct_diffuse.has_value());
+    ASSERT_TRUE(direct_mirror.has_value());
+
+    const auto outgoing = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
+    constexpr auto canonical = Point2T<Scalar>{.x = Scalar{0.25}, .y = Scalar{0.75}};
+    const auto continuous =
+        mixture->sample(outgoing, Scalar{0.125}, canonical, TransportMode::radiance);
+    ASSERT_TRUE(continuous.has_value());
+    ASSERT_TRUE(continuous->has_value());
+    const auto diffuse_value = direct_diffuse->eval(outgoing, (**continuous).incoming_local);
+    const auto diffuse_pdf = direct_diffuse->pdf(outgoing, (**continuous).incoming_local);
+    ASSERT_TRUE(diffuse_value.has_value());
+    ASSERT_TRUE(diffuse_pdf.has_value());
+    EXPECT_EQ((**continuous).value, *diffuse_value);
+    EXPECT_NEAR(static_cast<double>((**continuous).probability.value),
+                static_cast<double>(Scalar{0.25} * diffuse_pdf->value), AnalyticTolerance<Scalar>);
+    EXPECT_EQ((**continuous).probability.measure, ContinuousBsdfProbabilityMeasure);
+
+    const auto discrete =
+        mixture->sample(outgoing, Scalar{0.625}, canonical, TransportMode::radiance);
+    const auto direct_discrete = direct_mirror->sample(outgoing);
+    ASSERT_TRUE(discrete.has_value());
+    ASSERT_TRUE(discrete->has_value());
+    ASSERT_TRUE(direct_discrete.has_value());
+    ASSERT_TRUE(direct_discrete->has_value());
+    EXPECT_EQ((**discrete).selected_closure, 1U);
+    EXPECT_EQ((**discrete).selection_probability.value, Scalar{0.75});
+    EXPECT_EQ((**discrete).incoming_local, (**direct_discrete).incoming_local);
+    EXPECT_EQ((**discrete).value, (**direct_discrete).value);
+    EXPECT_EQ((**discrete).probability.value, Scalar{0.75});
+    EXPECT_EQ((**discrete).probability.measure, DeltaBsdfProbabilityMeasure);
+}
+
+TEST(ClosureMixtureTest, KeepsContinuousDensitiesAndDiscreteMassesInSeparateMeasures) {
+    expect_continuous_and_delta_measures_stay_separate<TransportScalar>();
+    expect_continuous_and_delta_measures_stay_separate<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_coincident_delta_atoms_are_aggregated() {
+    const auto first = constant_spectrum<Scalar>(Scalar{0.25});
+    const auto second = constant_spectrum<Scalar>(Scalar{0.5});
+    auto set = SetFor<Scalar>{};
+    ASSERT_EQ(set.append_specular_reflection(first), ClosureAppendStatus::appended);
+    ASSERT_EQ(set.append_specular_reflection(second), ClosureAppendStatus::appended);
+    const auto probabilities = std::array{Scalar{0.25}, Scalar{0.75}};
+    const auto mixture = MixtureFor<Scalar>::create(set, probabilities);
+    ASSERT_TRUE(mixture.has_value());
+
+    const auto outgoing = Vector3T<Scalar>{.x = Scalar{0.6}, .z = Scalar{0.8}};
+    constexpr auto canonical = Point2T<Scalar>{.x = Scalar{0.25}, .y = Scalar{0.75}};
+    const auto expected_value = constant_spectrum<Scalar>(Scalar{0.75} / outgoing.z);
+    for (const auto& [component_sample, expected_index, expected_selection] : std::array{
+             std::tuple{Scalar{0.125}, std::uint32_t{0}, Scalar{0.25}},
+             std::tuple{Scalar{0.625}, std::uint32_t{1}, Scalar{0.75}},
+         }) {
+        const auto sampled =
+            mixture->sample(outgoing, component_sample, canonical, TransportMode::radiance);
+        ASSERT_TRUE(sampled.has_value());
+        ASSERT_TRUE(sampled->has_value());
+        EXPECT_EQ((**sampled).selected_closure, expected_index);
+        EXPECT_EQ((**sampled).selection_probability.value, expected_selection);
+        expect_spectrum_near((**sampled).value, expected_value);
+        EXPECT_EQ((**sampled).probability.value, Scalar{1});
+        EXPECT_EQ((**sampled).probability.measure, DeltaBsdfProbabilityMeasure);
+    }
+}
+
+TEST(ClosureMixtureTest, AggregatesCoincidentDeltaAtomsAndWeightsSelectionExactlyOnce) {
+    expect_coincident_delta_atoms_are_aggregated<TransportScalar>();
+    expect_coincident_delta_atoms_are_aggregated<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void expect_two_component_mixture() {
     const auto first = SpectrumFor<Scalar>{
         .values = {Scalar{0.125}, Scalar{0.25}, Scalar{0.375}, Scalar{0.5}},
@@ -1035,6 +1201,39 @@ template <SpectrumScalar Scalar> void expect_corrupt_records_are_rejected() {
     const auto dielectric_nonzero_reserved = overwrite_bytes(
         dielectric_set, set_storage_offset + parameter_offset + 4U * sizeof(Scalar), Scalar{1});
     expect_invalid(MixtureFor<Scalar>::create(dielectric_nonzero_reserved, probability));
+
+    auto specular_reflection_set = SetFor<Scalar>{};
+    ASSERT_EQ(
+        specular_reflection_set.append_specular_reflection(constant_spectrum<Scalar>(Scalar{0.5})),
+        ClosureAppendStatus::appended);
+    const auto specular_reflection_incompatible_lobes =
+        overwrite_bytes(specular_reflection_set, set_storage_offset + std::size_t{4},
+                        ScatteringLobe::glossy | ScatteringLobe::reflection);
+    expect_invalid(MixtureFor<Scalar>::create(specular_reflection_incompatible_lobes, probability));
+    const auto specular_reflection_nonzero_reserved =
+        overwrite_bytes(specular_reflection_set, set_storage_offset + parameter_offset, Scalar{1});
+    expect_invalid(MixtureFor<Scalar>::create(specular_reflection_nonzero_reserved, probability));
+
+    auto specular_transmission_set = SetFor<Scalar>{};
+    ASSERT_EQ(specular_transmission_set.append_specular_transmission(
+                  constant_spectrum<Scalar>(Scalar{0.5}), Scalar{1}, Scalar{1.5}),
+              ClosureAppendStatus::appended);
+    const auto specular_transmission_incompatible_lobes =
+        overwrite_bytes(specular_transmission_set, set_storage_offset + std::size_t{4},
+                        ScatteringLobe::specular | ScatteringLobe::reflection);
+    expect_invalid(
+        MixtureFor<Scalar>::create(specular_transmission_incompatible_lobes, probability));
+    const auto invalid_specular_exterior_eta = overwrite_bytes(
+        specular_transmission_set, set_storage_offset + parameter_offset, Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_specular_exterior_eta, probability));
+    const auto invalid_specular_interior_eta =
+        overwrite_bytes(specular_transmission_set,
+                        set_storage_offset + parameter_offset + sizeof(Scalar), Scalar{0});
+    expect_invalid(MixtureFor<Scalar>::create(invalid_specular_interior_eta, probability));
+    const auto specular_transmission_nonzero_reserved =
+        overwrite_bytes(specular_transmission_set,
+                        set_storage_offset + parameter_offset + 2U * sizeof(Scalar), Scalar{1});
+    expect_invalid(MixtureFor<Scalar>::create(specular_transmission_nonzero_reserved, probability));
 }
 
 TEST(ClosureMixtureTest, RejectsUnsupportedOrCorruptRecordsWithoutDispatchFallback) {

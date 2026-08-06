@@ -49,7 +49,7 @@ enum class WavefrontLanePhase : std::uint32_t {
 enum class WavefrontTermination : std::uint32_t {
     none = 0U,
     escaped_environment = 1U,
-    diffuse_depth_limit = 2U,
+    depth_limit = 2U,
     zero_throughput = 3U,
     outside_bsdf_support = 4U,
     russian_roulette = 5U,
@@ -66,6 +66,11 @@ enum class WavefrontStageKind : std::uint32_t {
     shadow_gather = 7U,
     shadow_process = 8U,
     continuation = 9U,
+};
+
+enum class WavefrontPendingBsdfEncoding : std::uint32_t {
+    value = 0U,
+    lambertian_coefficient = 1U,
 };
 
 inline constexpr std::uint16_t WavefrontTransportConfigAbiMajor = 1U;
@@ -134,15 +139,16 @@ struct alignas(16) WavefrontLaneControl final {
 struct alignas(16) WavefrontPendingShadow final {
     shared::TransportRay ray{};
     shared::TransportSpectrum beta{};
-    shared::TransportSpectrum reflectance{};
+    shared::TransportSpectrum bsdf_factor{};
     shared::TransportSpectrum incident_radiance{};
-    float receiver_cosine{};
+    float absolute_incoming_cosine{};
     float estimator_weight{};
     float selection_probability{};
     float conditional_probability{};
+    float shading_normal_correction{};
     std::uint32_t continuation_pending{};
     std::uint32_t termination{};
-    std::uint32_t reserved[2U]{};
+    std::uint32_t bsdf_encoding{};
 };
 
 // The previous continuous BSDF sample is backend-local MIS state. It deliberately stays outside
@@ -205,6 +211,7 @@ static_assert(sizeof(WavefrontStageRoute) == 4U);
 static_assert(sizeof(WavefrontLanePhase) == 4U);
 static_assert(sizeof(WavefrontTermination) == 4U);
 static_assert(sizeof(WavefrontStageKind) == 4U);
+static_assert(sizeof(WavefrontPendingBsdfEncoding) == 4U);
 static_assert(sizeof(WavefrontTransportConfig) == 64U);
 static_assert(alignof(WavefrontTransportConfig) == 16U);
 static_assert(offsetof(WavefrontTransportConfig, abi_major) == 0U);
@@ -252,15 +259,16 @@ static_assert(sizeof(WavefrontPendingShadow) == 128U);
 static_assert(alignof(WavefrontPendingShadow) == 16U);
 static_assert(offsetof(WavefrontPendingShadow, ray) == 0U);
 static_assert(offsetof(WavefrontPendingShadow, beta) == 48U);
-static_assert(offsetof(WavefrontPendingShadow, reflectance) == 64U);
+static_assert(offsetof(WavefrontPendingShadow, bsdf_factor) == 64U);
 static_assert(offsetof(WavefrontPendingShadow, incident_radiance) == 80U);
-static_assert(offsetof(WavefrontPendingShadow, receiver_cosine) == 96U);
+static_assert(offsetof(WavefrontPendingShadow, absolute_incoming_cosine) == 96U);
 static_assert(offsetof(WavefrontPendingShadow, estimator_weight) == 100U);
 static_assert(offsetof(WavefrontPendingShadow, selection_probability) == 104U);
 static_assert(offsetof(WavefrontPendingShadow, conditional_probability) == 108U);
-static_assert(offsetof(WavefrontPendingShadow, continuation_pending) == 112U);
-static_assert(offsetof(WavefrontPendingShadow, termination) == 116U);
-static_assert(offsetof(WavefrontPendingShadow, reserved) == 120U);
+static_assert(offsetof(WavefrontPendingShadow, shading_normal_correction) == 112U);
+static_assert(offsetof(WavefrontPendingShadow, continuation_pending) == 116U);
+static_assert(offsetof(WavefrontPendingShadow, termination) == 120U);
+static_assert(offsetof(WavefrontPendingShadow, bsdf_encoding) == 124U);
 static_assert(sizeof(WavefrontPreviousBsdfSample) == 48U);
 static_assert(alignof(WavefrontPreviousBsdfSample) == 16U);
 static_assert(offsetof(WavefrontPreviousBsdfSample, context_x) == 0U);

@@ -17,6 +17,7 @@ add_library(
         Include/Blackframe/Renderer/CpuWavefrontScheduler.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
         Include/Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp
+        Include/Blackframe/Renderer/Detail/DepthFilteredClosureMixture.hpp
         Include/Blackframe/Renderer/Detail/PacketLightSpectrum.hpp
         Include/Blackframe/Renderer/Disk.hpp
         Include/Blackframe/Renderer/DisplayPsnr.hpp

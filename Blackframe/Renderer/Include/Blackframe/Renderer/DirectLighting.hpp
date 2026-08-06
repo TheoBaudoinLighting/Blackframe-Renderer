@@ -81,6 +81,86 @@ checked_product_quotient(const std::array<Scalar, NumeratorCount>& numerators,
 
 } // namespace direct_lighting_detail
 
+// Evaluates one sampled-light estimator from an already evaluated BSDF. This is the generic
+// closure path used by bounded mixtures; unlike the Lambertian convenience wrapper below it does
+// not assume a particular lobe or reconstruct its coefficient. The BSDF value excludes cosine and
+// probability terms, following TransportConventions.hpp.
+template <SpectrumScalar Scalar>
+[[nodiscard]] core::Result<LightSpectrumT<Scalar>> evaluate_bsdf_direct_lighting(
+    const LightSpectrumT<Scalar>& beta, const LightSpectrumT<Scalar>& bsdf_value,
+    const Scalar absolute_incoming_cosine,
+    const LightSelectionProbabilityT<Scalar> selection_probability,
+    const IncidentLightSampleT<Scalar>& incident_light, const LightSpectrumT<Scalar>& transmittance,
+    const Scalar estimator_weight = Scalar{1}) {
+    if (!direct_lighting_detail::finite_non_negative(beta) ||
+        !direct_lighting_detail::finite_non_negative(bsdf_value)) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "Direct-lighting throughput and BSDF values must be finite and non-negative."));
+    }
+    if (!direct_lighting_detail::finite_non_negative(transmittance)) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "Direct-lighting transmittance must be finite and lie in [0, 1]."));
+    }
+    for (const auto value : transmittance.values) {
+        if (value > Scalar{1}) {
+            return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+                "Direct-lighting transmittance must be finite and lie in [0, 1]."));
+        }
+    }
+    if (!std::isfinite(absolute_incoming_cosine) || absolute_incoming_cosine < Scalar{0} ||
+        absolute_incoming_cosine > Scalar{1}) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "A direct-lighting BSDF cosine must lie in [0, 1]."));
+    }
+    if (!std::isfinite(selection_probability.value()) ||
+        !(selection_probability.value() > Scalar{0}) || selection_probability.value() > Scalar{1}) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "A direct-lighting selection probability must lie in (0, 1]."));
+    }
+    if (!std::isfinite(estimator_weight) || estimator_weight < Scalar{0} ||
+        estimator_weight > Scalar{1}) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "A direct-lighting estimator weight must lie in [0, 1]."));
+    }
+
+    const auto conditional_probability = incident_light.probability();
+    if ((conditional_probability.measure != ProbabilityMeasure::solid_angle &&
+         conditional_probability.measure != ProbabilityMeasure::discrete) ||
+        !std::isfinite(conditional_probability.value) ||
+        !(conditional_probability.value > Scalar{0}) ||
+        (conditional_probability.measure == ProbabilityMeasure::discrete &&
+         conditional_probability.value > Scalar{1})) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "A direct-lighting conditional PDF must be positive and use solid-angle or discrete "
+            "measure."));
+    }
+    if (!direct_lighting_detail::finite_non_negative(incident_light.incident_radiance())) {
+        return std::unexpected(direct_lighting_detail::invalid_direct_lighting(
+            "Direct incident radiance must be finite and non-negative."));
+    }
+
+    auto result = LightSpectrumT<Scalar>{};
+    for (auto lane = std::size_t{}; lane < TransportSpectrumSampleCount; ++lane) {
+        const auto contribution =
+            estimator_weight == Scalar{1}
+                ? direct_lighting_detail::checked_product_quotient(
+                      std::array{beta[lane], bsdf_value[lane],
+                                 incident_light.incident_radiance()[lane], absolute_incoming_cosine,
+                                 transmittance[lane]},
+                      std::array{selection_probability.value(), conditional_probability.value})
+                : direct_lighting_detail::checked_product_quotient(
+                      std::array{beta[lane], bsdf_value[lane],
+                                 incident_light.incident_radiance()[lane], absolute_incoming_cosine,
+                                 transmittance[lane], estimator_weight},
+                      std::array{selection_probability.value(), conditional_probability.value});
+        if (!contribution) {
+            return std::unexpected(contribution.error());
+        }
+        result[lane] = *contribution;
+    }
+    return result;
+}
+
 // Evaluates one sampled-light estimator. The light selection probability is
 // discrete and the incident sample probability remains conditional on that
 // selection; both therefore appear exactly once in the denominator. The

@@ -490,7 +490,17 @@ validate_preview_semantics(const renderer::Film& film) {
         return std::unexpected(
             benchmark_error("The canonical Cornell sphere material must be spectral."));
     }
-    for (const auto reflectance : sphere_material->get().spectral->reflectance.values) {
+    const auto& sphere_closure_mixture = sphere_material->get().spectral->closure_mixture;
+    const auto sphere_closures = sphere_closure_mixture.closures.closures();
+    const auto sphere_component_probabilities =
+        sphere_closure_mixture.active_component_probabilities();
+    if (sphere_closures.size() != 1U || sphere_component_probabilities.size() != 1U ||
+        sphere_closures.front().kind != renderer::ClosureKind::lambertian_reflection ||
+        sphere_component_probabilities.front() != 1.0F) {
+        return std::unexpected(benchmark_error(
+            "The two canonical Cornell spheres must use one explicit Lambertian closure."));
+    }
+    for (const auto reflectance : sphere_closures.front().weight.values) {
         if (reflectance != 0.72F) {
             return std::unexpected(benchmark_error(
                 "The two canonical Cornell spheres must use the same white Lambertian closure."));

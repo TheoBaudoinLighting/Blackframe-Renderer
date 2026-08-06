@@ -1,5 +1,6 @@
 #include <Blackframe/XPU/CUDA/SmokeKernel.hpp>
 #include <Blackframe/XPU/CUDA/SmokeKernelPayload.hpp>
+#include <Blackframe/XPU/CUDA/TransportLobesDevice.cuh>
 #include <cstdint>
 #include <type_traits>
 

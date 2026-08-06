@@ -35,6 +35,8 @@ target_sources(
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SmokeKernelPayload.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportAbiProbe.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportDevice.cuh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportLobeProbe.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportLobesDevice.cuh"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueDevice.cuh"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontStageKernel.hpp"
@@ -60,6 +62,7 @@ add_library(
         Source/CudaSharedHeaderContract.cu
         Source/CudaSmokeKernel.cu
         Source/CudaTransportAbiProbe.cu
+        Source/CudaTransportLobeProbe.cu
 )
 add_library(Blackframe::CudaSmokeKernel ALIAS BlackframeCudaSmokeKernel)
 blackframe_set_target_role(BlackframeCudaSmokeKernel cuda)

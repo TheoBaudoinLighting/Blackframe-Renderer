@@ -24,8 +24,10 @@ silently selecting another path.
   Geometries retain immutable compact triangle meshes; instances carry validated local affine
   matrices, visibility masks, and optional parents. World transforms are resolved deterministically
   when the snapshot closes. A snapshot may remain geometry-only, or carry one explicit four-lane
-  environment plus wavelength-resolved Lambertian reflection and one-sided emission for every
-  material. The same packet also closes an insertion-ordered registry of point, directional, and
+  environment plus a bounded wavelength-resolved closure mixture and one-sided emission for every
+  material. Scene materials preserve explicit component probabilities, shading-normal or surface-
+  tangent frames, and tangent rotation without inferring a Lambertian substitute. The same packet
+  also closes an insertion-ordered registry of point, directional, and
   spot lights whose slots remain stable for light sampling. Every non-black emissive mesh instance
   additionally derives a one-sided area-light model from that exact mesh, resolved world transform,
   and material emission, in stable instance-ID order; there is no second emitter description.
@@ -60,22 +62,28 @@ silently selecting another path.
   accumulates every encountered emitter or environment, and spawns continuation rays from derived
   position-error bounds. The same bounce kernel can instead resolve every hit from the immutable
   frame scene through an explicitly supplied `AccelBackend`; positions, geometric and shading
-  normals, UV derivatives, stable IDs, spectral materials, and emissions are reconstructed before
-  continuation. Primary and secondary queries have no linear fallback on this path. A separate
-  scene path samples exactly one registered punctual light at every accepted Lambertian vertex,
+  normals, UV derivatives, stable IDs, spectral closure mixtures, and emissions are reconstructed
+  before continuation. Primary and secondary queries have no linear fallback on this path. A
+  separate scene path samples exactly one registered punctual light at every accepted surface
+  vertex; closure evaluation gives delta vertices no continuous direct-light contribution,
   evaluates its discrete light-selection and conditional probabilities once, and traces the
   resulting shadow ray through the selected acceleration backend. It rejects incomplete sampler
   support and non-vacuum visibility instead of changing estimators silently. A separate MIS path
   samples the combined punctual and emissive-mesh registry. Punctual delta samples retain weight
   one; continuous samples compare the joint `P(slot) * p_li` solid-angle density with the
-  Lambertian PDF using an explicitly selected balance or power heuristic. The complementary weight
-  is applied before accumulating an emissive surface reached by a BSDF continuation, so the two
-  techniques do not double count the same transport path. Unsupported heuristic values, resumed
+  closure-mixture PDF using an explicitly selected balance or power heuristic. The complementary
+  weight is applied before accumulating an emissive surface reached by a BSDF continuation, so the
+  two techniques do not double count the same transport path. Delta continuations carry discrete mass,
+  do not enter the continuous MIS denominator, and update `etaScale` on transmission. Unsupported
+  heuristic values, resumed
   non-delta paths missing their previous directional PDF, and incomplete light-sampler support fail
   explicitly. Explicit depth budgets count diffuse, glossy, specular, transmission, and volume
   events separately; transmitted surface events advance both their scattering family and
-  transmission counters. The current Lambertian loops consume only diffuse-reflection depth and
-  support explicitly configured, compensated Russian roulette from a selected completed depth.
+  transmission counters. Before selection and direct-light evaluation, a bounded depth-filtered
+  view removes unavailable closure records, conditions rough-dielectric directions, and
+  renormalizes explicit component probabilities. A truly empty absorber remains distinct from a
+  material whose remaining events are depth-limited. Paths support explicitly configured,
+  compensated Russian roulette from a selected completed depth.
 - **CPU wavefront transport:** a versioned path-state structure of arrays and seven distinct bounded
   camera, ray, hit, miss, shade, shadow, and continuation queues provide fixed-capacity storage,
   guarded double buffering, and stable terminated-lane compaction with optional canonical path-slot
@@ -83,8 +91,8 @@ silently selecting another path.
   worker count: one worker runs inline, while a persistent multi-worker pool receives deterministic
   contiguous lane partitions and reaches a barrier before queue publication. The current Embree
   transport consumes the indexed per-pixel and per-sample stream, carries the four-lane spectral
-  packet through every stage, and resolves each FrameScene Lambertian material into an inline
-  single-component `ClosureSet` and explicit `ClosureMixture`. It samples point, directional, spot,
+  packet through every stage, and resolves each FrameScene material into its inline bounded
+  `ClosureSet` and explicit `ClosureMixture`. It samples point, directional, spot,
   and derived emissive-mesh lights and applies explicitly selected balance or power MIS to NEE and
   BSDF-hit contributions. Invalid path slots, queue overflow, incomplete sampling state,
   unsupported media or heuristics, worker failures, and non-Embree acceleration are explicit batch
@@ -93,9 +101,9 @@ silently selecting another path.
   the seven queues, fixed capacity, peak size, dispatch and lane counts, derived peak and mean
   occupancy, rejected overflow attempts, and accumulated wall-clock nanoseconds around scheduler
   validation, worker execution, and the completion barrier. Timings are observational and excluded
-  from deterministic comparisons. Other implemented closure models that are not yet representable
-  by the FrameScene material schema remain standalone and are not substituted for Lambertian scene
-  materials.
+  from deterministic comparisons. Lambertian, energy-preserving rough diffuse, isotropic or
+  anisotropic GGX conductor, rough dielectric, ideal mirror, and ideal specular transmission use
+  this same scene and transport contract.
 - **Shading normals:** scalar surface transport builds closure frames and evaluates their cosine and
   directional PDF from `Ns`, while `Ng` remains authoritative for sidedness, visibility, ray
   offsets, emission orientation, and area/solid-angle Jacobians. Directions on which the two normals
@@ -128,8 +136,7 @@ silently selecting another path.
   Reflected directions use Heitz visible-normal sampling and the explicit half-vector Jacobian;
   samples outside the one-sided support remain absent instead of selecting another distribution.
   Float and double quadrature verify reciprocity and white-furnace energy conservation across
-  spectral indices, roughness, and view angle. This standalone lobe does not change the current
-  Lambertian scene loops.
+  spectral indices, roughness, and view angle.
 - **Rough diffuse reflection:** the four-lane energy-preserving Oren--Nayar model combines the
   reciprocal Fujii single-scattering lobe with exact analytical multiple-scattering compensation.
   Its normalized roughness is explicit in `[0, 1]`, zero roughness reduces exactly to Lambert,
@@ -141,15 +148,22 @@ silently selecting another path.
   and returns an explicit mode-aware `etaScale` multiplier reciprocal to the radiance adjoint.
   Unit-vector roundoff introduced by a local frame is reconstructed deterministically; invalid or
   unrepresentable directions, coefficients, indices, and scaling factors fail without an arbitrary
-  direction substitute. These standalone lobes do not change the current Lambertian scene loops.
+  direction substitute.
+- **Rough dielectric and anisotropy:** GGX dielectric reflection and transmission use the explicit
+  microfacet half-vector Jacobians, Fresnel branch probabilities, total-internal-reflection rules,
+  radiance adjoint factor, and `etaScale`. GGX closures store independent `alphaX` and `alphaY`;
+  scene tangent frames can be rotated explicitly without changing geometric or shading normals.
+  Conditional depth filtering can retain reflection while disabling transmission without leaving
+  the removed branch in the directional PDF.
 - **Closure storage:** `ClosureSet` owns at most eight insertion-ordered closure records inline
   without dynamic allocation. Transport and reference records retain float and double
   spectral coefficients respectively; their records are fixed at 64 and 120 bytes, and the
   corresponding sets at 520 and 968 bytes, all with eight-byte alignment. Public append operations
-  accept validated Lambertian, rough-diffuse, or rough-conductor reflection. Rough diffuse uses the
-  first reserved scalar for normalized roughness; rough conductor stores its four-lane relative
-  `eta`, four-lane relative `k`, and isotropic `alpha` in nine reserved scalars. Neither model
-  changes the record layout. Invalid payloads and a ninth closure return distinct statuses without
+  accept validated Lambertian, rough-diffuse, rough-conductor, rough-dielectric, mirror, and
+  specular-transmission records. Rough diffuse stores normalized roughness; conductor records store
+  four-lane relative `eta`, four-lane relative `k`, and `alphaX/alphaY`; dielectric and specular
+  transmission retain explicit exterior/interior indices. None changes the record layout. Invalid
+  payloads and a ninth closure return distinct statuses without
   clamping, merging, eviction, or implicit replacement.
   `ClosureMixture` keeps caller-supplied component probabilities in a fixed-capacity dyadic CDF; it
   never derives a scalar probability from spectral weights. Near-unit inputs are projected
@@ -219,14 +233,20 @@ silently selecting another path.
   per-path absolute error at most `1e-4`, and display PSNR of at least 80 dB (or positive infinity).
   It also verifies the explicit analytic/Embree backend kinds and rejects queue overflow or rejected
   lanes; neither side can be substituted by a fallback.
+  Companion same-sample material cases exercise rough diffuse, isotropic and rotated anisotropic
+  conductors, rough-dielectric reflection/transmission/TIR, mirror and specular transmission,
+  continuous and mixed-measure closure mixtures, exact category counters, delta history, and
+  `etaScale` through scalar and CPU wavefront transport.
   A separate same-ray, same-sample CUDA matrix compares the analytic scalar scene loop with the
-  CUDA wavefront transport. It exercises four-lane spectral throughput, Lambertian continuation,
-  surface and environment emission, point, directional, spot, and mesh-area lights, balance and
-  power MIS, complementary BSDF-hit weights, depth limits, Russian roulette, subnormal products,
-  and occluded high-dynamic-range contributions. Every case records MSE, RMSE, bias, maximum error,
-  per-path spectral error, and display PSNR with the same `1e-10`, `1e-5`, `1e-4`, and 80 dB
-  thresholds. Empty light registries use an explicitly absent sampler and continue through BSDF
-  bounces; unsupported sampler strategies or mismatched registries fail before device allocation.
+  CUDA wavefront transport. It exercises four-lane spectral throughput, every active closure
+  family, isotropic and rotated anisotropic GGX, rough-dielectric reflection/transmission/TIR,
+  mirror and specular transmission, continuous and mixed-measure mixtures, surface and environment
+  emission, all registered light types, balance and power MIS, complementary BSDF-hit weights,
+  category depth limits, Russian roulette, subnormal products, and occluded high-dynamic-range
+  contributions. Every case records MSE, RMSE, bias, maximum error, per-path spectral error, and
+  display PSNR with the same `1e-10`, `1e-5`, `1e-4`, and 80 dB thresholds. Empty light registries
+  use an explicitly absent sampler and continue through BSDF bounces; unsupported sampler
+  strategies or mismatched registries fail before device allocation.
   Two closed CornellDiffuse validation fixtures provide tracked 64x64 and 256x256 scene-linear EXR
   references rendered by `scalar_ref` at 4096 and 1024 spp. Their scenes, generator source snapshot,
   and image hashes are verified before deterministic 1-versus-4-spp MSE, RMSE, and display-PSNR
@@ -252,7 +272,9 @@ silently selecting another path.
   C++26 layer owns typed device buffers through move-only RAII, provides explicitly bounded and
   aligned scratch suballocation, preserves live storage when growth is refused, and reports CUDA
   allocation exhaustion without selecting host memory. A committed `FrameScene` serializes into a
-  deterministic pointer-free device SoA, and a separate versioned CUDA blob builds one binary BLAS
+  deterministic pointer-free device SoA whose versioned material columns preserve bounded closure
+  records, explicit probabilities, frame mode, and tangent rotation. A separate versioned CUDA blob
+  builds one binary BLAS
   per geometry plus a TLAS over resolved instances with conservative finite bounds. CUDA scene
   queries traverse that TLAS and its BLAS, apply resolved instance transforms and intersect
   two-sided watertight triangles with explicit per-ray miss and error states. Opaque shadow queries
@@ -263,34 +285,32 @@ silently selecting another path.
   saturated overflow and rejection counters make exhaustion explicit without overwriting adjacent
   storage; reset requires an explicit overflow policy. Six CUDA C++20 stage
   kernels now consume those queues for camera initialization, hit resolution, miss handling,
-  Lambertian shading, shadow visibility, and continuation. The host orchestrator dispatches the
+  bounded closure shading, shadow visibility, and continuation. The host orchestrator dispatches the
   existing CUDA closest-hit and any-hit kernels between stages, reduces every per-lane outcome into
   a deterministic fixed-size device audit, validates each queue boundary, and reconstructs results
   in input path-slot order. A move-only fixed-capacity workspace can retain device scratch, queues,
   and host staging across synchronous batches; callers that omit it keep the explicit
   allocate-per-call behavior. The device shading path reads
-  four-lane reflectance, one-sided emission, constant environment radiance, point, directional,
-  spot, and mesh-area lights directly from the serialized scene. It uses robust triangle-area
+  four-lane closure parameters, one-sided emission, constant environment radiance, point,
+  directional, spot, and mesh-area lights directly from the serialized scene. It uses robust
+  triangle-area
   evaluation for area-light CDFs and PDFs, applies balance or power MIS to NEE and complementary
-  emitter hits, defers direct-radiance products until visibility is known, and supports explicit
-  diffuse depth and compensated Russian roulette. Its light, BSDF, and roulette samples use named
+  emitter hits, defers direct-radiance products until visibility is known, and supports separate
+  diffuse, glossy, specular, transmission, and volume budgets plus compensated Russian roulette.
+  Its light, BSDF, and roulette samples use named
   dimensions from the complete CUDA `SampleStream` contract rather than private numeric offsets.
   Embree stays an independent CPU backend and is never substituted for CUDA execution.
 
 ## Current boundary
 
 Blackframe does not yet provide a general production path-tracing integrator, a scene loader, a
-general material or lighting system, deformation updates, or transform motion blur. The CPU
-wavefront transport is currently a narrow vacuum-only spectral Lambertian path over FrameScene and
-Embree, with punctual and emissive triangle-mesh lights, NEE, and balance or power MIS. The CUDA
-wavefront transport covers the same currently representable FrameScene vacuum Lambertian model,
-including one-sided surface emission, a constant environment, the punctual and emissive-mesh light
-registry, explicit uniform selection, NEE, balance or power MIS, diffuse depth, and compensated
-Russian roulette. A non-uniform light sampler, participating medium, unsupported scene spectrum,
-or malformed device state is rejected explicitly; `scalar_ref` remains a separate oracle rather
-than an execution fallback.
-The rough diffuse, rough conductor, specular delta, rough dielectric, and anisotropic closure
-implementations remain standalone until the FrameScene material schema can describe them.
+general material or lighting system, deformation updates, or transform motion blur. The scalar,
+Embree CPU wavefront, and CUDA wavefront paths currently share a vacuum-only four-wavelength
+FrameScene transport model with bounded closure mixtures, one-sided surface emission, a constant
+environment, punctual and emissive-mesh lights, NEE, balance or power MIS, separate depth budgets,
+and compensated Russian roulette. A non-uniform light sampler, participating medium, unsupported
+scene spectrum, or malformed device state is rejected explicitly; `scalar_ref` remains a separate
+oracle rather than an execution fallback.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between

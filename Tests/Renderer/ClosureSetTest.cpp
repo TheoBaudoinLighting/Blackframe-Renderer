@@ -80,12 +80,16 @@ TEST(ClosureSetTest, FreezesKindAndAppendStatusCodes) {
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection), 2U);
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_conductor_reflection), 3U);
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::rough_dielectric), 4U);
+    EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::specular_reflection), 5U);
+    EXPECT_EQ(static_cast<std::uint32_t>(ClosureKind::specular_transmission), 6U);
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::none));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::lambertian_reflection));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_diffuse_reflection));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_conductor_reflection));
     EXPECT_TRUE(is_known_closure_kind(ClosureKind::rough_dielectric));
-    EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(5U)));
+    EXPECT_TRUE(is_known_closure_kind(ClosureKind::specular_reflection));
+    EXPECT_TRUE(is_known_closure_kind(ClosureKind::specular_transmission));
+    EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(7U)));
     EXPECT_FALSE(is_known_closure_kind(static_cast<ClosureKind>(0xffffffffU)));
 
     EXPECT_EQ(static_cast<std::uint32_t>(ClosureAppendStatus::appended), 0U);
@@ -245,6 +249,44 @@ template <SpectrumScalar Scalar> void expect_rough_dielectric_record() {
 TEST(ClosureSetTest, StoresRoughDielectricInTheExistingInlineAbi) {
     expect_rough_dielectric_record<TransportScalar>();
     expect_rough_dielectric_record<ReferenceScalar>();
+}
+
+template <SpectrumScalar Scalar> void expect_specular_delta_records() {
+    auto set = ClosureSetFor<Scalar>{};
+    const auto reflectance = constant_spectrum(Scalar{0.625});
+    const auto transmittance = constant_spectrum(Scalar{0.75});
+    ASSERT_EQ(set.append_specular_reflection(reflectance), ClosureAppendStatus::appended);
+    ASSERT_EQ(set.append_specular_transmission(transmittance, Scalar{1}, Scalar{1.5}),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.append_specular_transmission(transmittance, Scalar{1.25}, Scalar{1.25}),
+              ClosureAppendStatus::appended);
+    ASSERT_EQ(set.size(), 3U);
+
+    const auto& reflection = set.closures()[0];
+    EXPECT_EQ(reflection.kind, ClosureKind::specular_reflection);
+    EXPECT_EQ(reflection.lobes, ScatteringLobe::specular | ScatteringLobe::reflection);
+    EXPECT_EQ(reflection.weight, reflectance);
+    for (const auto parameter : reflection.parameters) {
+        EXPECT_EQ(parameter, Scalar{0});
+    }
+
+    const auto& transmission = set.closures()[1];
+    EXPECT_EQ(transmission.kind, ClosureKind::specular_transmission);
+    EXPECT_EQ(transmission.lobes, ScatteringLobe::specular | ScatteringLobe::transmission);
+    EXPECT_EQ(transmission.weight, transmittance);
+    EXPECT_EQ(transmission.parameters[0], Scalar{1});
+    EXPECT_EQ(transmission.parameters[1], Scalar{1.5});
+    for (auto index = std::size_t{2}; index < transmission.parameters.size(); ++index) {
+        EXPECT_EQ(transmission.parameters[index], Scalar{0});
+    }
+
+    EXPECT_EQ(set.closures()[2].parameters[0], Scalar{1.25});
+    EXPECT_EQ(set.closures()[2].parameters[1], Scalar{1.25});
+}
+
+TEST(ClosureSetTest, StoresSpecularDeltaClosuresInTheExistingInlineAbi) {
+    expect_specular_delta_records<TransportScalar>();
+    expect_specular_delta_records<ReferenceScalar>();
 }
 
 template <SpectrumScalar Scalar> void expect_invalid_payloads_are_atomic() {
@@ -447,6 +489,51 @@ TEST(ClosureSetTest, RejectsMalformedRoughDielectricPayloadsAtomically) {
     expect_invalid_rough_dielectric_payloads_are_atomic<ReferenceScalar>();
 }
 
+template <SpectrumScalar Scalar> void expect_invalid_specular_delta_payloads_are_atomic() {
+    auto set = ClosureSetFor<Scalar>{};
+    ASSERT_EQ(set.append_specular_reflection(constant_spectrum(Scalar{0.25})),
+              ClosureAppendStatus::appended);
+    const auto original = object_bytes(set);
+    const auto infinity = std::numeric_limits<Scalar>::infinity();
+
+    for (const auto invalid : std::array{
+             std::numeric_limits<Scalar>::quiet_NaN(),
+             infinity,
+             -infinity,
+             -std::numeric_limits<Scalar>::denorm_min(),
+             std::nextafter(Scalar{1}, infinity),
+         }) {
+        auto malformed = constant_spectrum(Scalar{0.5});
+        malformed[2] = invalid;
+        EXPECT_EQ(set.append_specular_reflection(malformed), ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_specular_transmission(malformed, Scalar{1}, Scalar{1.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
+
+    for (const auto invalid_eta : std::array{
+             std::numeric_limits<Scalar>::quiet_NaN(),
+             infinity,
+             -infinity,
+             Scalar{0},
+             Scalar{-0.0},
+             -std::numeric_limits<Scalar>::denorm_min(),
+         }) {
+        EXPECT_EQ(set.append_specular_transmission(constant_spectrum(Scalar{0.5}), invalid_eta,
+                                                   Scalar{1.5}),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(set.append_specular_transmission(constant_spectrum(Scalar{0.5}), Scalar{1},
+                                                   invalid_eta),
+                  ClosureAppendStatus::invalid_payload);
+        EXPECT_EQ(object_bytes(set), original);
+    }
+}
+
+TEST(ClosureSetTest, RejectsMalformedSpecularDeltaPayloadsAtomically) {
+    expect_invalid_specular_delta_payloads_are_atomic<TransportScalar>();
+    expect_invalid_specular_delta_payloads_are_atomic<ReferenceScalar>();
+}
+
 template <SpectrumScalar Scalar> void expect_overflow_is_atomic() {
     auto set = ClosureSetFor<Scalar>{};
     for (auto index = std::uint32_t{}; index < MaximumClosureCount; ++index) {
@@ -511,6 +598,16 @@ static_assert(noexcept(std::declval<ClosureSet&>().append_rough_dielectric(
 static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_rough_dielectric(
     std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>(),
     std::declval<ReferenceScalar>(), std::declval<ReferenceScalar>(),
+    std::declval<ReferenceScalar>())));
+static_assert(noexcept(
+    std::declval<ClosureSet&>().append_specular_reflection(std::declval<TransportSpectrum>())));
+static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_specular_reflection(
+    std::declval<ReferenceSpectrum>())));
+static_assert(noexcept(std::declval<ClosureSet&>().append_specular_transmission(
+    std::declval<TransportSpectrum>(), std::declval<TransportScalar>(),
+    std::declval<TransportScalar>())));
+static_assert(noexcept(std::declval<ReferenceClosureSet&>().append_specular_transmission(
+    std::declval<ReferenceSpectrum>(), std::declval<ReferenceScalar>(),
     std::declval<ReferenceScalar>())));
 static_assert(noexcept(std::declval<const ClosureSet&>().closures()));
 static_assert(noexcept(std::declval<const ReferenceClosureSet&>().closures()));

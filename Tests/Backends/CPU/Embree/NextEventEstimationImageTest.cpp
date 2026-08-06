@@ -71,6 +71,11 @@ inline constexpr auto EvaluationSeed = std::uint64_t{0xA4093822299F31D0ULL};
     return result;
 }
 
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 [[nodiscard]] core::Result<std::shared_ptr<const TriangleMesh>> make_receiver_mesh() {
     auto mesh = TriangleMesh::create(
         {
@@ -162,7 +167,8 @@ inline constexpr auto EvaluationSeed = std::uint64_t{0xA4093822299F31D0ULL};
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = constant_spectrum(ReceiverReflectance),
+                            .closure_mixture = require_lambertian_scene_closure(
+                                constant_spectrum(ReceiverReflectance)),
                             .emitted_radiance = {},
                         },
                 },

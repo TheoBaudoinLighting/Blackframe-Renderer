@@ -24,6 +24,11 @@ namespace {
     return renderer::sample_uniform_visible_wavelengths(sample).value();
 }
 
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 [[nodiscard]] std::shared_ptr<const TriangleMesh>
 make_surface_mesh(const renderer::Normal3 shading_normal = {.z = 1.0F}) {
     auto mesh = TriangleMesh::create(
@@ -66,7 +71,8 @@ make_surface_mesh(const renderer::Normal3 shading_normal = {.z = 1.0F}) {
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = wavelengths,
-                            .reflectance = {.values = {0.2F, 0.4F, 0.6F, 0.8F}},
+                            .closure_mixture = require_lambertian_scene_closure(
+                                {.values = {0.2F, 0.4F, 0.6F, 0.8F}}),
                             .emitted_radiance = {.values = {1.0F, 2.0F, 3.0F, 4.0F}},
                         },
                 },
@@ -249,7 +255,7 @@ TEST(SpectralFrameSceneTest, RejectsInvalidSpectralPacketsAndClosureValues) {
     }
     {
         auto description = make_spectral_scene_description();
-        description.materials.front().spectral->reflectance[2] = 1.01F;
+        description.materials.front().spectral->closure_mixture.component_probabilities[1U] = 0.25F;
         expect_error(FrameScene::create(std::move(description)),
                      core::StatusCode::invalid_argument);
     }
@@ -288,8 +294,13 @@ TEST(SceneSurfaceInteractionTest, ResolvesGeometryIdentifiersTimeAndSpectralClos
     expect_vector_near(interaction.dpdv(), renderer::Vector3{.x = 0.0F, .y = 2.0F, .z = 0.0F});
     EXPECT_EQ(interaction.identifiers(), hit.identifiers);
     EXPECT_EQ(interaction.time(), ray.time());
-    EXPECT_EQ(result->reflection.reflectance(),
+    const auto closures = result->closures.closure_set().closures();
+    ASSERT_EQ(closures.size(), 1U);
+    EXPECT_EQ(closures.front().kind, renderer::ClosureKind::lambertian_reflection);
+    EXPECT_EQ(closures.front().weight,
               (renderer::TransportSpectrum{.values = {0.2F, 0.4F, 0.6F, 0.8F}}));
+    ASSERT_EQ(result->closures.component_probabilities().size(), 1U);
+    EXPECT_EQ(result->closures.component_probabilities().front(), 1.0F);
     EXPECT_EQ(result->emission.radiance(),
               (renderer::TransportSpectrum{.values = {1.0F, 2.0F, 3.0F, 4.0F}}));
     EXPECT_TRUE(std::isfinite(result->position_error.x));
@@ -542,6 +553,90 @@ TEST(SceneBsdfOnlyPathLoopTest, SamplesTheShadingFrameAndKeepsGeometricSupport) 
     expect_vector_near(traced->terminal_ray.direction(), *expected_direction, 2.0e-6F);
     EXPECT_GT(renderer::dot(geometric_normal, traced->terminal_ray.direction()), 0.0F);
     EXPECT_GT(renderer::dot(shading_normal, traced->terminal_ray.direction()), 0.0F);
+}
+
+TEST(SceneBsdfOnlyPathLoopTest, ZeroDepthLimitDisablesAClosureInsideAContinuousMixture) {
+    const auto make_description = [](const bool include_disabled_diffuse) {
+        auto description = make_spectral_scene_description();
+        auto closures = renderer::ClosureSet{};
+        if (include_disabled_diffuse) {
+            EXPECT_EQ(closures.append_lambertian_reflection(
+                          renderer::TransportSpectrum{.values = {0.8F, 0.8F, 0.8F, 0.8F}}),
+                      renderer::ClosureAppendStatus::appended);
+        }
+        EXPECT_EQ(closures.append_rough_conductor_reflection(
+                      renderer::TransportSpectrum{.values = {0.85F, 0.85F, 0.85F, 0.85F}},
+                      renderer::TransportSpectrum{.values = {0.25F, 0.45F, 0.75F, 1.10F}},
+                      renderer::TransportSpectrum{.values = {3.2F, 2.7F, 2.2F, 1.8F}}, 0.3F, 0.3F),
+                  renderer::ClosureAppendStatus::appended);
+
+        const auto mixture =
+            include_disabled_diffuse
+                ? SceneClosureMixture::create(closures,
+                                              std::array<renderer::TransportScalar, 2U>{0.5F, 0.5F})
+                : SceneClosureMixture::create(closures,
+                                              std::array<renderer::TransportScalar, 1U>{1.0F});
+        EXPECT_TRUE(mixture.has_value()) << (mixture ? "" : mixture.error().message);
+        if (mixture) {
+            description.materials.front().spectral->closure_mixture = *mixture;
+        }
+        description.materials.front().spectral->emitted_radiance = {};
+        return description;
+    };
+
+    const auto glossy_scene = FrameScene::create(make_description(false));
+    const auto mixed_scene = FrameScene::create(make_description(true));
+    ASSERT_TRUE(glossy_scene.has_value()) << glossy_scene.error().message;
+    ASSERT_TRUE(mixed_scene.has_value()) << mixed_scene.error().message;
+    const auto glossy_acceleration = create_analytic_accel_backend(*glossy_scene);
+    const auto mixed_acceleration = create_analytic_accel_backend(*mixed_scene);
+    ASSERT_TRUE(glossy_acceleration.has_value()) << glossy_acceleration.error().message;
+    ASSERT_TRUE(mixed_acceleration.has_value()) << mixed_acceleration.error().message;
+
+    const auto state =
+        renderer::PathState::create_initial(make_wavelengths(), renderer::VacuumMedium);
+    const auto dimensions = renderer::sample_dimensions_for_bounce(0U);
+    ASSERT_TRUE(state.has_value()) << state.error().message;
+    ASSERT_TRUE(dimensions.has_value()) << dimensions.error().message;
+    const auto ray = renderer::Ray::create(renderer::Point3{.x = 0.5F, .y = 1.0F, .z = 2.0F},
+                                           renderer::Vector3{.z = -1.0F}, 0.0F, 8.0F, 0.375F,
+                                           renderer::AllRayVisibility, renderer::VacuumMedium);
+    ASSERT_TRUE(ray.has_value()) << ray.error().message;
+
+    const auto sampler = renderer::IndependentSampler{0x94D049BB133111EBULL};
+    auto selected_stream = std::optional<renderer::SampleStream>{};
+    for (auto sample = std::uint64_t{}; sample < 128U; ++sample) {
+        const auto stream = sampler.make_stream(0U, 0U, sample);
+        if (stream.sample_1d(dimensions->bsdf_component) <= 0.5F) {
+            continue;
+        }
+        const auto candidate = trace_scene_bsdf_only(*ray, *state, stream, **glossy_acceleration,
+                                                     renderer::PathDepthLimits{.glossy = 1U},
+                                                     renderer::RussianRoulettePolicy::disabled());
+        if (candidate &&
+            candidate->termination == renderer::BsdfOnlyPathTermination::escaped_environment) {
+            selected_stream = stream;
+            break;
+        }
+    }
+    ASSERT_TRUE(selected_stream.has_value());
+
+    constexpr auto limits = renderer::PathDepthLimits{.glossy = 1U};
+    const auto glossy = trace_scene_bsdf_only(*ray, *state, *selected_stream, **glossy_acceleration,
+                                              limits, renderer::RussianRoulettePolicy::disabled());
+    const auto mixed = trace_scene_bsdf_only(*ray, *state, *selected_stream, **mixed_acceleration,
+                                             limits, renderer::RussianRoulettePolicy::disabled());
+    ASSERT_TRUE(glossy.has_value()) << glossy.error().message;
+    ASSERT_TRUE(mixed.has_value()) << mixed.error().message;
+    ASSERT_EQ(glossy->termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+    ASSERT_EQ(mixed->termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+    EXPECT_EQ(glossy->state.depth_counters(), (renderer::PathDepthCounters{.glossy = 1U}));
+    EXPECT_EQ(mixed->state.depth_counters(), glossy->state.depth_counters());
+    expect_vector_near(mixed->terminal_ray.direction(), glossy->terminal_ray.direction());
+    for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+        EXPECT_NEAR(mixed->state.accumulated_radiance()[lane],
+                    glossy->state.accumulated_radiance()[lane], 1.0e-6F);
+    }
 }
 
 } // namespace

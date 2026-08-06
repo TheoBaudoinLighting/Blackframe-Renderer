@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <span>
 #include <utility>
 
 namespace blackframe::engine {
@@ -449,11 +450,22 @@ core::Result<ResolvedSceneSurface> resolve_scene_surface_hit_impl(const FrameSce
     if (!interaction) {
         return std::unexpected(interaction.error());
     }
-    const auto reflection =
-        renderer::LambertianReflection::create(material->get().spectral->reflectance);
+    const auto& scene_closures = material->get().spectral->closure_mixture;
+    const auto closures = renderer::ClosureMixture::create(
+        scene_closures.closures,
+        std::span<const renderer::TransportScalar>{scene_closures.component_probabilities.data(),
+                                                   scene_closures.closures.size()});
+    auto closure_frame = scene_closures.frame_mode == SceneClosureFrameMode::surface_tangent
+                             ? renderer::OrthonormalFrame::from_normal_and_tangent(
+                                   *shading_normal, derivatives->dpdu)
+                             : renderer::OrthonormalFrame::from_normal(*shading_normal);
+    if (closure_frame) {
+        closure_frame =
+            closure_frame->rotated_about_normal(scene_closures.tangent_rotation_radians);
+    }
     const auto emission =
         renderer::OneSidedSurfaceEmission::create(material->get().spectral->emitted_radiance);
-    if (!reflection || !emission) {
+    if (!closures || !closure_frame || !emission) {
         return std::unexpected(surface_error(
             core::StatusCode::internal_error,
             "A validated frame scene material could not recreate its spectral closures."));
@@ -462,7 +474,8 @@ core::Result<ResolvedSceneSurface> resolve_scene_surface_hit_impl(const FrameSce
     return ResolvedSceneSurface{
         .interaction = *interaction,
         .position_error = position->absolute_error,
-        .reflection = *reflection,
+        .closures = *closures,
+        .closure_frame = *closure_frame,
         .emission = *emission,
     };
 }

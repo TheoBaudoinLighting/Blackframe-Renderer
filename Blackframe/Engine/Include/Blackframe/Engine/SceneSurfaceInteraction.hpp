@@ -2,8 +2,9 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Engine/AccelBackend.hpp>
+#include <Blackframe/Renderer/ClosureMixture.hpp>
 #include <Blackframe/Renderer/Emission.hpp>
-#include <Blackframe/Renderer/LambertianReflection.hpp>
+#include <Blackframe/Renderer/LocalFrame.hpp>
 #include <Blackframe/Renderer/SurfaceInteraction.hpp>
 #include <optional>
 
@@ -15,7 +16,8 @@ namespace blackframe::engine {
 struct ResolvedSceneSurface final {
     renderer::SurfaceInteraction interaction;
     renderer::Vector3 position_error;
-    renderer::LambertianReflection reflection;
+    renderer::ClosureMixture closures;
+    renderer::OrthonormalFrame closure_frame;
     renderer::OneSidedSurfaceEmission emission;
 };
 

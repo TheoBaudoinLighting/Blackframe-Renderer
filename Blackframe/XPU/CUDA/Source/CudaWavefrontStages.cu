@@ -1,5 +1,6 @@
 #include <Blackframe/XPU/CUDA/SampleStreamDevice.cuh>
 #include <Blackframe/XPU/CUDA/TransportDevice.cuh>
+#include <Blackframe/XPU/CUDA/TransportLobesDevice.cuh>
 #include <Blackframe/XPU/CUDA/WavefrontQueueDevice.cuh>
 #include <Blackframe/XPU/CUDA/WavefrontStageKernel.hpp>
 #include <Blackframe/XPU/Shared/SceneSoaAbi.hpp>
@@ -7,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime_api.h>
+#include <type_traits>
 
 #if !defined(__CUDACC__)
 #error "The CUDA wavefront stage kernels must be compiled by the CUDA compiler."
@@ -30,6 +32,7 @@ using cuda::SampleStreamDumpStatus;
 using cuda::WavefrontCameraInputDeviceSoa;
 using cuda::WavefrontLaneControl;
 using cuda::WavefrontLanePhase;
+using cuda::WavefrontPendingBsdfEncoding;
 using cuda::WavefrontPendingShadow;
 using cuda::WavefrontPreviousBsdfSample;
 using cuda::WavefrontQueueDevicePushStatus;
@@ -76,6 +79,8 @@ constexpr auto Pi = 3.14159265358979323846F;
 constexpr auto HalfPi = Pi / 2.0F;
 constexpr auto InversePi = 0.31830988618379067154F;
 constexpr auto MaximumUniformLightCount = std::uint64_t{1U} << 24U;
+constexpr auto MaximumMaterialClosureCount =
+    static_cast<std::uint64_t>(transport::MaximumClosureCount);
 constexpr auto MaximumU64 = ~std::uint64_t{0U};
 constexpr auto FloatEpsilon = 0x1p-23F;
 constexpr auto FloatDenormMinimum = 0x1p-149F;
@@ -90,13 +95,36 @@ struct Vector3 final {
     float z{};
 };
 
+struct Vector2 final {
+    float x{};
+    float y{};
+};
+
 struct SurfaceData final {
     Vector3 position{};
     Vector3 position_error{};
     Vector3 geometric_normal{};
     Vector3 shading_normal{};
+    Vector3 dpdu{};
+    Vector3 dpdv{};
     std::uint32_t material_index{};
 };
+
+struct SceneMaterialClosureRange final {
+    std::uint64_t offset;
+    std::uint64_t count;
+    float tangent_rotation_radians;
+    std::uint8_t frame_mode;
+    std::uint8_t spectral_present;
+    std::uint8_t reserved[2U];
+};
+
+static_assert(std::is_trivial_v<SceneMaterialClosureRange>);
+static_assert(std::is_standard_layout_v<SceneMaterialClosureRange>);
+static_assert(sizeof(SceneMaterialClosureRange) == 24U);
+static_assert(shared::SceneSoaSpectrumLaneCount == shared::HostDeviceSpectrumLaneCount);
+static_assert(shared::SceneSoaClosureParameterScalarCount ==
+              transport::ClosureParameterScalarCount);
 
 struct PositionWithError final {
     Vector3 position{};
@@ -170,6 +198,13 @@ enum class ShadeFailureDetail : std::uint32_t {
     emission_mis = 19U,
     russian_roulette = 20U,
     emission_orientation = 21U,
+    closure_mixture = 22U,
+    closure_frame = 23U,
+    depth_event = 24U,
+    shading_normal_correction = 25U,
+    probability_measure = 26U,
+    eta_scale = 27U,
+    geometric_support = 28U,
 };
 
 [[nodiscard]] __device__ constexpr std::uint32_t value(const WavefrontStageStatus status) noexcept {
@@ -406,15 +441,20 @@ value(const WavefrontTermination termination) noexcept {
 
 [[nodiscard]] __device__ bool
 valid_pending_shadow_radiometry(const WavefrontPendingShadow& pending) noexcept {
+    const auto encoding = static_cast<WavefrontPendingBsdfEncoding>(pending.bsdf_encoding);
+    const auto known_encoding = encoding == WavefrontPendingBsdfEncoding::value ||
+                                encoding == WavefrontPendingBsdfEncoding::lambertian_coefficient;
     return nonnegative_spectrum(pending.beta) && !zero_spectrum(pending.beta) &&
-           nonnegative_spectrum(pending.reflectance) && !zero_spectrum(pending.reflectance) &&
+           nonnegative_spectrum(pending.bsdf_factor) && !zero_spectrum(pending.bsdf_factor) &&
            nonnegative_spectrum(pending.incident_radiance) &&
-           !zero_spectrum(pending.incident_radiance) && isfinite(pending.receiver_cosine) &&
-           pending.receiver_cosine > 0.0F && isfinite(pending.estimator_weight) &&
+           !zero_spectrum(pending.incident_radiance) &&
+           isfinite(pending.absolute_incoming_cosine) && pending.absolute_incoming_cosine > 0.0F &&
+           pending.absolute_incoming_cosine <= 1.0F && isfinite(pending.estimator_weight) &&
            pending.estimator_weight >= 0.0F && pending.estimator_weight <= 1.0F &&
            isfinite(pending.selection_probability) && pending.selection_probability > 0.0F &&
            pending.selection_probability <= 1.0F && isfinite(pending.conditional_probability) &&
-           pending.conditional_probability > 0.0F;
+           pending.conditional_probability > 0.0F && isfinite(pending.shading_normal_correction) &&
+           pending.shading_normal_correction > 0.0F && known_encoding;
 }
 
 [[nodiscard]] __device__ float exact_special_cosine(const float angle) noexcept {
@@ -465,9 +505,12 @@ valid_pending_shadow_radiometry(const WavefrontPendingShadow& pending) noexcept 
     const auto total_depth = static_cast<std::uint64_t>(state.diffuse_depth) +
                              static_cast<std::uint64_t>(state.glossy_depth) +
                              static_cast<std::uint64_t>(state.specular_depth) +
-                             static_cast<std::uint64_t>(state.transmission_depth) +
                              static_cast<std::uint64_t>(state.volume_depth);
-    if (total_depth != state.depth || (state.delta_flags & ~3U) != 0U) {
+    const auto surface_depth = static_cast<std::uint64_t>(state.diffuse_depth) +
+                               static_cast<std::uint64_t>(state.glossy_depth) +
+                               static_cast<std::uint64_t>(state.specular_depth);
+    if (total_depth != state.depth || state.transmission_depth > surface_depth ||
+        (state.delta_flags & ~3U) != 0U) {
         return false;
     }
     const auto previous_was_delta = (state.delta_flags & 1U) != 0U;
@@ -633,8 +676,11 @@ scene_descriptor(const SceneSoaHeader* const header, const std::uint32_t column)
     if (column >= scene_column::triangle_vertex_0 && column <= scene_column::triangle_vertex_2) {
         return header.triangle_count;
     }
-    if (column >= scene_column::material_id && column < scene_column::instance_id) {
+    if (column >= scene_column::material_id && column < scene_column::closure_kind) {
         return header.material_count;
+    }
+    if (column >= scene_column::closure_kind && column < scene_column::instance_id) {
+        return header.closure_count;
     }
     if (column >= scene_column::instance_id && column < scene_column::punctual_kind) {
         return header.instance_count;
@@ -657,13 +703,16 @@ scene_column_element_size(const std::uint32_t column) noexcept {
     if (column >= scene_column::count) {
         return 0U;
     }
-    if (column >= scene_column::geometry_vertex_offset &&
-        column <= scene_column::geometry_triangle_count) {
+    if ((column >= scene_column::geometry_vertex_offset &&
+         column <= scene_column::geometry_triangle_count) ||
+        column == scene_column::material_closure_offset ||
+        column == scene_column::material_closure_count) {
         return sizeof(std::uint64_t);
     }
     if (column == scene_column::material_spectral_present ||
         (column >= scene_column::material_wavelength_measure &&
-         column < scene_column::material_reflectance) ||
+         column < scene_column::material_closure_offset) ||
+        column == scene_column::material_closure_frame_mode ||
         column == scene_column::instance_parent_present ||
         (column >= scene_column::environment_wavelength_measure &&
          column < scene_column::environment_radiance)) {
@@ -672,7 +721,10 @@ scene_column_element_size(const std::uint32_t column) noexcept {
     if ((column >= scene_column::position_x && column <= scene_column::texture_coordinate_y) ||
         (column >= scene_column::material_wavelength_nanometers &&
          column < scene_column::material_wavelength_measure) ||
-        (column >= scene_column::material_reflectance && column < scene_column::instance_id) ||
+        column == scene_column::material_closure_tangent_rotation_radians ||
+        (column >= scene_column::material_emitted_radiance &&
+         column < scene_column::closure_kind) ||
+        (column >= scene_column::closure_weight && column < scene_column::instance_id) ||
         (column >= scene_column::instance_local_to_parent &&
          column < scene_column::punctual_kind) ||
         (column >= scene_column::punctual_position_x &&
@@ -700,7 +752,8 @@ scene_column_element_size(const std::uint32_t column) noexcept {
         header->total_size_bytes < sizeof(SceneSoaHeader) || header->object_count > 0xFFFFFFFFULL ||
         header->geometry_count > 0xFFFFFFFFULL || header->vertex_count > 0xFFFFFFFFULL ||
         header->triangle_count > 0xFFFFFFFFULL || header->material_count > 0xFFFFFFFFULL ||
-        header->instance_count > 0xFFFFFFFFULL || header->mesh_area_light_count > 0xFFFFFFFFULL ||
+        header->closure_count > 0xFFFFFFFFULL || header->instance_count > 0xFFFFFFFFULL ||
+        header->mesh_area_light_count > 0xFFFFFFFFULL ||
         header->punctual_light_count > 0xFFFFFFFFULL) {
         return SceneDeviceStatus::invalid_scene;
     }
@@ -753,6 +806,108 @@ template <class Element>
     return reinterpret_cast<const Element*>(bytes + scene_descriptor(&header, column).offset_bytes);
 }
 
+[[nodiscard]] __device__ SceneDeviceStatus load_material_closure_range(
+    const std::uint8_t* const bytes, const SceneSoaHeader& scene,
+    const std::uint32_t material_index, SceneMaterialClosureRange& range) noexcept {
+    if (material_index >= scene.material_count) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+
+    auto loaded = SceneMaterialClosureRange{};
+    loaded.offset = scene_values<std::uint64_t>(
+        bytes, scene, scene_column::material_closure_offset)[material_index];
+    loaded.count = scene_values<std::uint64_t>(
+        bytes, scene, scene_column::material_closure_count)[material_index];
+    loaded.frame_mode = scene_values<std::uint8_t>(
+        bytes, scene, scene_column::material_closure_frame_mode)[material_index];
+    loaded.spectral_present = scene_values<std::uint8_t>(
+        bytes, scene, scene_column::material_spectral_present)[material_index];
+    loaded.tangent_rotation_radians = scene_values<float>(
+        bytes, scene, scene_column::material_closure_tangent_rotation_radians)[material_index];
+
+    if (loaded.spectral_present > 1U || loaded.frame_mode > 1U ||
+        !isfinite(loaded.tangent_rotation_radians) || loaded.tangent_rotation_radians < -Pi ||
+        !(loaded.tangent_rotation_radians < Pi) || loaded.count > MaximumMaterialClosureCount ||
+        loaded.offset > scene.closure_count || loaded.count > scene.closure_count - loaded.offset) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    if (loaded.spectral_present == 0U && (loaded.count != 0U || loaded.frame_mode != 0U ||
+                                          loaded.tangent_rotation_radians != 0.0F)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+
+    range = loaded;
+    return SceneDeviceStatus::valid;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus load_scene_closure_record(
+    const std::uint8_t* const bytes, const SceneSoaHeader& scene, const std::uint64_t closure_index,
+    transport::ClosureRecord& record, float& probability) noexcept {
+    if (closure_index >= scene.closure_count) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+
+    auto loaded = transport::ClosureRecord{};
+    loaded.kind = static_cast<transport::ClosureKind>(
+        scene_values<std::uint32_t>(bytes, scene, scene_column::closure_kind)[closure_index]);
+    loaded.lobes = static_cast<transport::ScatteringLobe>(
+        scene_values<std::uint32_t>(bytes, scene, scene_column::closure_lobes)[closure_index]);
+    for (auto lane = std::uint32_t{0U}; lane < shared::SceneSoaSpectrumLaneCount; ++lane) {
+        loaded.weight[lane] =
+            scene_values<float>(bytes, scene, scene_column::closure_weight + lane)[closure_index];
+    }
+    for (auto parameter = std::uint32_t{0U};
+         parameter < shared::SceneSoaClosureParameterScalarCount; ++parameter) {
+        loaded.parameters[parameter] = scene_values<float>(
+            bytes, scene, scene_column::closure_parameters + parameter)[closure_index];
+    }
+    const auto loaded_probability =
+        scene_values<float>(bytes, scene, scene_column::closure_probability)[closure_index];
+    if (!transport::valid_closure_record(loaded) || !isfinite(loaded_probability) ||
+        !(loaded_probability > 0.0F) || loaded_probability > 1.0F) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+
+    record = loaded;
+    probability = loaded_probability;
+    return SceneDeviceStatus::valid;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus
+load_material_closure_mixture(const std::uint8_t* const bytes, const SceneSoaHeader& scene,
+                              const std::uint32_t material_index, SceneMaterialClosureRange& range,
+                              transport::ClosureMixtureRecord& mixture) noexcept {
+    auto loaded_range = SceneMaterialClosureRange{};
+    const auto range_status =
+        load_material_closure_range(bytes, scene, material_index, loaded_range);
+    if (range_status != SceneDeviceStatus::valid) {
+        return range_status;
+    }
+    if (loaded_range.spectral_present != 1U) {
+        return SceneDeviceStatus::unsupported_transport;
+    }
+
+    auto loaded = transport::ClosureMixtureRecord{};
+    loaded.active_count = static_cast<std::uint32_t>(loaded_range.count);
+    for (auto index = std::uint32_t{0U}; index < loaded.active_count; ++index) {
+        auto probability = 0.0F;
+        const auto closure_status = load_scene_closure_record(
+            bytes, scene, loaded_range.offset + index, loaded.closures[index], probability);
+        if (closure_status != SceneDeviceStatus::valid) {
+            return closure_status;
+        }
+        loaded.probabilities[index] = probability;
+        loaded.cdf[index + 1U] = loaded.cdf[index] + probability;
+    }
+    if (!transport::valid_closure_mixture_record(loaded)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+
+    range = loaded_range;
+    mixture = loaded;
+    return SceneDeviceStatus::valid;
+}
+
 [[nodiscard]] __device__ bool find_id(const std::uint32_t* const ids, const std::uint32_t count,
                                       const std::uint32_t id, std::uint32_t& index) noexcept {
     for (auto candidate = std::uint32_t{0U}; candidate < count; ++candidate) {
@@ -797,6 +952,32 @@ template <class Element>
         .z = fmaf(matrix[8], point.x,
                   fmaf(matrix[9], point.y, fmaf(matrix[10], point.z, matrix[11]))),
     };
+}
+
+[[nodiscard]] __device__ bool surface_derivatives(const Vector3* const positions,
+                                                  const Vector2* const coordinates, Vector3& dpdu,
+                                                  Vector3& dpdv) noexcept {
+    const auto edge1 = subtract(positions[1U], positions[0U]);
+    const auto edge2 = subtract(positions[2U], positions[0U]);
+    const auto du1 = coordinates[1U].x - coordinates[0U].x;
+    const auto dv1 = coordinates[1U].y - coordinates[0U].y;
+    const auto du2 = coordinates[2U].x - coordinates[0U].x;
+    const auto dv2 = coordinates[2U].y - coordinates[0U].y;
+    const auto determinant = fmaf(du1, dv2, -dv1 * du2);
+    if (!finite_vector(edge1) || !finite_vector(edge2) || !isfinite(du1) || !isfinite(dv1) ||
+        !isfinite(du2) || !isfinite(dv2) || !isfinite(determinant)) {
+        return false;
+    }
+    if (determinant == 0.0F) {
+        dpdu = Vector3{};
+        dpdv = Vector3{};
+        return true;
+    }
+
+    const auto reciprocal = 1.0F / determinant;
+    dpdu = multiply(subtract(multiply(edge1, dv2), multiply(edge2, dv1)), reciprocal);
+    dpdv = multiply(subtract(multiply(edge2, du1), multiply(edge1, du2)), reciprocal);
+    return isfinite(reciprocal) && finite_vector(dpdu) && finite_vector(dpdv);
 }
 
 [[nodiscard]] __device__ float vector_component(const Vector3 vector,
@@ -1311,6 +1492,7 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
     const auto barycentrics = Vector3{
         .x = hit.barycentric_vertex0, .y = hit.barycentric_vertex1, .z = hit.barycentric_vertex2};
     Vector3 local_vertices[3U]{};
+    Vector2 texture_coordinates[3U]{};
     for (auto corner = std::uint32_t{0U}; corner < 3U; ++corner) {
         const auto local_vertex = scene_values<std::uint32_t>(
             bytes, scene, scene_column::triangle_vertex_0 + corner)[triangle];
@@ -1323,13 +1505,20 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
             .y = scene_values<float>(bytes, scene, scene_column::position_y)[global_vertex],
             .z = scene_values<float>(bytes, scene, scene_column::position_z)[global_vertex],
         };
+        texture_coordinates[corner] = Vector2{
+            .x = scene_values<float>(bytes, scene,
+                                     scene_column::texture_coordinate_x)[global_vertex],
+            .y = scene_values<float>(bytes, scene,
+                                     scene_column::texture_coordinate_y)[global_vertex],
+        };
         const auto weight =
             corner == 0U ? barycentrics.x : (corner == 1U ? barycentrics.y : barycentrics.z);
         const auto vertex_normal =
             Vector3{.x = scene_values<float>(bytes, scene, scene_column::normal_x)[global_vertex],
                     .y = scene_values<float>(bytes, scene, scene_column::normal_y)[global_vertex],
                     .z = scene_values<float>(bytes, scene, scene_column::normal_z)[global_vertex]};
-        if (!finite_vector(local_vertices[corner]) || !finite_vector(vertex_normal)) {
+        if (!finite_vector(local_vertices[corner]) || !finite_vector(vertex_normal) ||
+            !isfinite(texture_coordinates[corner].x) || !isfinite(texture_coordinates[corner].y)) {
             return SceneDeviceStatus::numerical_failure;
         }
         local_normal = add(local_normal, multiply(vertex_normal, weight));
@@ -1356,6 +1545,18 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
     if (!(dot(shading_normal, geometric_normal) > 0.0F)) {
         return SceneDeviceStatus::invalid_scene;
     }
+    Vector3 world_vertices[3U]{};
+    for (auto corner = std::uint32_t{0U}; corner < 3U; ++corner) {
+        world_vertices[corner] = transform_point(matrix, local_vertices[corner]);
+        if (!finite_vector(world_vertices[corner])) {
+            return SceneDeviceStatus::numerical_failure;
+        }
+    }
+    auto dpdu = Vector3{};
+    auto dpdv = Vector3{};
+    if (!surface_derivatives(world_vertices, texture_coordinates, dpdu, dpdv)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
     auto object_position = PositionWithError{};
     auto world_position = PositionWithError{};
     if (!interpolate_position_with_error(local_vertices, barycentrics, object_position) ||
@@ -1368,9 +1569,12 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
         .position_error = world_position.absolute_error,
         .geometric_normal = geometric_normal,
         .shading_normal = shading_normal,
+        .dpdu = dpdu,
+        .dpdv = dpdv,
         .material_index = material,
     };
-    return finite_vector(surface.position) && finite_vector(surface.position_error)
+    return finite_vector(surface.position) && finite_vector(surface.position_error) &&
+                   finite_vector(surface.dpdu) && finite_vector(surface.dpdv)
                ? SceneDeviceStatus::valid
                : SceneDeviceStatus::numerical_failure;
 }
@@ -2413,19 +2617,13 @@ struct LocalFrame final {
            fabsf(dot(cross(frame.tangent, frame.bitangent), frame.normal) - 1.0F) <= tolerance;
 }
 
-[[nodiscard]] __device__ bool make_local_frame(const Vector3 normal, LocalFrame& frame) noexcept {
+[[nodiscard]] __device__ bool make_local_frame_from_tangent(const Vector3 normal,
+                                                            Vector3 tangent_seed,
+                                                            LocalFrame& frame) noexcept {
     auto unit_normal = Vector3{};
     if (!normalize(normal, unit_normal)) {
         return false;
     }
-    const auto sign = copysignf(1.0F, unit_normal.z);
-    const auto coefficient = -1.0F / (sign + unit_normal.z);
-    const auto product = unit_normal.x * unit_normal.y * coefficient;
-    auto tangent_seed = Vector3{
-        .x = 1.0F + sign * unit_normal.x * unit_normal.x * coefficient,
-        .y = sign * product,
-        .z = -sign * unit_normal.x,
-    };
     auto tangent = Vector3{};
     if (!normalize(tangent_seed, tangent)) {
         return false;
@@ -2448,6 +2646,51 @@ struct LocalFrame final {
     return true;
 }
 
+[[nodiscard]] __device__ bool make_local_frame(const Vector3 normal, LocalFrame& frame) noexcept {
+    auto unit_normal = Vector3{};
+    if (!normalize(normal, unit_normal)) {
+        return false;
+    }
+    const auto sign = copysignf(1.0F, unit_normal.z);
+    const auto coefficient = -1.0F / (sign + unit_normal.z);
+    const auto product = unit_normal.x * unit_normal.y * coefficient;
+    const auto tangent_seed = Vector3{
+        .x = 1.0F + sign * unit_normal.x * unit_normal.x * coefficient,
+        .y = sign * product,
+        .z = -sign * unit_normal.x,
+    };
+    return make_local_frame_from_tangent(normal, tangent_seed, frame);
+}
+
+[[nodiscard]] __device__ bool rotate_local_frame(const LocalFrame& source,
+                                                 const float angle_radians,
+                                                 LocalFrame& rotated) noexcept {
+    if (!orthonormal_frame(source) || !isfinite(angle_radians) || angle_radians < -Pi ||
+        !(angle_radians < Pi)) {
+        return false;
+    }
+    if (angle_radians == 0.0F) {
+        rotated = source;
+        return true;
+    }
+    const auto cosine = cosf(angle_radians);
+    const auto sine = sinf(angle_radians);
+    const auto tangent = add(multiply(source.tangent, cosine), multiply(source.bitangent, sine));
+    return isfinite(cosine) && isfinite(sine) &&
+           make_local_frame_from_tangent(source.normal, tangent, rotated);
+}
+
+[[nodiscard]] __device__ bool make_closure_frame(const SurfaceData& surface,
+                                                 const SceneMaterialClosureRange& material,
+                                                 LocalFrame& frame) noexcept {
+    auto unrotated = LocalFrame{};
+    const auto created =
+        material.frame_mode == 0U
+            ? make_local_frame(surface.shading_normal, unrotated)
+            : make_local_frame_from_tangent(surface.shading_normal, surface.dpdu, unrotated);
+    return created && rotate_local_frame(unrotated, material.tangent_rotation_radians, frame);
+}
+
 [[nodiscard]] __device__ Vector3 to_local(const LocalFrame& frame,
                                           const Vector3 direction) noexcept {
     return Vector3{.x = dot(direction, frame.tangent),
@@ -2460,6 +2703,193 @@ struct LocalFrame final {
     return normalize(add(add(multiply(frame.tangent, local.x), multiply(frame.bitangent, local.y)),
                          multiply(frame.normal, local.z)),
                      direction);
+}
+
+[[nodiscard]] __device__ constexpr std::uint32_t
+lobe_bits(const transport::ScatteringLobe lobes) noexcept {
+    return static_cast<std::uint32_t>(lobes);
+}
+
+[[nodiscard]] __device__ constexpr bool has_lobe(const transport::ScatteringLobe lobes,
+                                                 const transport::ScatteringLobe lobe) noexcept {
+    return (lobe_bits(lobes) & lobe_bits(lobe)) == lobe_bits(lobe);
+}
+
+[[nodiscard]] __device__ constexpr bool
+valid_surface_event(const transport::ScatteringLobe lobes) noexcept {
+    constexpr auto family_mask = std::uint32_t{0x00000007U};
+    constexpr auto direction_mask = std::uint32_t{0x00000018U};
+    constexpr auto known_mask = std::uint32_t{0x0000003FU};
+    const auto bits = lobe_bits(lobes);
+    const auto family = bits & family_mask;
+    const auto direction = bits & direction_mask;
+    return bits != 0U && (bits & ~known_mask) == 0U && (bits & 0x00000020U) == 0U &&
+           (family == 0x00000001U || family == 0x00000002U || family == 0x00000004U) &&
+           (direction == 0x00000008U || direction == 0x00000010U);
+}
+
+[[nodiscard]] __device__ constexpr bool
+delta_surface_event(const transport::ScatteringLobe lobes) noexcept {
+    return valid_surface_event(lobes) && has_lobe(lobes, transport::ScatteringLobe::specular);
+}
+
+[[nodiscard]] __device__ bool shading_normal_correction_radiance(const Vector3 geometric_normal,
+                                                                 const Vector3 shading_normal,
+                                                                 const Vector3 outgoing_world,
+                                                                 const Vector3 incoming_world,
+                                                                 float& correction) noexcept {
+    const auto outgoing_geometric = dot(geometric_normal, outgoing_world);
+    const auto outgoing_shading = dot(shading_normal, outgoing_world);
+    const auto incoming_geometric = dot(geometric_normal, incoming_world);
+    const auto incoming_shading = dot(shading_normal, incoming_world);
+    if (!transport::unit_vector(transport::Vector3{
+            .x = geometric_normal.x, .y = geometric_normal.y, .z = geometric_normal.z}) ||
+        !transport::unit_vector(transport::Vector3{
+            .x = shading_normal.x, .y = shading_normal.y, .z = shading_normal.z}) ||
+        !transport::unit_vector(transport::Vector3{
+            .x = outgoing_world.x, .y = outgoing_world.y, .z = outgoing_world.z}) ||
+        !transport::unit_vector(transport::Vector3{
+            .x = incoming_world.x, .y = incoming_world.y, .z = incoming_world.z}) ||
+        !(dot(geometric_normal, shading_normal) > 0.0F) || !isfinite(outgoing_geometric) ||
+        !isfinite(outgoing_shading) || !isfinite(incoming_geometric) ||
+        !isfinite(incoming_shading)) {
+        return false;
+    }
+    if (outgoing_geometric == 0.0F || outgoing_shading == 0.0F || incoming_geometric == 0.0F ||
+        incoming_shading == 0.0F || signbit(outgoing_geometric) != signbit(outgoing_shading) ||
+        signbit(incoming_geometric) != signbit(incoming_shading)) {
+        correction = 0.0F;
+        return true;
+    }
+    correction = 1.0F;
+    return true;
+}
+
+[[nodiscard]] __device__ bool geometric_event_support(const Vector3 geometric_normal,
+                                                      const Vector3 outgoing_world,
+                                                      const Vector3 incoming_world,
+                                                      const transport::ScatteringLobe lobes,
+                                                      bool& supported) noexcept {
+    if (!valid_surface_event(lobes)) {
+        return false;
+    }
+    const auto outgoing = dot(geometric_normal, outgoing_world);
+    const auto incoming = dot(geometric_normal, incoming_world);
+    if (!isfinite(outgoing) || !isfinite(incoming)) {
+        return false;
+    }
+    if (outgoing == 0.0F || incoming == 0.0F) {
+        supported = false;
+        return true;
+    }
+    const auto same_side = signbit(outgoing) == signbit(incoming);
+    supported = has_lobe(lobes, transport::ScatteringLobe::reflection) ? same_side : !same_side;
+    return true;
+}
+
+[[nodiscard]] __device__ bool valid_depth_state(const WavefrontTransportConfig& config,
+                                                const TransportPathStateLane& state) noexcept {
+    return state.diffuse_depth <= config.diffuse_depth_limit &&
+           state.glossy_depth <= config.glossy_depth_limit &&
+           state.specular_depth <= config.specular_depth_limit &&
+           state.transmission_depth <= config.transmission_depth_limit &&
+           state.volume_depth <= config.volume_depth_limit;
+}
+
+[[nodiscard]] __device__ bool advance_depth_event(const transport::ScatteringLobe lobes,
+                                                  TransportPathStateLane& state) noexcept {
+    if (!valid_surface_event(lobes) || state.depth == 0xFFFFFFFFU) {
+        return false;
+    }
+    if (has_lobe(lobes, transport::ScatteringLobe::diffuse)) {
+        if (state.diffuse_depth == 0xFFFFFFFFU) {
+            return false;
+        }
+        ++state.diffuse_depth;
+    } else if (has_lobe(lobes, transport::ScatteringLobe::glossy)) {
+        if (state.glossy_depth == 0xFFFFFFFFU) {
+            return false;
+        }
+        ++state.glossy_depth;
+    } else {
+        if (state.specular_depth == 0xFFFFFFFFU) {
+            return false;
+        }
+        ++state.specular_depth;
+    }
+    if (has_lobe(lobes, transport::ScatteringLobe::transmission)) {
+        if (state.transmission_depth == 0xFFFFFFFFU) {
+            return false;
+        }
+        ++state.transmission_depth;
+    }
+    ++state.depth;
+    return true;
+}
+
+[[nodiscard]] __device__ bool
+mixture_has_nonblack_weight(const transport::ClosureMixtureRecord& mixture) noexcept {
+    for (auto closure = std::uint32_t{0U}; closure < mixture.active_count; ++closure) {
+        for (auto lane = std::uint32_t{0U}; lane < shared::HostDeviceSpectrumLaneCount; ++lane) {
+            if (mixture.closures[closure].weight[lane] != 0.0F) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] __device__ bool update_closure_throughput(
+    const TransportSpectrum& beta, const transport::ClosureMixtureSampleResult& sample,
+    const float shading_normal_correction, const transport::ClosureMixtureRecord& mixture,
+    TransportSpectrum& updated) noexcept {
+    if (!valid_surface_event(sample.lobes) || !nonnegative_spectrum(sample.value) ||
+        !isfinite(sample.probability.value) || !(sample.probability.value > 0.0F) ||
+        !isfinite(shading_normal_correction) || !(shading_normal_correction > 0.0F)) {
+        return false;
+    }
+    const auto delta = delta_surface_event(sample.lobes);
+    const auto expected_measure = delta ? transport::ProbabilityMeasure::discrete
+                                        : transport::ProbabilityMeasure::solid_angle;
+    if (sample.probability.measure != expected_measure ||
+        (delta && sample.probability.value > 1.0F)) {
+        return false;
+    }
+    const auto cosine = fabsf(sample.incoming_local.z);
+    if (!isfinite(cosine) || !(cosine > 0.0F)) {
+        return false;
+    }
+
+    if (mixture.active_count == 1U &&
+        mixture.closures[0U].kind == transport::ClosureKind::lambertian_reflection &&
+        shading_normal_correction == 1.0F) {
+        for (auto lane = std::uint32_t{0U}; lane < shared::HostDeviceSpectrumLaneCount; ++lane) {
+            if (!checked_product(beta.values[lane], mixture.closures[0U].weight[lane],
+                                 updated.values[lane])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    for (auto lane = std::uint32_t{0U}; lane < shared::HostDeviceSpectrumLaneCount; ++lane) {
+        const float numerators[]{beta.values[lane], sample.value.values[lane], cosine,
+                                 shading_normal_correction};
+        const float denominators[]{sample.probability.value};
+        const auto value = transport::checked_product_quotient(numerators, denominators);
+        if (!transport::succeeded(value.status)) {
+            return false;
+        }
+        updated.values[lane] = value.value;
+    }
+    return true;
+}
+
+[[nodiscard]] __device__ constexpr std::uint32_t
+updated_delta_flags(const std::uint32_t current, const transport::ScatteringLobe event) noexcept {
+    auto flags = (current & 2U) != 0U ? 2U : 0U;
+    flags |= delta_surface_event(event) ? 1U : 2U;
+    return flags;
 }
 
 [[nodiscard]] __device__ WavefrontStageStatus
@@ -2557,6 +2987,71 @@ miss_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scene
                               slot.value, value(WavefrontTermination::escaped_environment));
 }
 
+[[nodiscard]] __device__ SceneDeviceStatus prepare_shadow_ray(
+    const SurfaceData& surface, const IncidentLight& incident, const TransportRay& path_ray,
+    const TransportPathStateLane& state, WavefrontPendingShadow& pending) noexcept {
+    auto source_offset = Vector3{};
+    if (!offset_point(surface.position, surface.position_error, surface.geometric_normal,
+                      incident.direction_to_light, source_offset)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    if (incident.kind == static_cast<std::uint32_t>(IncidentLightKind::infinite)) {
+        pending.ray = TransportRay{
+            .origin_x = source_offset.x,
+            .origin_y = source_offset.y,
+            .origin_z = source_offset.z,
+            .t_min = 0.0F,
+            .direction_x = incident.direction_to_light.x,
+            .direction_y = incident.direction_to_light.y,
+            .direction_z = incident.direction_to_light.z,
+            .t_max = __int_as_float(0x7F800000),
+            .time = path_ray.time,
+            .visibility_mask = path_ray.visibility_mask,
+            .current_medium = state.current_medium,
+            .reserved = 0U,
+        };
+    } else {
+        auto endpoint = incident.endpoint_position;
+        if (incident.kind == static_cast<std::uint32_t>(IncidentLightKind::finite_surface)) {
+            if (!offset_point(incident.endpoint_position, incident.endpoint_position_error,
+                              incident.endpoint_geometric_normal,
+                              multiply(incident.direction_to_light, -1.0F), endpoint)) {
+                return SceneDeviceStatus::numerical_failure;
+            }
+        } else if (incident.kind == static_cast<std::uint32_t>(IncidentLightKind::finite_point)) {
+            if (!contract_point_endpoint(incident.endpoint_position,
+                                         incident.endpoint_position_error,
+                                         incident.direction_to_light, endpoint)) {
+                return SceneDeviceStatus::numerical_failure;
+            }
+        } else {
+            return SceneDeviceStatus::invalid_scene;
+        }
+        auto segment = ScaledSegment{};
+        if (!scaled_segment(subtract(endpoint, source_offset), segment) ||
+            !(dot(segment.direction, incident.direction_to_light) > 0.0F)) {
+            return SceneDeviceStatus::numerical_failure;
+        }
+        pending.ray = TransportRay{
+            .origin_x = source_offset.x,
+            .origin_y = source_offset.y,
+            .origin_z = source_offset.z,
+            .t_min = 0.0F,
+            .direction_x = segment.direction.x,
+            .direction_y = segment.direction.y,
+            .direction_z = segment.direction.z,
+            .t_max = nextafterf(segment.length, 0.0F),
+            .time = path_ray.time,
+            .visibility_mask = path_ray.visibility_mask,
+            .current_medium = state.current_medium,
+            .reserved = 0U,
+        };
+    }
+    return valid_ray(pending.ray) && pending.ray.t_max > 0.0F
+               ? SceneDeviceStatus::valid
+               : SceneDeviceStatus::numerical_failure;
+}
+
 __global__ void
 shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scene_size,
                    const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
@@ -2640,15 +3135,30 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         return;
     }
     auto emitted = TransportSpectrum{};
-    auto reflectance = TransportSpectrum{};
+    auto material_range = SceneMaterialClosureRange{};
+    auto closures = transport::ClosureMixtureRecord{};
     if (!load_spectrum(scene_bytes, scene, scene_column::material_emitted_radiance,
-                       surface.material_index, emitted) ||
-        !load_spectrum(scene_bytes, scene, scene_column::material_reflectance,
-                       surface.material_index, reflectance)) {
+                       surface.material_index, emitted)) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] =
             outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
                     value(ShadeFailureDetail::material_spectrum));
+        return;
+    }
+    const auto closure_loaded = load_material_closure_mixture(
+        scene_bytes, scene, surface.material_index, material_range, closures);
+    if (closure_loaded != SceneDeviceStatus::valid) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] = outcome(scene_status(closure_loaded), WavefrontStageRoute::none,
+                                  slot.value, value(ShadeFailureDetail::closure_mixture));
+        return;
+    }
+    auto frame = LocalFrame{};
+    if (!make_closure_frame(surface, material_range, frame)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::closure_frame));
         return;
     }
     if (front_facing && !zero_spectrum(emitted)) {
@@ -2689,38 +3199,62 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         }
         state.accumulated_radiance = accumulated;
     }
-    if (state.diffuse_depth >= config.diffuse_depth_limit) {
-        control.flags = 0U;
-        control.blocked_depth_limits = 0x00000001U;
-        finish_phase(control, WavefrontLanePhase::terminated,
-                     WavefrontTermination::diffuse_depth_limit);
-        outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated,
-                                  slot.value, value(WavefrontTermination::diffuse_depth_limit));
-        return;
-    }
-    if (state.diffuse_depth == 0xFFFFFFFFU || state.depth == 0xFFFFFFFFU) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(WavefrontStageStatus::invalid_lane_state,
-                                  WavefrontStageRoute::none, slot.value);
-        return;
-    }
     if (zero_spectrum(state.beta)) {
         control.flags = 0U;
+        control.blocked_depth_limits = 0U;
         finish_phase(control, WavefrontLanePhase::terminated,
                      WavefrontTermination::zero_throughput);
         outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated,
                                   slot.value, value(WavefrontTermination::zero_throughput));
         return;
     }
-    if (!front_facing || !(dot(surface.shading_normal, outgoing_world) > 0.0F)) {
-        control.flags = 0U;
-        control.blocked_depth_limits = 0U;
-        finish_phase(control, WavefrontLanePhase::terminated,
-                     WavefrontTermination::outside_bsdf_support);
-        outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated,
-                                  slot.value, value(WavefrontTermination::outside_bsdf_support));
+    if (!valid_depth_state(config, state)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::depth_event));
         return;
     }
+
+    const auto filtered_closures = transport::filter_closure_mixture_by_depth(
+        closures,
+        transport::PathDepthLimitsRecord{
+            .diffuse = config.diffuse_depth_limit,
+            .glossy = config.glossy_depth_limit,
+            .specular = config.specular_depth_limit,
+            .transmission = config.transmission_depth_limit,
+            .volume = config.volume_depth_limit,
+        },
+        transport::PathDepthCountersRecord{
+            .diffuse = state.diffuse_depth,
+            .glossy = state.glossy_depth,
+            .specular = state.specular_depth,
+            .transmission = state.transmission_depth,
+            .volume = state.volume_depth,
+        },
+        state.depth);
+    if (!transport::succeeded(filtered_closures.status)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(filtered_closures.status == transport::Status::invalid_argument
+                        ? WavefrontStageStatus::invalid_lane_state
+                        : WavefrontStageStatus::numerical_failure,
+                    WavefrontStageRoute::none, slot.value, value(ShadeFailureDetail::depth_event));
+        return;
+    }
+    if (closures.active_count == 0U && filtered_closures.source_count != 0U) {
+        control.flags = 0U;
+        control.blocked_depth_limits =
+            transport::scattering_lobe_bits(filtered_closures.blocked_lobes);
+        finish_phase(control, WavefrontLanePhase::terminated, WavefrontTermination::depth_limit);
+        outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated,
+                                  slot.value, value(WavefrontTermination::depth_limit));
+        return;
+    }
+
+    const auto outgoing_local_world = to_local(frame, outgoing_world);
+    const auto outgoing_local = transport::Vector3{
+        .x = outgoing_local_world.x, .y = outgoing_local_world.y, .z = outgoing_local_world.z};
 
     auto sample_dimensions = SampleStreamBounceDimensions{};
     const auto sample_dimension_status = cuda::sample_stream::dimensions_for_bounce(
@@ -2733,10 +3267,43 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         return;
     }
 
-    auto shade_detail = std::uint32_t{};
+    auto shade_detail = cuda::WavefrontShadeDetailClosureSampled;
+    const auto bsdf_component = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
+                                                               sample_dimensions.bsdf_component);
+    const auto bsdf_u = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
+                                                       sample_dimensions.bsdf_u);
+    const auto bsdf_v = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
+                                                       sample_dimensions.bsdf_v);
+    const auto bsdf_sample = transport::sample_depth_filtered_closure_mixture(
+        closures, filtered_closures, outgoing_local, bsdf_component, bsdf_u, bsdf_v,
+        transport::TransportMode::radiance);
+    const auto has_continuation_sample = bsdf_sample.status == transport::Status::success;
+    if (!has_continuation_sample && bsdf_sample.status != transport::Status::outside_support) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::bsdf_sample));
+        return;
+    }
+    if (has_continuation_sample) {
+        const auto delta = delta_surface_event(bsdf_sample.lobes);
+        const auto expected_measure = delta ? transport::ProbabilityMeasure::discrete
+                                            : transport::ProbabilityMeasure::solid_angle;
+        if (!valid_surface_event(bsdf_sample.lobes) ||
+            bsdf_sample.probability.measure != expected_measure ||
+            !isfinite(bsdf_sample.probability.value) || !(bsdf_sample.probability.value > 0.0F) ||
+            (delta && bsdf_sample.probability.value > 1.0F)) {
+            finish_phase(control, WavefrontLanePhase::terminated);
+            outcomes[index] =
+                outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
+                        slot.value, value(ShadeFailureDetail::probability_measure));
+            return;
+        }
+    }
+
     auto incident = IncidentLight{};
-    if (config.light_count != 0U && !zero_spectrum(state.beta) && !zero_spectrum(reflectance)) {
-        shade_detail = cuda::WavefrontShadeDetailLightSampled;
+    if (config.light_count != 0U && mixture_has_nonblack_weight(closures)) {
+        shade_detail |= cuda::WavefrontShadeDetailLightSampled;
         const auto sampled_light =
             sample_registered_light(scene_bytes, scene, state, streams.sample_streams[slot.value],
                                     sample_dimensions, surface, ray.visibility_mask, incident);
@@ -2751,213 +3318,176 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
     auto pending = WavefrontPendingShadow{};
     auto has_shadow = false;
     if (incident.kind != static_cast<std::uint32_t>(IncidentLightKind::none)) {
-        const auto receiver_cosine = dot(surface.shading_normal, incident.direction_to_light);
-        const auto geometric_receiver_cosine =
-            dot(surface.geometric_normal, incident.direction_to_light);
-        if (receiver_cosine > 0.0F && geometric_receiver_cosine > 0.0F) {
-            auto estimator_weight = 1.0F;
-            if (incident.probability_measure == SolidAngleMeasure) {
-                const auto joint = transport::joint_light_pdf(
-                    transport::probability_density(incident.selection_probability,
-                                                   transport::ProbabilityMeasure::discrete),
-                    transport::probability_density(incident.conditional_probability,
-                                                   transport::ProbabilityMeasure::solid_angle));
-                const auto bsdf = transport::probability_density(
-                    receiver_cosine * InversePi, transport::ProbabilityMeasure::solid_angle);
-                const auto mis = transport::succeeded(joint.status)
-                                     ? transport::mis_weight(static_cast<transport::MisHeuristic>(
-                                                                 config.mis_heuristic),
-                                                             joint.value, bsdf)
-                                     : transport::ScalarResult{};
-                if (!transport::succeeded(joint.status) || !transport::succeeded(mis.status)) {
+        const auto incoming_local_world = to_local(frame, incident.direction_to_light);
+        const auto incoming_local = transport::Vector3{
+            .x = incoming_local_world.x, .y = incoming_local_world.y, .z = incoming_local_world.z};
+        if (outgoing_local.z != 0.0F && incoming_local.z != 0.0F) {
+            const auto singleton_lambertian =
+                closures.active_count == 1U &&
+                closures.closures[0U].kind == transport::ClosureKind::lambertian_reflection;
+            auto bsdf_factor = TransportSpectrum{};
+            if (singleton_lambertian) {
+                if (outgoing_local.z > 0.0F && incoming_local.z > 0.0F) {
+                    bsdf_factor = transport::record_weight(closures.closures[0U]);
+                }
+            } else {
+                const auto evaluated = transport::depth_filtered_closure_mixture_eval(
+                    closures, filtered_closures, outgoing_local, incoming_local,
+                    transport::TransportMode::radiance);
+                if (!transport::succeeded(evaluated.status)) {
                     finish_phase(control, WavefrontLanePhase::terminated);
                     outcomes[index] =
                         outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
-                                slot.value, value(ShadeFailureDetail::light_weight));
+                                slot.value, value(ShadeFailureDetail::light_contribution));
                     return;
                 }
-                estimator_weight = mis.value;
-            } else if (incident.probability_measure != DiscreteMeasure) {
-                finish_phase(control, WavefrontLanePhase::terminated);
-                outcomes[index] =
-                    outcome(WavefrontStageStatus::unsupported_transport, WavefrontStageRoute::none,
-                            slot.value, value(ShadeFailureDetail::light_weight));
-                return;
+                bsdf_factor = evaluated.value;
             }
-            pending.beta = state.beta;
-            pending.reflectance = reflectance;
-            pending.incident_radiance = incident.radiance;
-            pending.receiver_cosine = receiver_cosine;
-            pending.estimator_weight = estimator_weight;
-            pending.selection_probability = incident.selection_probability;
-            pending.conditional_probability = incident.conditional_probability;
-            auto source_offset = Vector3{};
-            if (!offset_point(surface.position, surface.position_error, surface.geometric_normal,
-                              incident.direction_to_light, source_offset)) {
-                finish_phase(control, WavefrontLanePhase::terminated);
-                outcomes[index] =
-                    outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
-                            slot.value, value(ShadeFailureDetail::endpoint_offset));
-                return;
-            }
-            if (incident.kind == static_cast<std::uint32_t>(IncidentLightKind::infinite)) {
-                pending.ray = TransportRay{
-                    .origin_x = source_offset.x,
-                    .origin_y = source_offset.y,
-                    .origin_z = source_offset.z,
-                    .t_min = 0.0F,
-                    .direction_x = incident.direction_to_light.x,
-                    .direction_y = incident.direction_to_light.y,
-                    .direction_z = incident.direction_to_light.z,
-                    .t_max = __int_as_float(0x7F800000),
-                    .time = ray.time,
-                    .visibility_mask = ray.visibility_mask,
-                    .current_medium = state.current_medium,
-                    .reserved = 0U,
-                };
-            } else {
-                auto endpoint = incident.endpoint_position;
-                if (incident.kind ==
-                    static_cast<std::uint32_t>(IncidentLightKind::finite_surface)) {
-                    if (!offset_point(incident.endpoint_position, incident.endpoint_position_error,
-                                      incident.endpoint_geometric_normal,
-                                      multiply(incident.direction_to_light, -1.0F), endpoint)) {
+            if (!zero_spectrum(bsdf_factor)) {
+                auto shading_correction = 0.0F;
+                if (!shading_normal_correction_radiance(
+                        surface.geometric_normal, surface.shading_normal, outgoing_world,
+                        incident.direction_to_light, shading_correction)) {
+                    finish_phase(control, WavefrontLanePhase::terminated);
+                    outcomes[index] =
+                        outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
+                                slot.value, value(ShadeFailureDetail::shading_normal_correction));
+                    return;
+                }
+                if (shading_correction > 0.0F) {
+                    auto estimator_weight = 1.0F;
+                    if (incident.probability_measure == SolidAngleMeasure) {
+                        const auto joint = transport::joint_light_pdf(
+                            transport::probability_density(incident.selection_probability,
+                                                           transport::ProbabilityMeasure::discrete),
+                            transport::probability_density(
+                                incident.conditional_probability,
+                                transport::ProbabilityMeasure::solid_angle));
+                        const auto bsdf = transport::depth_filtered_closure_mixture_pdf(
+                            closures, filtered_closures, outgoing_local, incoming_local,
+                            transport::TransportMode::radiance);
+                        const auto mis =
+                            transport::succeeded(joint.status) && transport::succeeded(bsdf.status)
+                                ? transport::mis_weight(
+                                      static_cast<transport::MisHeuristic>(config.mis_heuristic),
+                                      joint.value, bsdf.value)
+                                : transport::ScalarResult{};
+                        if (!transport::succeeded(joint.status) ||
+                            !transport::succeeded(bsdf.status) ||
+                            !transport::succeeded(mis.status)) {
+                            finish_phase(control, WavefrontLanePhase::terminated);
+                            outcomes[index] = outcome(WavefrontStageStatus::numerical_failure,
+                                                      WavefrontStageRoute::none, slot.value,
+                                                      value(ShadeFailureDetail::light_weight));
+                            return;
+                        }
+                        estimator_weight = mis.value;
+                    } else if (incident.probability_measure != DiscreteMeasure) {
                         finish_phase(control, WavefrontLanePhase::terminated);
-                        outcomes[index] = outcome(WavefrontStageStatus::numerical_failure,
+                        outcomes[index] = outcome(WavefrontStageStatus::unsupported_transport,
                                                   WavefrontStageRoute::none, slot.value,
-                                                  value(ShadeFailureDetail::endpoint_offset));
+                                                  value(ShadeFailureDetail::light_weight));
                         return;
                     }
-                } else if (!contract_point_endpoint(incident.endpoint_position,
-                                                    incident.endpoint_position_error,
-                                                    incident.direction_to_light, endpoint)) {
-                    finish_phase(control, WavefrontLanePhase::terminated);
-                    outcomes[index] =
-                        outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
-                                slot.value, value(ShadeFailureDetail::endpoint_offset));
-                    return;
+                    pending.beta = state.beta;
+                    pending.bsdf_factor = bsdf_factor;
+                    pending.incident_radiance = incident.radiance;
+                    pending.absolute_incoming_cosine = fabsf(incoming_local.z);
+                    pending.estimator_weight = estimator_weight;
+                    pending.selection_probability = incident.selection_probability;
+                    pending.conditional_probability = incident.conditional_probability;
+                    pending.shading_normal_correction = shading_correction;
+                    pending.bsdf_encoding = static_cast<std::uint32_t>(
+                        singleton_lambertian ? WavefrontPendingBsdfEncoding::lambertian_coefficient
+                                             : WavefrontPendingBsdfEncoding::value);
+                    const auto shadow_status =
+                        prepare_shadow_ray(surface, incident, ray, state, pending);
+                    if (shadow_status != SceneDeviceStatus::valid) {
+                        finish_phase(control, WavefrontLanePhase::terminated);
+                        outcomes[index] =
+                            outcome(scene_status(shadow_status), WavefrontStageRoute::none,
+                                    slot.value, value(ShadeFailureDetail::shadow_ray));
+                        return;
+                    }
+                    has_shadow = true;
                 }
-                auto segment = ScaledSegment{};
-                if (!scaled_segment(subtract(endpoint, source_offset), segment) ||
-                    !(dot(segment.direction, incident.direction_to_light) > 0.0F)) {
-                    finish_phase(control, WavefrontLanePhase::terminated);
-                    outcomes[index] =
-                        outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
-                                slot.value, value(ShadeFailureDetail::shadow_segment));
-                    return;
-                }
-                const auto maximum = nextafterf(segment.length, 0.0F);
-                pending.ray = TransportRay{
-                    .origin_x = source_offset.x,
-                    .origin_y = source_offset.y,
-                    .origin_z = source_offset.z,
-                    .t_min = 0.0F,
-                    .direction_x = segment.direction.x,
-                    .direction_y = segment.direction.y,
-                    .direction_z = segment.direction.z,
-                    .t_max = maximum,
-                    .time = ray.time,
-                    .visibility_mask = ray.visibility_mask,
-                    .current_medium = state.current_medium,
-                    .reserved = 0U,
-                };
             }
-            if (!valid_ray(pending.ray) || !(pending.ray.t_max > 0.0F)) {
-                finish_phase(control, WavefrontLanePhase::terminated);
-                outcomes[index] =
-                    outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
-                            slot.value, value(ShadeFailureDetail::shadow_ray));
-                return;
-            }
-            has_shadow = true;
         }
     }
-
-    shade_detail |= cuda::WavefrontShadeDetailClosureSampled;
-    const auto bsdf_component = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
-                                                               sample_dimensions.bsdf_component);
-    const auto bsdf_u = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
-                                                       sample_dimensions.bsdf_u);
-    const auto bsdf_v = cuda::sample_stream::sample_1d(streams.sample_streams[slot.value],
-                                                       sample_dimensions.bsdf_v);
-    auto frame = LocalFrame{};
-    if (!isfinite(bsdf_component) || bsdf_component < 0.0F || !(bsdf_component < 1.0F) ||
-        !make_local_frame(surface.shading_normal, frame)) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] =
-            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
-                    value(ShadeFailureDetail::bsdf_sample));
-        return;
-    }
-    const auto outgoing_local_world = to_local(frame, outgoing_world);
-    const auto outgoing_local = transport::Vector3{
-        .x = outgoing_local_world.x, .y = outgoing_local_world.y, .z = outgoing_local_world.z};
-    const auto bsdf_sample = transport::sample_lambert(reflectance, outgoing_local, bsdf_u, bsdf_v);
     auto outgoing = Vector3{};
-    auto next_origin = Vector3{};
-    if (bsdf_sample.status != transport::Status::success ||
-        !to_world(frame, bsdf_sample.incoming_local, outgoing)) {
-        if (bsdf_sample.status == transport::Status::outside_support) {
-            pending.continuation_pending = 0U;
-            pending.termination = value(WavefrontTermination::outside_bsdf_support);
-            if (has_shadow) {
-                streams.pending_shadows[slot.value] = pending;
-                control.flags = cuda::WavefrontLaneShadowPending;
-                control.blocked_depth_limits = 0U;
-                const auto routed = push_route(queues, ShadowQueue, slot);
-                if (routed != WavefrontStageStatus::success) {
-                    finish_phase(control, WavefrontLanePhase::terminated);
-                    outcomes[index] =
-                        outcome(routed, WavefrontStageRoute::none, slot.value, ShadowQueue);
-                    return;
-                }
-                finish_phase(control, WavefrontLanePhase::shadow);
-                outcomes[index] = outcome(WavefrontStageStatus::success,
-                                          WavefrontStageRoute::shadow, slot.value, shade_detail);
-                return;
-            }
-            control.flags = 0U;
-            control.blocked_depth_limits = 0U;
-            finish_phase(control, WavefrontLanePhase::terminated,
-                         WavefrontTermination::outside_bsdf_support);
+    auto continuation_supported = has_continuation_sample;
+    auto shading_correction = 0.0F;
+    if (continuation_supported) {
+        if (!to_world(frame, bsdf_sample.incoming_local, outgoing)) {
+            finish_phase(control, WavefrontLanePhase::terminated);
             outcomes[index] =
-                outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated, slot.value,
-                        value(WavefrontTermination::outside_bsdf_support) | shade_detail);
+                outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
+                        slot.value, value(ShadeFailureDetail::bsdf_sample));
             return;
         }
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] =
-            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
-                    value(ShadeFailureDetail::bsdf_sample));
-        return;
+        auto geometric_supported = false;
+        if (!shading_normal_correction_radiance(surface.geometric_normal, surface.shading_normal,
+                                                outgoing_world, outgoing, shading_correction) ||
+            !geometric_event_support(surface.geometric_normal, outgoing_world, outgoing,
+                                     bsdf_sample.lobes, geometric_supported)) {
+            finish_phase(control, WavefrontLanePhase::terminated);
+            outcomes[index] =
+                outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
+                        slot.value, value(ShadeFailureDetail::geometric_support));
+            return;
+        }
+        continuation_supported = shading_correction > 0.0F && geometric_supported;
     }
-    if (!(bsdf_sample.incoming_local.z > 0.0F) ||
-        !(dot(surface.geometric_normal, outgoing) > 0.0F)) {
-        if (!has_shadow) {
-            streams.pending_shadows[slot.value] = WavefrontPendingShadow{};
-            control.flags = 0U;
-            finish_phase(control, WavefrontLanePhase::terminated,
-                         WavefrontTermination::outside_bsdf_support);
-            outcomes[index] =
-                outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated, slot.value,
-                        value(WavefrontTermination::outside_bsdf_support) | shade_detail);
-            return;
-        }
+    if (!continuation_supported) {
         pending.continuation_pending = 0U;
         pending.termination = value(WavefrontTermination::outside_bsdf_support);
-        streams.pending_shadows[slot.value] = pending;
-        control.flags = cuda::WavefrontLaneShadowPending;
-        const auto routed = push_route(queues, ShadowQueue, slot);
-        if (routed != WavefrontStageStatus::success) {
-            finish_phase(control, WavefrontLanePhase::terminated);
-            outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, ShadowQueue);
+        if (has_shadow) {
+            streams.pending_shadows[slot.value] = pending;
+            control.flags = cuda::WavefrontLaneShadowPending;
+            control.blocked_depth_limits = 0U;
+            const auto routed = push_route(queues, ShadowQueue, slot);
+            if (routed != WavefrontStageStatus::success) {
+                finish_phase(control, WavefrontLanePhase::terminated);
+                outcomes[index] =
+                    outcome(routed, WavefrontStageRoute::none, slot.value, ShadowQueue);
+                return;
+            }
+            finish_phase(control, WavefrontLanePhase::shadow);
+            outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::shadow,
+                                      slot.value, shade_detail);
             return;
         }
-        finish_phase(control, WavefrontLanePhase::shadow);
-        outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::shadow,
-                                  slot.value, shade_detail);
+        streams.pending_shadows[slot.value] = WavefrontPendingShadow{};
+        control.flags = 0U;
+        control.blocked_depth_limits = 0U;
+        finish_phase(control, WavefrontLanePhase::terminated,
+                     WavefrontTermination::outside_bsdf_support);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated, slot.value,
+                    value(WavefrontTermination::outside_bsdf_support) | shade_detail);
         return;
     }
+
+    auto updated_beta = TransportSpectrum{};
+    if (!update_closure_throughput(state.beta, bsdf_sample, shading_correction, closures,
+                                   updated_beta)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::throughput));
+        return;
+    }
+    const auto next_eta_scale = state.eta_scale * bsdf_sample.eta_scale_multiplier;
+    if (!isfinite(bsdf_sample.eta_scale_multiplier) || !(bsdf_sample.eta_scale_multiplier > 0.0F) ||
+        !isfinite(next_eta_scale) || !(next_eta_scale > 0.0F)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::eta_scale));
+        return;
+    }
+
+    auto next_origin = Vector3{};
     if (!offset_point(surface.position, surface.position_error, surface.geometric_normal, outgoing,
                       next_origin)) {
         finish_phase(control, WavefrontLanePhase::terminated);
@@ -2966,23 +3496,7 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
                     value(ShadeFailureDetail::continuation_offset));
         return;
     }
-    auto updated_beta = state.beta;
-    for (auto lane = std::uint32_t{0U}; lane < shared::HostDeviceSpectrumLaneCount; ++lane) {
-        if (!checked_product(state.beta.values[lane], reflectance.values[lane],
-                             updated_beta.values[lane])) {
-            finish_phase(control, WavefrontLanePhase::terminated);
-            outcomes[index] =
-                outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
-                        slot.value, value(ShadeFailureDetail::throughput));
-            return;
-        }
-    }
-    state.beta = updated_beta;
-    state.diffuse_depth += 1U;
-    state.depth += 1U;
-    // A Lambertian event clears only the previous-delta bit and preserves non-delta history.
-    state.delta_flags = (state.delta_flags | 2U) & ~1U;
-    ray = TransportRay{
+    const auto next_ray = TransportRay{
         .origin_x = next_origin.x,
         .origin_y = next_origin.y,
         .origin_z = next_origin.z,
@@ -2996,26 +3510,50 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         .current_medium = state.current_medium,
         .reserved = 0U,
     };
-    if (!valid_ray(ray)) {
+    if (!valid_ray(next_ray)) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] =
             outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
                     value(ShadeFailureDetail::continuation_ray));
         return;
     }
-    previous = WavefrontPreviousBsdfSample{
-        .context_x = surface.position.x,
-        .context_y = surface.position.y,
-        .context_z = surface.position.z,
-        .context_time = ray.time,
-        .incoming_x = outgoing.x,
-        .incoming_y = outgoing.y,
-        .incoming_z = outgoing.z,
-        .probability_value = bsdf_sample.probability.value,
-        .probability_measure = SolidAngleMeasure,
-        .valid = 1U,
-        .reserved = {0U, 0U},
-    };
+    auto next_state = state;
+    next_state.beta = updated_beta;
+    next_state.eta_scale = next_eta_scale;
+    next_state.delta_flags = updated_delta_flags(state.delta_flags, bsdf_sample.lobes);
+    if (!advance_depth_event(bsdf_sample.lobes, next_state) || !valid_path_state(next_state)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::depth_event));
+        return;
+    }
+    auto next_previous = WavefrontPreviousBsdfSample{};
+    if (!delta_surface_event(bsdf_sample.lobes)) {
+        next_previous = WavefrontPreviousBsdfSample{
+            .context_x = surface.position.x,
+            .context_y = surface.position.y,
+            .context_z = surface.position.z,
+            .context_time = next_ray.time,
+            .incoming_x = outgoing.x,
+            .incoming_y = outgoing.y,
+            .incoming_z = outgoing.z,
+            .probability_value = bsdf_sample.probability.value,
+            .probability_measure = SolidAngleMeasure,
+            .valid = 1U,
+            .reserved = {0U, 0U},
+        };
+    }
+    if (!valid_previous_bsdf_sample(next_previous, next_ray)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::probability_measure));
+        return;
+    }
+    state = next_state;
+    ray = next_ray;
+    previous = next_previous;
 
     auto continuation_pending = true;
     auto pending_termination = WavefrontTermination::none;
@@ -3125,8 +3663,7 @@ __global__ void gather_shadow_rays_kernel(const WavefrontQueueDeviceSoa queues,
         (control.flags & ~known_flags) != 0U || pending.continuation_pending > 1U ||
         ((control.flags & cuda::WavefrontLaneContinuationPending) != 0U) != continuation_pending ||
         (continuation_pending && pending.termination != value(WavefrontTermination::none)) ||
-        (!continuation_pending && !terminal_reason) || pending.reserved[0] != 0U ||
-        pending.reserved[1] != 0U || !valid_ray(pending.ray) ||
+        (!continuation_pending && !terminal_reason) || !valid_ray(pending.ray) ||
         !valid_pending_shadow_radiometry(pending)) {
         outcomes[index] = outcome(WavefrontStageStatus::invalid_lane_state,
                                   WavefrontStageRoute::none, slot.value, control.phase);
@@ -3196,8 +3733,7 @@ __global__ void process_shadow_kernel(const WavefrontQueueDeviceSoa queues,
         ((control.flags & cuda::WavefrontLaneContinuationPending) != 0U) != continuation_pending ||
         (continuation_pending && pending.termination != value(WavefrontTermination::none)) ||
         (!continuation_pending && !terminal_reason) || control.blocked_depth_limits != 0U ||
-        pending.reserved[0] != 0U || pending.reserved[1] != 0U || !valid_ray(pending.ray) ||
-        !valid_pending_shadow_radiometry(pending)) {
+        !valid_ray(pending.ray) || !valid_pending_shadow_radiometry(pending)) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] = outcome(WavefrontStageStatus::invalid_lane_state,
                                   WavefrontStageRoute::none, queue_path.value);
@@ -3205,16 +3741,19 @@ __global__ void process_shadow_kernel(const WavefrontQueueDeviceSoa queues,
     }
     if (visible) {
         auto contribution = TransportSpectrum{};
+        const auto encoding = static_cast<WavefrontPendingBsdfEncoding>(pending.bsdf_encoding);
+        const auto lambertian_coefficient =
+            encoding == WavefrontPendingBsdfEncoding::lambertian_coefficient;
         for (auto lane = std::uint32_t{}; lane < shared::HostDeviceSpectrumLaneCount; ++lane) {
             const float denominators[]{pending.selection_probability,
                                        pending.conditional_probability};
             if (pending.estimator_weight == 1.0F) {
                 const float numerators[]{pending.beta.values[lane],
-                                         pending.reflectance.values[lane],
-                                         InversePi,
+                                         pending.bsdf_factor.values[lane],
+                                         lambertian_coefficient ? InversePi : 1.0F,
                                          pending.incident_radiance.values[lane],
-                                         pending.receiver_cosine,
-                                         1.0F};
+                                         pending.absolute_incoming_cosine,
+                                         pending.shading_normal_correction};
                 if (!checked_product_quotient(numerators, denominators,
                                               contribution.values[lane])) {
                     finish_phase(control, WavefrontLanePhase::terminated);
@@ -3225,11 +3764,11 @@ __global__ void process_shadow_kernel(const WavefrontQueueDeviceSoa queues,
                 }
             } else {
                 const float numerators[]{pending.beta.values[lane],
-                                         pending.reflectance.values[lane],
-                                         InversePi,
+                                         pending.bsdf_factor.values[lane],
+                                         lambertian_coefficient ? InversePi : 1.0F,
                                          pending.incident_radiance.values[lane],
-                                         pending.receiver_cosine,
-                                         1.0F,
+                                         pending.absolute_incoming_cosine,
+                                         pending.shading_normal_correction,
                                          pending.estimator_weight};
                 if (!checked_product_quotient(numerators, denominators,
                                               contribution.values[lane])) {

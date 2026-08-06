@@ -38,6 +38,11 @@ inline constexpr auto SphereLatitudeSegments = std::uint32_t{32U};
     return result;
 }
 
+[[nodiscard]] inline SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 // These lane values map to neutral scene-linear RGB at the fixed wavelength
 // packet. Neutrality is established in spectral transport, never as a display
 // correction after rendering.
@@ -275,7 +280,8 @@ make_quad(const std::array<renderer::Point3, 4U>& positions, const renderer::Nor
                         .spectral =
                             SceneSpectralMaterial{
                                 .wavelengths = *wavelengths,
-                                .reflectance = detail::constant_spectrum(0.72F),
+                                .closure_mixture = detail::require_lambertian_scene_closure(
+                                    detail::constant_spectrum(0.72F)),
                                 .emitted_radiance = {},
                             },
                     },
@@ -284,7 +290,8 @@ make_quad(const std::array<renderer::Point3, 4U>& positions, const renderer::Nor
                         .spectral =
                             SceneSpectralMaterial{
                                 .wavelengths = *wavelengths,
-                                .reflectance = detail::red_wall_spectrum(),
+                                .closure_mixture = detail::require_lambertian_scene_closure(
+                                    detail::red_wall_spectrum()),
                                 .emitted_radiance = {},
                             },
                     },
@@ -293,7 +300,8 @@ make_quad(const std::array<renderer::Point3, 4U>& positions, const renderer::Nor
                         .spectral =
                             SceneSpectralMaterial{
                                 .wavelengths = *wavelengths,
-                                .reflectance = detail::green_wall_spectrum(),
+                                .closure_mixture = detail::require_lambertian_scene_closure(
+                                    detail::green_wall_spectrum()),
                                 .emitted_radiance = {},
                             },
                     },
@@ -302,7 +310,7 @@ make_quad(const std::array<renderer::Point3, 4U>& positions, const renderer::Nor
                         .spectral =
                             SceneSpectralMaterial{
                                 .wavelengths = *wavelengths,
-                                .reflectance = {},
+                                .closure_mixture = detail::require_lambertian_scene_closure({}),
                                 .emitted_radiance = detail::neutral_emission(6.0F),
                             },
                     },

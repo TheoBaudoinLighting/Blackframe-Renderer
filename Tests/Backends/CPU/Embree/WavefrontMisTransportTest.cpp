@@ -7,6 +7,7 @@
 #include <Blackframe/Engine/SceneMisPathLoop.hpp>
 #include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/CpuWavefrontScheduler.hpp>
+#include <Blackframe/Renderer/Fresnel.hpp>
 #include <Blackframe/Renderer/LightSampler.hpp>
 #include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
@@ -25,6 +26,7 @@
 #include <numbers>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,12 +38,120 @@ inline constexpr auto PathCount = std::size_t{24U};
 inline constexpr auto PathTime = renderer::TransportScalar{0.375F};
 inline constexpr auto ScalarParityTolerance = renderer::TransportScalar{1.0e-5F};
 inline constexpr auto OneDiffuseBounce = renderer::PathDepthLimits{.diffuse = 1U};
+inline constexpr auto OneSurfaceBounce = renderer::PathDepthLimits{
+    .diffuse = 1U,
+    .glossy = 1U,
+    .specular = 1U,
+    .transmission = 1U,
+};
 inline constexpr auto EvaluationSeed = std::uint64_t{0x243F6A8885A308D3ULL};
 
 [[nodiscard]] renderer::TransportSpectrum constant_spectrum(const float value) {
     auto spectrum = renderer::TransportSpectrum{};
     spectrum.values.fill(value);
     return spectrum;
+}
+
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
+void require_closure_append(const renderer::ClosureAppendStatus status) {
+    if (status != renderer::ClosureAppendStatus::appended) {
+        throw std::runtime_error{"A material transport test closure could not be appended."};
+    }
+}
+
+[[nodiscard]] SceneClosureMixture require_scene_closure_mixture(
+    renderer::ClosureSet closures,
+    const std::span<const renderer::TransportScalar> component_probabilities,
+    const renderer::TransportScalar tangent_rotation_radians = 0.0F) {
+    auto result = SceneClosureMixture::create(std::move(closures), component_probabilities,
+                                              SceneClosureFrameMode::surface_tangent,
+                                              tangent_rotation_radians);
+    if (!result) {
+        throw std::runtime_error{result.error().message};
+    }
+    return std::move(*result);
+}
+
+[[nodiscard]] SceneClosureMixture rough_diffuse_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(
+        closures.append_rough_diffuse_reflection(constant_spectrum(0.72F), 0.65F));
+    constexpr auto probabilities = std::array{renderer::TransportScalar{1.0F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
+}
+
+[[nodiscard]] SceneClosureMixture
+rough_conductor_scene_closure(const renderer::TransportScalar alpha_x,
+                              const renderer::TransportScalar alpha_y,
+                              const renderer::TransportScalar tangent_rotation_radians = 0.0F) {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(closures.append_rough_conductor_reflection(
+        constant_spectrum(0.85F),
+        renderer::TransportSpectrum{.values = {0.25F, 0.45F, 0.75F, 1.10F}},
+        renderer::TransportSpectrum{.values = {3.2F, 2.7F, 2.2F, 1.8F}}, alpha_x, alpha_y));
+    constexpr auto probabilities = std::array{renderer::TransportScalar{1.0F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities,
+                                         tangent_rotation_radians);
+}
+
+[[nodiscard]] SceneClosureMixture
+rough_dielectric_scene_closure(const renderer::TransportScalar alpha_x = 0.25F,
+                               const renderer::TransportScalar alpha_y = 0.25F) {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(
+        closures.append_rough_dielectric(constant_spectrum(0.9F), 1.0F, 1.5F, alpha_x, alpha_y));
+    constexpr auto probabilities = std::array{renderer::TransportScalar{1.0F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
+}
+
+[[nodiscard]] SceneClosureMixture mirror_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(closures.append_specular_reflection(constant_spectrum(0.85F)));
+    constexpr auto probabilities = std::array{renderer::TransportScalar{1.0F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
+}
+
+[[nodiscard]] SceneClosureMixture transmission_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(
+        closures.append_specular_transmission(constant_spectrum(0.9F), 1.0F, 1.5F));
+    constexpr auto probabilities = std::array{renderer::TransportScalar{1.0F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
+}
+
+[[nodiscard]] SceneClosureMixture continuous_mixture_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(closures.append_lambertian_reflection(constant_spectrum(0.25F)));
+    require_closure_append(
+        closures.append_rough_diffuse_reflection(constant_spectrum(0.75F), 0.7F));
+    constexpr auto probabilities =
+        std::array{renderer::TransportScalar{0.35F}, renderer::TransportScalar{0.65F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
+}
+
+[[nodiscard]] SceneClosureMixture depth_filtered_continuous_mixture_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(closures.append_lambertian_reflection(constant_spectrum(0.25F)));
+    require_closure_append(closures.append_rough_conductor_reflection(
+        constant_spectrum(0.85F),
+        renderer::TransportSpectrum{.values = {0.25F, 0.45F, 0.75F, 1.10F}},
+        renderer::TransportSpectrum{.values = {3.2F, 2.7F, 2.2F, 1.8F}}, 0.35F));
+    constexpr auto probabilities =
+        std::array{renderer::TransportScalar{0.35F}, renderer::TransportScalar{0.65F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
+}
+
+[[nodiscard]] SceneClosureMixture mixed_measure_scene_closure() {
+    auto closures = renderer::ClosureSet{};
+    require_closure_append(closures.append_lambertian_reflection(constant_spectrum(0.3F)));
+    require_closure_append(closures.append_specular_reflection(constant_spectrum(0.8F)));
+    constexpr auto probabilities =
+        std::array{renderer::TransportScalar{0.4F}, renderer::TransportScalar{0.6F}};
+    return require_scene_closure_mixture(std::move(closures), probabilities);
 }
 
 [[nodiscard]] core::Result<std::shared_ptr<const TriangleMesh>>
@@ -107,7 +217,8 @@ make_wavefront_scene(const float environment_radiance = 0.0F,
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = constant_spectrum(receiver_reflectance),
+                            .closure_mixture = require_lambertian_scene_closure(
+                                constant_spectrum(receiver_reflectance)),
                             .emitted_radiance = {},
                         },
                 },
@@ -116,7 +227,7 @@ make_wavefront_scene(const float environment_radiance = 0.0F,
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = {},
+                            .closure_mixture = require_lambertian_scene_closure({}),
                             .emitted_radiance = constant_spectrum(4.0F),
                         },
                 },
@@ -148,6 +259,137 @@ make_wavefront_scene(const float environment_radiance = 0.0F,
     });
 }
 
+[[nodiscard]] core::Error material_test_error(std::string message) {
+    return core::Error{
+        .code = core::StatusCode::invalid_argument,
+        .message = std::move(message),
+    };
+}
+
+[[nodiscard]] core::Result<FrameSceneHandle>
+make_material_scene(SceneClosureMixture closure_mixture) {
+    auto receiver = horizontal_quad(16.0F, 0.0F, true);
+    if (!receiver) {
+        return std::unexpected(receiver.error());
+    }
+    const auto wavelengths = renderer::sample_uniform_visible_wavelengths(0.25F);
+    if (!wavelengths) {
+        return std::unexpected(wavelengths.error());
+    }
+    return FrameScene::create(FrameSceneDescription{
+        .objects = {SceneObject{.id = {.value = 1U}}},
+        .geometries = {SceneGeometry{.id = {.value = 11U}, .mesh = std::move(*receiver)}},
+        .materials =
+            {
+                SceneMaterial{
+                    .id = {.value = 21U},
+                    .spectral =
+                        SceneSpectralMaterial{
+                            .wavelengths = *wavelengths,
+                            .closure_mixture = std::move(closure_mixture),
+                            .emitted_radiance = {},
+                        },
+                },
+            },
+        .instances =
+            {
+                SceneInstance{
+                    .id = {.value = 31U},
+                    .parent = std::nullopt,
+                    .object = {.value = 1U},
+                    .geometry = {.value = 11U},
+                    .material = {.value = 21U},
+                    .local_to_parent = renderer::identity_matrix<renderer::TransportScalar>(),
+                },
+            },
+        .punctual_lights =
+            {
+                ScenePointLight{
+                    .position = renderer::Point3{.z = 3.0F},
+                    .absolute_position_error = {},
+                    .spectral_radiant_intensity = constant_spectrum(0.5F),
+                },
+            },
+        .spectral_environment =
+            SceneSpectralEnvironment{
+                .wavelengths = *wavelengths,
+                .radiance = constant_spectrum(0.35F),
+            },
+    });
+}
+
+[[nodiscard]] core::Result<renderer::Ray>
+material_primary_ray(const renderer::Vector3 outgoing_world) {
+    return renderer::Ray::create(
+        renderer::Point3{.x = outgoing_world.x, .y = outgoing_world.y, .z = outgoing_world.z},
+        -outgoing_world, 0.0F, std::numeric_limits<renderer::TransportScalar>::infinity(), PathTime,
+        renderer::AllRayVisibility, renderer::VacuumMedium);
+}
+
+struct ComponentSampleBand final {
+    renderer::TransportScalar lower{};
+    renderer::TransportScalar upper{};
+    std::size_t count{};
+};
+
+[[nodiscard]] core::Result<std::vector<CpuWavefrontMisPathInput>>
+make_material_inputs(const FrameSceneHandle& scene, const renderer::Ray& ray,
+                     const std::span<const ComponentSampleBand> bands) {
+    const auto state = renderer::PathState::create_initial(
+        scene->spectral_environment()->wavelengths, renderer::VacuumMedium);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    const auto dimensions = renderer::sample_dimensions_for_bounce(0U);
+    if (!dimensions) {
+        return std::unexpected(dimensions.error());
+    }
+
+    auto requested_count = std::size_t{};
+    for (const auto& band : bands) {
+        if (!std::isfinite(band.lower) || !std::isfinite(band.upper) || band.lower < 0.0F ||
+            !(band.lower < band.upper) || band.upper > 1.0F || band.count == 0U ||
+            requested_count > std::numeric_limits<std::uint32_t>::max() - band.count) {
+            return std::unexpected(material_test_error(
+                "Material parity sample bands must be finite, canonical, and representable."));
+        }
+        requested_count += band.count;
+    }
+    auto inputs = std::vector<CpuWavefrontMisPathInput>{};
+    inputs.reserve(requested_count);
+    for (const auto& band : bands) {
+        for (auto band_index = std::size_t{}; band_index < band.count; ++band_index) {
+            const auto pixel_x = static_cast<std::uint32_t>(inputs.size());
+            auto found = false;
+            for (auto candidate = std::uint64_t{}; candidate < 100'000U; ++candidate) {
+                const auto sample = renderer::SampleStreamIndex{
+                    .pixel_x = pixel_x,
+                    .pixel_y = 0U,
+                    .sample_index = candidate,
+                    .seed = EvaluationSeed,
+                };
+                const auto component =
+                    renderer::SampleStream{sample}.sample_1d(dimensions->bsdf_component);
+                if (component < band.lower || component >= band.upper) {
+                    continue;
+                }
+                inputs.push_back(CpuWavefrontMisPathInput{
+                    .primary_ray = ray,
+                    .initial_state = *state,
+                    .sample = sample,
+                });
+                found = true;
+                break;
+            }
+            if (!found) {
+                return std::unexpected(material_test_error(
+                    "A deterministic material parity sample band could not be populated."));
+            }
+        }
+    }
+    return inputs;
+}
+
 [[nodiscard]] core::Result<FrameSceneHandle> make_occluded_overflow_scene() {
     auto receiver = horizontal_quad(4.0F, 0.0F, true);
     auto blocker = horizontal_quad(2'048.0F, 1.5F, false);
@@ -176,7 +418,8 @@ make_wavefront_scene(const float environment_radiance = 0.0F,
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = constant_spectrum(0.5F),
+                            .closure_mixture =
+                                require_lambertian_scene_closure(constant_spectrum(0.5F)),
                             .emitted_radiance = {},
                         },
                 },
@@ -185,7 +428,7 @@ make_wavefront_scene(const float environment_radiance = 0.0F,
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = {},
+                            .closure_mixture = require_lambertian_scene_closure({}),
                             .emitted_radiance = {},
                         },
                 },
@@ -328,7 +571,8 @@ void expect_image_metrics(const std::string_view scene_name, const renderer::Ren
                           const renderer::RussianRoulettePolicy& roulette_policy,
                           const std::span<const CpuWavefrontMisPathInput> inputs,
                           const std::span<const renderer::BsdfOnlyPathResult> scalar_paths,
-                          const CpuWavefrontMisBatch& wavefront) {
+                          const CpuWavefrontMisBatch& wavefront,
+                          const bool require_shadow_queries = true) {
     ASSERT_EQ(inputs.size(), scalar_paths.size());
     ASSERT_EQ(inputs.size(), wavefront.paths.size());
     constexpr auto expected_worker_count = std::uint32_t{4U};
@@ -337,7 +581,9 @@ void expect_image_metrics(const std::string_view scene_name, const renderer::Ren
     ASSERT_TRUE(queue_status.has_value()) << queue_status.error().message;
     ASSERT_GT(wavefront.report.closure_samples, 0U);
     ASSERT_GT(wavefront.report.light_samples, 0U);
-    ASSERT_GT(wavefront.report.shadow_queries, 0U);
+    if (require_shadow_queries) {
+        ASSERT_GT(wavefront.report.shadow_queries, 0U);
+    }
     auto scalar_film = renderer::ReferenceFilm::create(extent);
     auto wavefront_film = renderer::Film::create(extent);
     ASSERT_TRUE(scalar_film.has_value()) << scalar_film.error().message;
@@ -395,6 +641,71 @@ trace_scalar_batch(const std::span<const CpuWavefrontMisPathInput> inputs,
         paths.push_back(*traced);
     }
     return paths;
+}
+
+struct MaterialParityResult final {
+    std::vector<renderer::BsdfOnlyPathResult> scalar;
+    CpuWavefrontMisBatch wavefront;
+};
+
+[[nodiscard]] core::Result<MaterialParityResult>
+trace_material_parity(const FrameSceneHandle& scene,
+                      const std::span<const CpuWavefrontMisPathInput> inputs,
+                      const renderer::PathDepthLimits& depth_limits = OneSurfaceBounce,
+                      const renderer::MisHeuristic heuristic = renderer::MisHeuristic::power) {
+    const auto light_count = scene->punctual_lights().size() + scene->mesh_area_lights().size();
+    const auto sampler = renderer::LightSampler::create_uniform(light_count);
+    const auto scalar_backend = create_analytic_accel_backend(scene);
+    const auto wavefront_backend = create_embree_accel_backend(scene);
+    const auto scheduler = renderer::CpuWavefrontScheduler::create(4U);
+    if (!sampler) {
+        return std::unexpected(sampler.error());
+    }
+    if (!scalar_backend) {
+        return std::unexpected(scalar_backend.error());
+    }
+    if (!wavefront_backend) {
+        return std::unexpected(wavefront_backend.error());
+    }
+    if (!scheduler) {
+        return std::unexpected(scheduler.error());
+    }
+    auto scalar = trace_scalar_batch(inputs, **scalar_backend, *sampler, heuristic, depth_limits,
+                                     renderer::RussianRoulettePolicy::disabled());
+    if (!scalar) {
+        return std::unexpected(scalar.error());
+    }
+    auto wavefront =
+        trace_cpu_wavefront_mis(inputs, *scheduler, **wavefront_backend, *sampler, heuristic,
+                                depth_limits, renderer::RussianRoulettePolicy::disabled());
+    if (!wavefront) {
+        return std::unexpected(wavefront.error());
+    }
+    return MaterialParityResult{
+        .scalar = std::move(*scalar),
+        .wavefront = std::move(*wavefront),
+    };
+}
+
+void expect_material_parity(const std::string_view scene_name,
+                            const std::span<const CpuWavefrontMisPathInput> inputs,
+                            const MaterialParityResult& parity,
+                            const bool require_shadow_queries = true,
+                            const renderer::PathDepthLimits& depth_limits = OneSurfaceBounce) {
+    ASSERT_EQ(parity.scalar.size(), inputs.size());
+    ASSERT_EQ(parity.wavefront.paths.size(), inputs.size());
+    for (auto index = std::size_t{}; index < inputs.size(); ++index) {
+        SCOPED_TRACE(index);
+        expect_path_near(parity.scalar[index], parity.wavefront.paths[index],
+                         ScalarParityTolerance);
+    }
+    ASSERT_LE(inputs.size(), std::numeric_limits<std::uint32_t>::max());
+    expect_image_metrics(
+        scene_name,
+        renderer::RenderExtent{.width = static_cast<std::uint32_t>(inputs.size()), .height = 1U},
+        1U, renderer::MisHeuristic::power, depth_limits,
+        renderer::RussianRoulettePolicy::disabled(), inputs, parity.scalar, parity.wavefront,
+        require_shadow_queries);
 }
 
 struct ExpectedQueueStatistics final {
@@ -952,6 +1263,422 @@ TEST(WavefrontMisTransportNumericTest, SkipsUnrepresentableDirectRadiometryWhenT
     expect_image_metrics("OccludedPointLight", renderer::RenderExtent{.width = 1U, .height = 1U},
                          1U, heuristic, OneDiffuseBounce,
                          renderer::RussianRoulettePolicy::disabled(), *inputs, *scalar, *wavefront);
+}
+
+TEST(WavefrontMisMaterialParityTest, MatchesRoughDiffuseAndIsotropicConductorEvents) {
+    const auto primary = material_primary_ray(renderer::Vector3{.z = 1.0F});
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    constexpr auto bands =
+        std::array{ComponentSampleBand{.lower = 0.0F, .upper = 1.0F, .count = 16U}};
+
+    const auto verify = [&](const std::string_view name, SceneClosureMixture closure,
+                            const renderer::ScatteringLobe expected_family) {
+        SCOPED_TRACE(name);
+        const auto scene = make_material_scene(std::move(closure));
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+
+        auto accepted_events = std::size_t{};
+        for (const auto& path : parity->scalar) {
+            if (path.termination == renderer::BsdfOnlyPathTermination::outside_bsdf_support) {
+                EXPECT_EQ(path.state.depth(), 0U);
+                EXPECT_EQ(path.state.depth_counters(), renderer::PathDepthCounters{});
+                EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::none);
+                continue;
+            }
+            ++accepted_events;
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth(), 1U);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+            EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+            EXPECT_GT(path.terminal_ray.direction().z, 0.0F);
+            if (expected_family == renderer::ScatteringLobe::diffuse) {
+                EXPECT_EQ(path.state.depth_counters(),
+                          (renderer::PathDepthCounters{.diffuse = 1U}));
+            } else {
+                EXPECT_EQ(path.state.depth_counters(), (renderer::PathDepthCounters{.glossy = 1U}));
+            }
+            for (const auto radiance : path.state.accumulated_radiance().values) {
+                EXPECT_TRUE(std::isfinite(radiance));
+                EXPECT_GT(radiance, 0.0F);
+            }
+        }
+        EXPECT_GT(accepted_events, 0U);
+        expect_material_parity(name, *inputs, *parity);
+    };
+
+    verify("RoughDiffuse", rough_diffuse_scene_closure(), renderer::ScatteringLobe::diffuse);
+    verify("RoughConductorIsotropic", rough_conductor_scene_closure(0.35F, 0.35F),
+           renderer::ScatteringLobe::glossy);
+}
+
+TEST(WavefrontMisMaterialParityTest, RotatesAnisotropicConductorFrameCoherently) {
+    const auto unrotated_scene = make_material_scene(rough_conductor_scene_closure(0.15F, 0.6F));
+    const auto rotated_scene = make_material_scene(
+        rough_conductor_scene_closure(0.15F, 0.6F, std::numbers::pi_v<float> / 2.0F));
+    const auto primary = material_primary_ray(renderer::Vector3{.z = 1.0F});
+    ASSERT_TRUE(unrotated_scene.has_value()) << unrotated_scene.error().message;
+    ASSERT_TRUE(rotated_scene.has_value()) << rotated_scene.error().message;
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    constexpr auto bands =
+        std::array{ComponentSampleBand{.lower = 0.0F, .upper = 1.0F, .count = 16U}};
+    const auto inputs = make_material_inputs(*unrotated_scene, *primary, bands);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+    const auto unrotated = trace_material_parity(*unrotated_scene, *inputs);
+    const auto rotated = trace_material_parity(*rotated_scene, *inputs);
+    ASSERT_TRUE(unrotated.has_value()) << unrotated.error().message;
+    ASSERT_TRUE(rotated.has_value()) << rotated.error().message;
+    ASSERT_EQ(unrotated->scalar.size(), rotated->scalar.size());
+
+    auto observed_azimuthal_sample = false;
+    auto accepted_events = std::size_t{};
+    for (auto index = std::size_t{}; index < unrotated->scalar.size(); ++index) {
+        SCOPED_TRACE(index);
+        const auto& base = unrotated->scalar[index];
+        const auto& quarter_turn = rotated->scalar[index];
+        EXPECT_EQ(quarter_turn.termination, base.termination);
+        if (base.termination == renderer::BsdfOnlyPathTermination::outside_bsdf_support) {
+            EXPECT_EQ(base.state.depth_counters(), renderer::PathDepthCounters{});
+            EXPECT_EQ(quarter_turn.state.depth_counters(), renderer::PathDepthCounters{});
+            continue;
+        }
+        ++accepted_events;
+        EXPECT_EQ(base.state.depth_counters(), (renderer::PathDepthCounters{.glossy = 1U}));
+        EXPECT_EQ(quarter_turn.state.depth_counters(), base.state.depth_counters());
+        EXPECT_NEAR(quarter_turn.terminal_ray.direction().x, -base.terminal_ray.direction().y,
+                    ScalarParityTolerance);
+        EXPECT_NEAR(quarter_turn.terminal_ray.direction().y, base.terminal_ray.direction().x,
+                    ScalarParityTolerance);
+        EXPECT_NEAR(quarter_turn.terminal_ray.direction().z, base.terminal_ray.direction().z,
+                    ScalarParityTolerance);
+        EXPECT_EQ(quarter_turn.state.beta(), base.state.beta());
+        for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+            EXPECT_NEAR(quarter_turn.state.accumulated_radiance()[lane],
+                        base.state.accumulated_radiance()[lane], ScalarParityTolerance);
+        }
+        observed_azimuthal_sample = observed_azimuthal_sample ||
+                                    std::abs(base.terminal_ray.direction().x) > 1.0e-3F ||
+                                    std::abs(base.terminal_ray.direction().y) > 1.0e-3F;
+    }
+    EXPECT_GT(accepted_events, 0U);
+    EXPECT_TRUE(observed_azimuthal_sample);
+    expect_material_parity("RoughConductorAnisotropic", *inputs, *unrotated);
+    expect_material_parity("RoughConductorAnisotropicRotated", *inputs, *rotated);
+}
+
+TEST(WavefrontMisMaterialParityTest, MatchesRoughDielectricReflectionTransmissionAndTir) {
+    const auto scene = make_material_scene(rough_dielectric_scene_closure());
+    const auto primary = material_primary_ray(renderer::Vector3{.z = 1.0F});
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    constexpr auto branch_bands = std::array{
+        ComponentSampleBand{.lower = 0.0F, .upper = 0.01F, .count = 8U},
+        ComponentSampleBand{.lower = 0.5F, .upper = 0.95F, .count = 8U},
+    };
+    const auto inputs = make_material_inputs(*scene, *primary, branch_bands);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+    const auto parity = trace_material_parity(*scene, *inputs);
+    ASSERT_TRUE(parity.has_value()) << parity.error().message;
+
+    auto reflected = std::size_t{};
+    auto transmitted = std::size_t{};
+    auto supported_events = std::size_t{};
+    for (const auto& path : parity->scalar) {
+        if (path.termination == renderer::BsdfOnlyPathTermination::outside_bsdf_support) {
+            EXPECT_EQ(path.state.depth(), 0U);
+            EXPECT_EQ(path.state.depth_counters(), renderer::PathDepthCounters{});
+            continue;
+        }
+        ++supported_events;
+        EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+        EXPECT_EQ(path.state.depth(), 1U);
+        EXPECT_EQ(path.state.depth_counters().glossy, 1U);
+        EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+        if (path.terminal_ray.direction().z > 0.0F) {
+            ++reflected;
+            EXPECT_EQ(path.state.depth_counters().transmission, 0U);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+        } else {
+            ++transmitted;
+            EXPECT_EQ(path.state.depth_counters().transmission, 1U);
+            EXPECT_NEAR(path.state.eta_scale(), 2.25F, ScalarParityTolerance);
+        }
+        for (const auto radiance : path.state.accumulated_radiance().values) {
+            EXPECT_TRUE(std::isfinite(radiance));
+            EXPECT_GT(radiance, 0.0F);
+        }
+    }
+    EXPECT_GT(supported_events, 0U);
+    EXPECT_GT(reflected, 0U);
+    EXPECT_GT(transmitted, 0U);
+    expect_material_parity("RoughDielectricBranches", *inputs, *parity);
+
+    const auto tir_scene = make_material_scene(rough_dielectric_scene_closure(0.05F, 0.2F));
+    constexpr auto inside_outgoing = renderer::Vector3{.x = 0.8F, .z = -0.6F};
+    const auto tir_primary = material_primary_ray(inside_outgoing);
+    ASSERT_TRUE(tir_scene.has_value()) << tir_scene.error().message;
+    ASSERT_TRUE(tir_primary.has_value()) << tir_primary.error().message;
+    constexpr auto tir_band =
+        std::array{ComponentSampleBand{.lower = 0.95F, .upper = 1.0F, .count = 64U}};
+    const auto tir_inputs = make_material_inputs(*tir_scene, *tir_primary, tir_band);
+    ASSERT_TRUE(tir_inputs.has_value()) << tir_inputs.error().message;
+    const auto tir_parity = trace_material_parity(*tir_scene, *tir_inputs);
+    ASSERT_TRUE(tir_parity.has_value()) << tir_parity.error().message;
+
+    auto total_internal_reflections = std::size_t{};
+    for (const auto& path : tir_parity->scalar) {
+        if (path.state.depth_counters().glossy != 1U ||
+            path.state.depth_counters().transmission != 0U ||
+            path.terminal_ray.direction().z >= 0.0F) {
+            continue;
+        }
+        auto microfacet = inside_outgoing + path.terminal_ray.direction();
+        const auto length = std::hypot(std::hypot(microfacet.x, microfacet.y), microfacet.z);
+        ASSERT_TRUE(std::isfinite(length));
+        ASSERT_GT(length, 0.0F);
+        microfacet = microfacet / length;
+        if (renderer::dot(inside_outgoing, microfacet) < 0.0F) {
+            microfacet = microfacet * -1.0F;
+        }
+        const auto fresnel = renderer::dielectric_fresnel(
+            std::abs(renderer::dot(inside_outgoing, microfacet)), 1.5F, 1.0F);
+        ASSERT_TRUE(fresnel.has_value()) << fresnel.error().message;
+        if (*fresnel == 1.0F) {
+            ++total_internal_reflections;
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+            EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+        }
+    }
+    EXPECT_GT(total_internal_reflections, 0U);
+    expect_material_parity("RoughDielectricTir", *tir_inputs, *tir_parity, false);
+}
+
+TEST(WavefrontMisMaterialParityTest, MatchesSpecularDeltaEntryExitAndTir) {
+    constexpr auto bands =
+        std::array{ComponentSampleBand{.lower = 0.0F, .upper = 1.0F, .count = 4U}};
+    {
+        const auto scene = make_material_scene(mirror_scene_closure());
+        const auto primary = material_primary_ray(renderer::Vector3{.x = 0.6F, .z = 0.8F});
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        ASSERT_TRUE(primary.has_value()) << primary.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        for (const auto& path : parity->scalar) {
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth_counters(), (renderer::PathDepthCounters{.specular = 1U}));
+            EXPECT_EQ(path.state.delta_flags(),
+                      renderer::PathDeltaFlags::previous_bounce_was_delta);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+            EXPECT_NEAR(path.terminal_ray.direction().x, -0.6F, ScalarParityTolerance);
+            EXPECT_NEAR(path.terminal_ray.direction().z, 0.8F, ScalarParityTolerance);
+        }
+        expect_material_parity("SpecularMirror", *inputs, *parity, false);
+    }
+    {
+        const auto scene = make_material_scene(transmission_scene_closure());
+        const auto primary = material_primary_ray(renderer::Vector3{.x = 0.6F, .z = 0.8F});
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        ASSERT_TRUE(primary.has_value()) << primary.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        for (const auto& path : parity->scalar) {
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth_counters(),
+                      (renderer::PathDepthCounters{.specular = 1U, .transmission = 1U}));
+            EXPECT_EQ(path.state.delta_flags(),
+                      renderer::PathDeltaFlags::previous_bounce_was_delta);
+            EXPECT_NEAR(path.state.eta_scale(), 2.25F, ScalarParityTolerance);
+            EXPECT_NEAR(path.terminal_ray.direction().x, -0.4F, ScalarParityTolerance);
+            EXPECT_NEAR(path.terminal_ray.direction().z, -std::sqrt(0.84F), ScalarParityTolerance);
+        }
+        expect_material_parity("SpecularTransmissionEntry", *inputs, *parity, false);
+    }
+    {
+        const auto scene = make_material_scene(transmission_scene_closure());
+        const auto primary = material_primary_ray(renderer::Vector3{.x = 0.6F, .z = -0.8F});
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        ASSERT_TRUE(primary.has_value()) << primary.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        for (const auto& path : parity->scalar) {
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth_counters(),
+                      (renderer::PathDepthCounters{.specular = 1U, .transmission = 1U}));
+            EXPECT_EQ(path.state.delta_flags(),
+                      renderer::PathDeltaFlags::previous_bounce_was_delta);
+            EXPECT_NEAR(path.state.eta_scale(), 4.0F / 9.0F, ScalarParityTolerance);
+            EXPECT_NEAR(path.terminal_ray.direction().x, -0.9F, ScalarParityTolerance);
+            EXPECT_NEAR(path.terminal_ray.direction().z, std::sqrt(0.19F), ScalarParityTolerance);
+        }
+        expect_material_parity("SpecularTransmissionExit", *inputs, *parity, false);
+    }
+    {
+        const auto scene = make_material_scene(transmission_scene_closure());
+        const auto primary = material_primary_ray(renderer::Vector3{.x = 0.8F, .z = -0.6F});
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        ASSERT_TRUE(primary.has_value()) << primary.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        for (auto index = std::size_t{}; index < parity->scalar.size(); ++index) {
+            const auto& path = parity->scalar[index];
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::outside_bsdf_support);
+            EXPECT_EQ(path.state.depth_counters(), renderer::PathDepthCounters{});
+            EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::none);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+            EXPECT_EQ(path.state.accumulated_radiance(), renderer::TransportSpectrum{});
+            EXPECT_EQ(path.terminal_ray.direction(), inputs->at(index).primary_ray.direction());
+        }
+        expect_material_parity("SpecularTransmissionTir", *inputs, *parity, false);
+    }
+}
+
+TEST(WavefrontMisMaterialParityTest, MatchesContinuousAndMixedMeasureMixtures) {
+    const auto primary = material_primary_ray(renderer::Vector3{.z = 1.0F});
+    const auto dimensions = renderer::sample_dimensions_for_bounce(0U);
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    ASSERT_TRUE(dimensions.has_value()) << dimensions.error().message;
+    {
+        const auto mixture = continuous_mixture_scene_closure();
+        const auto first_probability = mixture.active_component_probabilities().front();
+        const auto scene = make_material_scene(mixture);
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        const auto bands = std::array{
+            ComponentSampleBand{.lower = 0.0F, .upper = first_probability * 0.9F, .count = 8U},
+            ComponentSampleBand{.lower = first_probability + 0.05F, .upper = 1.0F, .count = 8U},
+        };
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        auto first_selected = std::size_t{};
+        auto second_selected = std::size_t{};
+        for (auto index = std::size_t{}; index < parity->scalar.size(); ++index) {
+            const auto component = renderer::SampleStream{inputs->at(index).sample}.sample_1d(
+                dimensions->bsdf_component);
+            component < first_probability ? ++first_selected : ++second_selected;
+            const auto& path = parity->scalar[index];
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth_counters(), (renderer::PathDepthCounters{.diffuse = 1U}));
+            EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+        }
+        EXPECT_GT(first_selected, 0U);
+        EXPECT_GT(second_selected, 0U);
+        expect_material_parity("ContinuousClosureMixture", *inputs, *parity);
+    }
+    {
+        const auto mixture = mixed_measure_scene_closure();
+        const auto first_probability = mixture.active_component_probabilities().front();
+        const auto scene = make_material_scene(mixture);
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        const auto bands = std::array{
+            ComponentSampleBand{.lower = 0.0F, .upper = first_probability * 0.9F, .count = 8U},
+            ComponentSampleBand{.lower = first_probability + 0.05F, .upper = 1.0F, .count = 8U},
+        };
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        auto diffuse_selected = std::size_t{};
+        auto mirror_selected = std::size_t{};
+        for (auto index = std::size_t{}; index < parity->scalar.size(); ++index) {
+            const auto component = renderer::SampleStream{inputs->at(index).sample}.sample_1d(
+                dimensions->bsdf_component);
+            const auto& path = parity->scalar[index];
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+            if (component < first_probability) {
+                ++diffuse_selected;
+                EXPECT_EQ(path.state.depth_counters(),
+                          (renderer::PathDepthCounters{.diffuse = 1U}));
+                EXPECT_EQ(path.state.delta_flags(),
+                          renderer::PathDeltaFlags::any_non_delta_bounces);
+            } else {
+                ++mirror_selected;
+                EXPECT_EQ(path.state.depth_counters(),
+                          (renderer::PathDepthCounters{.specular = 1U}));
+                EXPECT_EQ(path.state.delta_flags(),
+                          renderer::PathDeltaFlags::previous_bounce_was_delta);
+                EXPECT_NEAR(path.terminal_ray.direction().x, 0.0F, ScalarParityTolerance);
+                EXPECT_NEAR(path.terminal_ray.direction().y, 0.0F, ScalarParityTolerance);
+                EXPECT_NEAR(path.terminal_ray.direction().z, 1.0F, ScalarParityTolerance);
+            }
+        }
+        EXPECT_GT(diffuse_selected, 0U);
+        EXPECT_GT(mirror_selected, 0U);
+        expect_material_parity("MixedMeasureClosureMixture", *inputs, *parity);
+    }
+}
+
+TEST(WavefrontMisMaterialParityTest,
+     MatchesDepthFilteredContinuousMixturesAndReflectionOnlyRoughDielectric) {
+    const auto primary = material_primary_ray(renderer::Vector3{.z = 1.0F});
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    constexpr auto bands = std::array{
+        ComponentSampleBand{.lower = 0.0F, .upper = 0.3F, .count = 8U},
+        ComponentSampleBand{.lower = 0.4F, .upper = 1.0F, .count = 8U},
+    };
+
+    {
+        constexpr auto diffuse_only = renderer::PathDepthLimits{
+            .diffuse = 1U,
+            .glossy = 0U,
+        };
+        const auto scene = make_material_scene(depth_filtered_continuous_mixture_scene_closure());
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs, diffuse_only);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        for (const auto& path : parity->scalar) {
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth_counters(), (renderer::PathDepthCounters{.diffuse = 1U}));
+            EXPECT_EQ(path.state.beta(), constant_spectrum(0.25F));
+            EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+        }
+        expect_material_parity("DepthFilteredContinuousClosureMixture", *inputs, *parity, true,
+                               diffuse_only);
+    }
+
+    {
+        constexpr auto reflection_only = renderer::PathDepthLimits{
+            .glossy = 1U,
+            .transmission = 0U,
+        };
+        const auto scene = make_material_scene(rough_dielectric_scene_closure());
+        ASSERT_TRUE(scene.has_value()) << scene.error().message;
+        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        const auto parity = trace_material_parity(*scene, *inputs, reflection_only);
+        ASSERT_TRUE(parity.has_value()) << parity.error().message;
+        auto reflected = std::size_t{};
+        for (const auto& path : parity->scalar) {
+            if (path.termination == renderer::BsdfOnlyPathTermination::outside_bsdf_support) {
+                EXPECT_EQ(path.state.depth_counters(), renderer::PathDepthCounters{});
+                continue;
+            }
+            ++reflected;
+            EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
+            EXPECT_EQ(path.state.depth_counters(), (renderer::PathDepthCounters{.glossy = 1U}));
+            EXPECT_GT(path.terminal_ray.direction().z, 0.0F);
+            EXPECT_EQ(path.state.eta_scale(), 1.0F);
+            EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::any_non_delta_bounces);
+        }
+        EXPECT_GT(reflected, 0U);
+        expect_material_parity("ReflectionOnlyRoughDielectric", *inputs, *parity, true,
+                               reflection_only);
+    }
 }
 
 TEST(WavefrontMisTransportBackendTest, RejectsTheAnalyticOracleBeforeAnyFallbackCanRun) {

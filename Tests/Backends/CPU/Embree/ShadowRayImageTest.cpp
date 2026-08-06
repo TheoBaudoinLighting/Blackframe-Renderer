@@ -62,6 +62,11 @@ struct PanelStatistics final {
     return spectrum;
 }
 
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 [[nodiscard]] core::Result<std::shared_ptr<const TriangleMesh>>
 make_horizontal_quad(const float height, const float half_extent, const bool faces_down = false) {
     const auto normal = faces_down ? renderer::Normal3{.z = -1.0F} : renderer::Normal3{.z = 1.0F};
@@ -131,7 +136,8 @@ make_horizontal_quad(const float height, const float half_extent, const bool fac
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = constant_spectrum(0.5F),
+                            .closure_mixture =
+                                require_lambertian_scene_closure(constant_spectrum(0.5F)),
                             .emitted_radiance = constant_spectrum(0.0F),
                         },
                 },
@@ -140,7 +146,8 @@ make_horizontal_quad(const float height, const float half_extent, const bool fac
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = *wavelengths,
-                            .reflectance = constant_spectrum(0.0F),
+                            .closure_mixture =
+                                require_lambertian_scene_closure(constant_spectrum(0.0F)),
                             .emitted_radiance = constant_spectrum(1.0F),
                         },
                 },

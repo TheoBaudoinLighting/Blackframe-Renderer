@@ -58,6 +58,11 @@ transport_options(const std::uint32_t maximum_diffuse_depth = CornellMaximumDiff
     };
 }
 
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 [[nodiscard]] core::Result<renderer::LightSampler>
 make_uniform_light_sampler(const FrameScene& scene) {
     return renderer::LightSampler::create_uniform(scene.punctual_lights().size() +
@@ -98,7 +103,8 @@ make_environment_receiver_scene(const renderer::SampledWavelengths& sampled_wave
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = sampled_wavelengths,
-                            .reflectance = {.values = {0.25F, 0.5F, 0.75F, 1.0F}},
+                            .closure_mixture = require_lambertian_scene_closure(
+                                {.values = {0.25F, 0.5F, 0.75F, 1.0F}}),
                             .emitted_radiance = {},
                         },
                 },
@@ -119,6 +125,96 @@ make_environment_receiver_scene(const renderer::SampledWavelengths& sampled_wave
             SceneSpectralEnvironment{
                 .wavelengths = sampled_wavelengths,
                 .radiance = {.values = {2.0F, 2.0F, 2.0F, 2.0F}},
+            },
+    });
+}
+
+[[nodiscard]] core::Result<FrameSceneHandle>
+make_specular_dispatch_scene(const renderer::SampledWavelengths& sampled_wavelengths) {
+    auto mesh = TriangleMesh::create(
+        {
+            renderer::Point3{.x = 0.0F, .y = -2.0F, .z = 0.0F},
+            renderer::Point3{.x = 2.0F, .y = -2.0F, .z = 0.0F},
+            renderer::Point3{.x = 2.0F, .y = 2.0F, .z = 0.0F},
+            renderer::Point3{.x = 0.0F, .y = 2.0F, .z = 0.0F},
+            renderer::Point3{.x = 0.0F, .y = -2.0F, .z = 1.0F},
+            renderer::Point3{.x = 0.0F, .y = 2.0F, .z = 1.0F},
+            renderer::Point3{.x = 2.0F, .y = 2.0F, .z = 1.0F},
+            renderer::Point3{.x = 2.0F, .y = -2.0F, .z = 1.0F},
+        },
+        {
+            renderer::Normal3{.z = 1.0F},
+            renderer::Normal3{.z = 1.0F},
+            renderer::Normal3{.z = 1.0F},
+            renderer::Normal3{.z = 1.0F},
+            renderer::Normal3{.z = -1.0F},
+            renderer::Normal3{.z = -1.0F},
+            renderer::Normal3{.z = -1.0F},
+            renderer::Normal3{.z = -1.0F},
+        },
+        {
+            renderer::Point2{},
+            renderer::Point2{.x = 1.0F},
+            renderer::Point2{.x = 1.0F, .y = 1.0F},
+            renderer::Point2{.y = 1.0F},
+            renderer::Point2{},
+            renderer::Point2{.y = 1.0F},
+            renderer::Point2{.x = 1.0F, .y = 1.0F},
+            renderer::Point2{.x = 1.0F},
+        },
+        {
+            TriangleVertexIndices{.vertices = {0U, 1U, 2U}},
+            TriangleVertexIndices{.vertices = {0U, 2U, 3U}},
+            TriangleVertexIndices{.vertices = {4U, 5U, 6U}},
+            TriangleVertexIndices{.vertices = {4U, 6U, 7U}},
+        });
+    if (!mesh) {
+        return std::unexpected(mesh.error());
+    }
+
+    auto closures = renderer::ClosureSet{};
+    const auto appended = closures.append_specular_reflection(
+        renderer::TransportSpectrum{.values = {0.8F, 0.8F, 0.8F, 0.8F}});
+    if (appended != renderer::ClosureAppendStatus::appended) {
+        return std::unexpected(core::Error{
+            .code = core::StatusCode::internal_error,
+            .message = "The specular dispatch fixture could not create its mirror closure.",
+        });
+    }
+    constexpr auto probabilities = std::array{renderer::TransportScalar{1.0F}};
+    auto closure_mixture = SceneClosureMixture::create(std::move(closures), probabilities);
+    if (!closure_mixture) {
+        return std::unexpected(closure_mixture.error());
+    }
+
+    return FrameScene::create(FrameSceneDescription{
+        .objects = {SceneObject{.id = {.value = 1U}}},
+        .geometries = {SceneGeometry{
+            .id = {.value = 11U},
+            .mesh = std::make_shared<const TriangleMesh>(std::move(*mesh)),
+        }},
+        .materials = {SceneMaterial{
+            .id = {.value = 21U},
+            .spectral =
+                SceneSpectralMaterial{
+                    .wavelengths = sampled_wavelengths,
+                    .closure_mixture = std::move(*closure_mixture),
+                    .emitted_radiance = {},
+                },
+        }},
+        .instances = {SceneInstance{
+            .id = {.value = 31U},
+            .parent = std::nullopt,
+            .object = {.value = 1U},
+            .geometry = {.value = 11U},
+            .material = {.value = 21U},
+            .local_to_parent = renderer::identity_matrix<renderer::TransportScalar>(),
+        }},
+        .punctual_lights = {},
+        .spectral_environment =
+            SceneSpectralEnvironment{
+                .wavelengths = sampled_wavelengths,
+                .radiance = {.values = {0.25F, 0.25F, 0.25F, 0.25F}},
             },
     });
 }
@@ -674,6 +770,67 @@ TEST_F(CudaCornellWavefrontSmokeTest, SamplesLambertThenEnvironmentWithoutRegist
     EXPECT_EQ(traced->report.stage_lanes.miss, 1U);
     EXPECT_EQ(traced->report.stage_lanes.shade, 1U);
     EXPECT_EQ(traced->report.stage_lanes.continuation, 1U);
+
+    EXPECT_TRUE(bvh.close().has_value());
+    EXPECT_TRUE(uploaded.close().has_value());
+}
+
+TEST(CudaWavefrontDepthDispatchTest, AllowsSpecularBouncesBeyondDiffuseLimit) {
+    ASSERT_TRUE(select_test_device());
+    const auto wavelengths = renderer::sample_uniform_visible_wavelengths(0.25F);
+    ASSERT_TRUE(wavelengths.has_value()) << wavelengths.error().message;
+    const auto frame = make_specular_dispatch_scene(*wavelengths);
+    ASSERT_TRUE(frame.has_value()) << frame.error().message;
+    auto uploaded_result = CudaSceneSoA::upload(**frame);
+    ASSERT_TRUE(uploaded_result.has_value()) << uploaded_result.error().message;
+    auto uploaded = std::move(*uploaded_result);
+    auto bvh_result = CudaSceneBvh::build(uploaded);
+    ASSERT_TRUE(bvh_result.has_value()) << bvh_result.error().message;
+    auto bvh = std::move(*bvh_result);
+
+    const auto initial_state =
+        renderer::PathState::create_initial(*wavelengths, renderer::VacuumMedium);
+    ASSERT_TRUE(initial_state.has_value()) << initial_state.error().message;
+    const auto primary = renderer::Ray::create(
+        renderer::Point3{.x = 0.5F, .z = 0.5F}, renderer::Vector3{.x = 0.6F, .z = -0.8F}, 0.0F,
+        std::numeric_limits<renderer::TransportScalar>::infinity(), CornellPathTime,
+        renderer::AllRayVisibility, renderer::VacuumMedium);
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    const auto sampler = renderer::IndependentSampler{CornellSeed};
+    const auto inputs = std::array{
+        CudaWavefrontPathInput{
+            .primary_ray = *primary,
+            .initial_state = *initial_state,
+            .sample = sampler.make_stream(0U, 0U, 0U).index(),
+        },
+    };
+    const auto options = CudaWavefrontTransportOptions{
+        .heuristic = renderer::MisHeuristic::power,
+        .depth_limits = renderer::PathDepthLimits{.specular = 2U},
+        .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
+    };
+    const auto traced =
+        trace_cuda_wavefront_transport(uploaded, bvh, inputs, std::nullopt, options);
+    ASSERT_TRUE(traced.has_value()) << traced.error().message;
+    ASSERT_EQ(traced->paths.size(), 1U);
+    const auto& path = traced->paths.front();
+    EXPECT_EQ(path.termination, CudaWavefrontPathTermination::escaped_environment);
+    EXPECT_EQ(path.state.depth_counters(), renderer::PathDepthCounters{.specular = 2U});
+    EXPECT_EQ(path.state.delta_flags(), renderer::PathDeltaFlags::previous_bounce_was_delta);
+    EXPECT_EQ(traced->report.stage_lanes.intersection, 3U);
+    EXPECT_EQ(traced->report.stage_lanes.hit, 2U);
+    EXPECT_EQ(traced->report.stage_lanes.miss, 1U);
+    EXPECT_EQ(traced->report.stage_lanes.shade, 2U);
+    EXPECT_EQ(traced->report.stage_lanes.continuation, 2U);
+    EXPECT_EQ(traced->report.closure_samples, 2U);
+    EXPECT_EQ(traced->report.light_samples, 0U);
+    EXPECT_EQ(traced->report.shadow_queries, 0U);
+    for (const auto value : path.state.beta().values) {
+        EXPECT_NEAR(value, 0.64F, 1.0e-6F);
+    }
+    for (const auto value : path.state.accumulated_radiance().values) {
+        EXPECT_NEAR(value, 0.16F, 1.0e-6F);
+    }
 
     EXPECT_TRUE(bvh.close().has_value());
     EXPECT_TRUE(uploaded.close().has_value());

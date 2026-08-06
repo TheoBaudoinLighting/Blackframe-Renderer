@@ -67,6 +67,11 @@ inline constexpr auto EnergyEmitterInstance = renderer::InstanceId{.value = 32U}
     return result;
 }
 
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
 // At the fixed packet below these non-negative lane weights map to equal
 // scene-linear sRGB components through Blackframe's CIE 1931 sensor. Keeping
 // all diffuse reflectances spectrally constant preserves that neutrality at
@@ -178,7 +183,8 @@ back_wall_quad(const float center_x, const float y, const float half_width, cons
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = wavelengths,
-                            .reflectance = constant_spectrum(ReceiverReflectance),
+                            .closure_mixture = require_lambertian_scene_closure(
+                                constant_spectrum(ReceiverReflectance)),
                             .emitted_radiance = {},
                         },
                 },
@@ -187,7 +193,7 @@ back_wall_quad(const float center_x, const float y, const float half_width, cons
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = wavelengths,
-                            .reflectance = {},
+                            .closure_mixture = require_lambertian_scene_closure({}),
                             .emitted_radiance = neutral_emission(),
                         },
                 },
@@ -245,7 +251,7 @@ back_wall_quad(const float center_x, const float y, const float half_width, cons
             .spectral =
                 SceneSpectralMaterial{
                     .wavelengths = wavelengths,
-                    .reflectance = constant_spectrum(0.68F),
+                    .closure_mixture = require_lambertian_scene_closure(constant_spectrum(0.68F)),
                     .emitted_radiance = {},
                 },
         },
@@ -291,7 +297,7 @@ back_wall_quad(const float center_x, const float y, const float half_width, cons
             .spectral =
                 SceneSpectralMaterial{
                     .wavelengths = wavelengths,
-                    .reflectance = {},
+                    .closure_mixture = require_lambertian_scene_closure({}),
                     .emitted_radiance = neutral_emission(equal_power_scale / area),
                 },
         });

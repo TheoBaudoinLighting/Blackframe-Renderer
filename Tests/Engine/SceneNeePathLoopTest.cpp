@@ -16,6 +16,7 @@
 #include <memory>
 #include <numbers>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -40,6 +41,25 @@ inline constexpr auto TestDepthLimits = renderer::PathDepthLimits{
     auto result = renderer::TransportSpectrum{};
     result.values.fill(1.0F);
     return result;
+}
+
+[[nodiscard]] SceneClosureMixture
+require_lambertian_scene_closure(const renderer::TransportSpectrum reflectance) {
+    return SceneClosureMixture::create_lambertian(reflectance).value();
+}
+
+[[nodiscard]] SceneClosureMixture
+continuous_mixed_family_scene_closure(const renderer::TransportSpectrum reflectance) {
+    auto closures = renderer::ClosureSet{};
+    if (closures.append_lambertian_reflection(reflectance) !=
+            renderer::ClosureAppendStatus::appended ||
+        closures.append_rough_conductor_reflection(
+            spectrum({0.8F, 0.8F, 0.8F, 0.8F}), spectrum({0.5F, 0.5F, 0.5F, 0.5F}),
+            spectrum({2.5F, 2.5F, 2.5F, 2.5F}), 0.35F) != renderer::ClosureAppendStatus::appended) {
+        throw std::runtime_error{"The NEE test closure mixture could not be constructed."};
+    }
+    constexpr auto probabilities = std::array{0.25F, 0.75F};
+    return SceneClosureMixture::create(std::move(closures), probabilities).value();
 }
 
 [[nodiscard]] std::shared_ptr<const TriangleMesh> horizontal_triangle(const float height,
@@ -98,7 +118,9 @@ struct NeeSceneOptions final {
     bool add_blocker{};
 };
 
-[[nodiscard]] FrameSceneHandle make_nee_scene(const NeeSceneOptions& options) {
+[[nodiscard]] FrameSceneHandle
+make_nee_scene(const NeeSceneOptions& options,
+               const std::optional<SceneClosureMixture>& receiver_closure = std::nullopt) {
     const auto wavelengths = test_wavelengths();
     const auto reflectance = spectrum({0.25F, 0.5F, 0.75F, 1.0F});
     auto description = FrameSceneDescription{
@@ -117,7 +139,8 @@ struct NeeSceneOptions final {
                     .spectral =
                         SceneSpectralMaterial{
                             .wavelengths = wavelengths,
-                            .reflectance = reflectance,
+                            .closure_mixture = receiver_closure.value_or(
+                                require_lambertian_scene_closure(reflectance)),
                             .emitted_radiance = renderer::TransportSpectrum{},
                         },
                 },
@@ -203,7 +226,8 @@ make_two_bounce_scene(const renderer::TransportSpectrum& first_reflectance,
                                .spectral =
                                    SceneSpectralMaterial{
                                        .wavelengths = wavelengths,
-                                       .reflectance = first_reflectance,
+                                       .closure_mixture =
+                                           require_lambertian_scene_closure(first_reflectance),
                                        .emitted_radiance = {},
                                    },
                            },
@@ -212,7 +236,8 @@ make_two_bounce_scene(const renderer::TransportSpectrum& first_reflectance,
                                .spectral =
                                    SceneSpectralMaterial{
                                        .wavelengths = wavelengths,
-                                       .reflectance = second_reflectance,
+                                       .closure_mixture =
+                                           require_lambertian_scene_closure(second_reflectance),
                                        .emitted_radiance = {},
                                    },
                            },
@@ -393,6 +418,31 @@ TEST(SceneNeePathLoopTest, MatchesTheAxialPointLightEstimator) {
                          expected_point_contribution(beta, intensity, 1.0F));
     EXPECT_EQ(result->termination, renderer::BsdfOnlyPathTermination::escaped_environment);
     EXPECT_EQ(result->state.depth(), 1U);
+}
+
+TEST(SceneNeePathLoopTest,
+     FiltersBlockedContinuousLobesBeforeDirectLightingAndContinuationSampling) {
+    const auto intensity = spectrum({4.0F, 8.0F, 12.0F, 16.0F});
+    const auto beta = spectrum({0.5F, 1.0F, 1.5F, 2.0F});
+    const auto reflectance = spectrum({0.25F, 0.5F, 0.75F, 1.0F});
+    const auto scene = make_nee_scene(
+        {
+            .point_intensities = {intensity},
+            .additional_lights = {},
+        },
+        continuous_mixed_family_scene_closure(reflectance));
+    const auto acceleration = analytic_backend(scene);
+    const auto sampler = renderer::LightSampler::create_uniform(1U).value();
+
+    const auto result = trace_nee(make_primary_ray(), make_path_state(beta), sample_stream(),
+                                  *acceleration, sampler);
+
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+    expect_spectrum_near(result->state.accumulated_radiance(),
+                         expected_point_contribution(beta, intensity, 1.0F));
+    EXPECT_EQ(result->state.beta(), beta * reflectance);
+    EXPECT_EQ(result->state.depth_counters(), (renderer::PathDepthCounters{.diffuse = 1U}));
+    EXPECT_EQ(result->termination, renderer::BsdfOnlyPathTermination::escaped_environment);
 }
 
 TEST(SceneNeePathLoopTest, SamplesDirectionalAndSpotRecordsWithTheirExactRadiometry) {

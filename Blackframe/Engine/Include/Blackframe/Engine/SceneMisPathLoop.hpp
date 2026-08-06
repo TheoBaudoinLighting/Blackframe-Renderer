@@ -8,7 +8,7 @@
 
 namespace blackframe::engine {
 
-// Traces a primary Lambertian path with one-sample next-event estimation and
+// Traces a primary bounded-closure path with one-sample next-event estimation and
 // complementary weighting for non-delta emissive-surface hits. The immutable
 // FrameScene owns the only emitter geometry and radiometry; the selected
 // AccelBackend handles every primary, continuation, and shadow query.

@@ -23,6 +23,8 @@ enum class ClosureKind : std::uint32_t {
     rough_diffuse_reflection = 2U,
     rough_conductor_reflection = 3U,
     rough_dielectric = 4U,
+    specular_reflection = 5U,
+    specular_transmission = 6U,
 };
 
 [[nodiscard]] constexpr bool is_known_closure_kind(const ClosureKind kind) noexcept {
@@ -32,6 +34,8 @@ enum class ClosureKind : std::uint32_t {
     case ClosureKind::rough_diffuse_reflection:
     case ClosureKind::rough_conductor_reflection:
     case ClosureKind::rough_dielectric:
+    case ClosureKind::specular_reflection:
+    case ClosureKind::specular_transmission:
         return true;
     }
     return false;
@@ -48,8 +52,10 @@ enum class ClosureAppendStatus : std::uint32_t {
 // parameters[0]. Rough conductor stores spectral eta in parameters[0..3], spectral k in
 // parameters[4..7], and GGX alphaX/alphaY in parameters[8..9]. Rough dielectric stores exterior
 // eta, interior eta, and GGX alphaX/alphaY in parameters[0..3] and leaves parameters[4..9]
-// reserved. Tangent-axis rotation belongs to the caller-supplied local closure frame and is not
-// duplicated in an individual closure record.
+// reserved. Specular reflection leaves every parameter zero; specular transmission stores exterior
+// and interior eta in parameters[0..1] and leaves parameters[2..9] reserved. Tangent-axis rotation
+// belongs to the caller-supplied local closure frame and is not duplicated in an individual
+// closure record.
 template <SpectrumScalar Scalar> struct alignas(8) ClosureT final {
     using spectrum_type = SampledSpectrum<TransportSpectrumSampleCount, Scalar>;
 
@@ -249,6 +255,50 @@ template <SpectrumScalar Scalar> class alignas(8) ClosureSetT final {
         return ClosureAppendStatus::appended;
     }
 
+    [[nodiscard]] ClosureAppendStatus
+    append_specular_reflection(const spectrum_type reflectance) noexcept {
+        if (!closure_set_detail::valid_reflectance(reflectance)) {
+            return ClosureAppendStatus::invalid_payload;
+        }
+        if (full()) {
+            return ClosureAppendStatus::capacity_exhausted;
+        }
+
+        closures_[size_] = closure_type{
+            .kind = ClosureKind::specular_reflection,
+            .lobes = ScatteringLobe::specular | ScatteringLobe::reflection,
+            .weight = reflectance,
+            .parameters = {},
+        };
+        ++size_;
+        return ClosureAppendStatus::appended;
+    }
+
+    [[nodiscard]] ClosureAppendStatus
+    append_specular_transmission(const spectrum_type transmittance, const Scalar exterior_eta,
+                                 const Scalar interior_eta) noexcept {
+        if (!closure_set_detail::valid_reflectance(transmittance) || !std::isfinite(exterior_eta) ||
+            !(exterior_eta > Scalar{0}) || !std::isfinite(interior_eta) ||
+            !(interior_eta > Scalar{0})) {
+            return ClosureAppendStatus::invalid_payload;
+        }
+        if (full()) {
+            return ClosureAppendStatus::capacity_exhausted;
+        }
+
+        auto parameters = std::array<Scalar, ClosureParameterScalarCount>{};
+        parameters[0] = exterior_eta;
+        parameters[1] = interior_eta;
+        closures_[size_] = closure_type{
+            .kind = ClosureKind::specular_transmission,
+            .lobes = ScatteringLobe::specular | ScatteringLobe::transmission,
+            .weight = transmittance,
+            .parameters = parameters,
+        };
+        ++size_;
+        return ClosureAppendStatus::appended;
+    }
+
   private:
     friend struct closure_set_detail::ClosureSetLayoutProbe<Scalar>;
 
@@ -279,6 +329,8 @@ static_assert(static_cast<std::uint32_t>(ClosureKind::lambertian_reflection) == 
 static_assert(static_cast<std::uint32_t>(ClosureKind::rough_diffuse_reflection) == 2U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::rough_conductor_reflection) == 3U);
 static_assert(static_cast<std::uint32_t>(ClosureKind::rough_dielectric) == 4U);
+static_assert(static_cast<std::uint32_t>(ClosureKind::specular_reflection) == 5U);
+static_assert(static_cast<std::uint32_t>(ClosureKind::specular_transmission) == 6U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::appended) == 0U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::invalid_payload) == 1U);
 static_assert(static_cast<std::uint32_t>(ClosureAppendStatus::capacity_exhausted) == 2U);

@@ -398,9 +398,9 @@ renderer_termination(const WavefrontLaneControl& control, const std::size_t path
                                                    " returned invalid blocked depth-limit bits."));
     }
     const auto termination = static_cast<WavefrontTermination>(control.termination);
-    if ((termination == WavefrontTermination::diffuse_depth_limit &&
-         blocked != renderer::ScatteringLobe::diffuse) ||
-        (termination != WavefrontTermination::diffuse_depth_limit &&
+    if ((termination == WavefrontTermination::depth_limit &&
+         blocked == renderer::ScatteringLobe::none) ||
+        (termination != WavefrontTermination::depth_limit &&
          blocked != renderer::ScatteringLobe::none)) {
         return std::unexpected(
             transport_error(core::StatusCode::internal_error,
@@ -411,7 +411,7 @@ renderer_termination(const WavefrontLaneControl& control, const std::size_t path
     switch (termination) {
     case WavefrontTermination::escaped_environment:
         return RendererTermination{.reason = CudaWavefrontPathTermination::escaped_environment};
-    case WavefrontTermination::diffuse_depth_limit:
+    case WavefrontTermination::depth_limit:
         return RendererTermination{
             .reason = CudaWavefrontPathTermination::depth_limit,
             .blocked_depth_limits = blocked,
@@ -1104,7 +1104,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
         return std::unexpected(ray_header.error());
     }
     auto iteration = std::uint64_t{};
-    const auto maximum_iterations = static_cast<std::uint64_t>(options.depth_limits.diffuse) + 2U;
+    // Transmission is an orthogonal counter attached to a surface-family event, so it does not
+    // add another bounce to the dispatch bound. The four primary families do.
+    const auto maximum_iterations = static_cast<std::uint64_t>(options.depth_limits.diffuse) +
+                                    static_cast<std::uint64_t>(options.depth_limits.glossy) +
+                                    static_cast<std::uint64_t>(options.depth_limits.specular) +
+                                    static_cast<std::uint64_t>(options.depth_limits.volume) + 2U;
     while (ray_header->size != 0U) {
         if (iteration++ >= maximum_iterations) {
             return std::unexpected(transport_error(

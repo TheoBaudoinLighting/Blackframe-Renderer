@@ -1,6 +1,8 @@
 #include <Blackframe/Engine/FrameScene.hpp>
+#include <Blackframe/Renderer/ClosureMixture.hpp>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -120,9 +123,13 @@ make_scene_spectral_material(const renderer::SampledWavelengths wavelengths,
                              const renderer::TransportSpectrum emitted_radiance = {}) {
     auto reflectance = renderer::TransportSpectrum{};
     reflectance.values.fill(0.5F);
+    const auto closure_mixture = SceneClosureMixture::create_lambertian(reflectance);
+    if (!closure_mixture) {
+        throw std::runtime_error{closure_mixture.error().message};
+    }
     return SceneSpectralMaterial{
         .wavelengths = wavelengths,
-        .reflectance = reflectance,
+        .closure_mixture = *closure_mixture,
         .emitted_radiance = emitted_radiance,
     };
 }
@@ -265,6 +272,168 @@ TEST(FrameSceneTest, KeepsEveryIdentifierDomainStrongAndSnapshotAccessReadOnly) 
     static_assert(!std::default_initializable<FrameScene>);
     static_assert(!std::copyable<FrameScene>);
     static_assert(std::is_nothrow_destructible_v<FrameScene>);
+    static_assert(std::is_trivially_copyable_v<SceneClosureMixture>);
+    static_assert(static_cast<std::uint8_t>(SceneClosureFrameMode::shading_normal) == 0U);
+    static_assert(static_cast<std::uint8_t>(SceneClosureFrameMode::surface_tangent) == 1U);
+}
+
+TEST(FrameSceneTest, CreatesAnExplicitLambertianClosureMixtureWithoutFallback) {
+    const auto reflectance = renderer::TransportSpectrum{.values = {0.125F, 0.25F, 0.5F, 0.75F}};
+    const auto mixture =
+        SceneClosureMixture::create_lambertian(reflectance, SceneClosureFrameMode::surface_tangent,
+                                               -std::numbers::pi_v<renderer::TransportScalar>);
+    ASSERT_TRUE(mixture.has_value()) << mixture.error().message;
+    ASSERT_EQ(mixture->closures.size(), 1U);
+    ASSERT_EQ(mixture->closures.closures().size(), 1U);
+    EXPECT_EQ(mixture->closures.closures().front().kind,
+              renderer::ClosureKind::lambertian_reflection);
+    EXPECT_EQ(mixture->closures.closures().front().weight, reflectance);
+    EXPECT_EQ(mixture->component_probabilities.front(), 1.0F);
+    EXPECT_TRUE(std::ranges::all_of(
+        std::span<const renderer::TransportScalar>{mixture->component_probabilities}.subspan(1U),
+        [](const auto probability) { return probability == 0.0F; }));
+    EXPECT_EQ(mixture->frame_mode, SceneClosureFrameMode::surface_tangent);
+    EXPECT_EQ(mixture->tangent_rotation_radians, -std::numbers::pi_v<renderer::TransportScalar>);
+
+    const auto validated = renderer::ClosureMixture::create(
+        mixture->closures, mixture->active_component_probabilities());
+    ASSERT_TRUE(validated.has_value()) << validated.error().message;
+    ASSERT_EQ(validated->component_probabilities().size(), 1U);
+    EXPECT_EQ(validated->component_probabilities().front(), 1.0F);
+
+    auto invalid_reflectance = reflectance;
+    invalid_reflectance[2] = std::numeric_limits<renderer::TransportScalar>::quiet_NaN();
+    expect_error_code(SceneClosureMixture::create_lambertian(invalid_reflectance),
+                      core::StatusCode::invalid_argument);
+}
+
+TEST(FrameSceneTest, StoresCanonicalBoundedMixtureProbabilitiesAndFrameMetadata) {
+    const auto reflectance = renderer::TransportSpectrum{.values = {0.2F, 0.4F, 0.6F, 0.8F}};
+    auto closures = renderer::ClosureSet{};
+    ASSERT_EQ(closures.append_lambertian_reflection(reflectance),
+              renderer::ClosureAppendStatus::appended);
+    ASSERT_EQ(closures.append_rough_diffuse_reflection(reflectance, 0.65F),
+              renderer::ClosureAppendStatus::appended);
+    ASSERT_EQ(closures.append_specular_reflection(reflectance),
+              renderer::ClosureAppendStatus::appended);
+    constexpr auto probabilities = std::array<renderer::TransportScalar, 3U>{0.25F, 0.25F, 0.5F};
+
+    const auto mixture = SceneClosureMixture::create(
+        closures, probabilities, SceneClosureFrameMode::surface_tangent, 0.375F);
+    ASSERT_TRUE(mixture.has_value()) << mixture.error().message;
+    ASSERT_EQ(mixture->closures.size(), closures.size());
+    for (auto index = std::size_t{}; index < static_cast<std::size_t>(closures.size()); ++index) {
+        const auto& actual = mixture->closures.closures()[index];
+        const auto& expected = closures.closures()[index];
+        EXPECT_EQ(actual.kind, expected.kind);
+        EXPECT_EQ(actual.lobes, expected.lobes);
+        EXPECT_EQ(actual.weight, expected.weight);
+        EXPECT_EQ(actual.parameters, expected.parameters);
+    }
+    EXPECT_TRUE(std::ranges::equal(mixture->active_component_probabilities(), probabilities));
+    EXPECT_TRUE(std::ranges::all_of(
+        std::span<const renderer::TransportScalar>{mixture->component_probabilities}.subspan(3U),
+        [](const auto probability) { return probability == 0.0F; }));
+    EXPECT_EQ(mixture->frame_mode, SceneClosureFrameMode::surface_tangent);
+    EXPECT_EQ(mixture->tangent_rotation_radians, 0.375F);
+}
+
+TEST(FrameSceneTest, RejectsInvalidMixtureProbabilitiesFramesAndRotationsWithoutRepair) {
+    const auto reflectance = renderer::TransportSpectrum{.values = {0.2F, 0.4F, 0.6F, 0.8F}};
+    auto closures = renderer::ClosureSet{};
+    ASSERT_EQ(closures.append_lambertian_reflection(reflectance),
+              renderer::ClosureAppendStatus::appended);
+    ASSERT_EQ(closures.append_rough_diffuse_reflection(reflectance, 0.5F),
+              renderer::ClosureAppendStatus::appended);
+    constexpr auto valid_probabilities = std::array<renderer::TransportScalar, 2U>{0.25F, 0.75F};
+    constexpr auto wrong_count = std::array<renderer::TransportScalar, 1U>{1.0F};
+    constexpr auto wrong_sum = std::array<renderer::TransportScalar, 2U>{0.25F, 0.25F};
+    constexpr auto zero_component = std::array<renderer::TransportScalar, 2U>{1.0F, 0.0F};
+    auto non_finite = valid_probabilities;
+    non_finite[1] = std::numeric_limits<renderer::TransportScalar>::infinity();
+
+    expect_error_code(SceneClosureMixture::create(closures, wrong_count),
+                      core::StatusCode::invalid_argument);
+    expect_error_code(SceneClosureMixture::create(closures, wrong_sum),
+                      core::StatusCode::invalid_argument);
+    expect_error_code(SceneClosureMixture::create(closures, zero_component),
+                      core::StatusCode::invalid_argument);
+    expect_error_code(SceneClosureMixture::create(closures, non_finite),
+                      core::StatusCode::invalid_argument);
+    expect_error_code(SceneClosureMixture::create(closures, valid_probabilities,
+                                                  static_cast<SceneClosureFrameMode>(0xFFU), 0.0F),
+                      core::StatusCode::invalid_argument);
+
+    constexpr auto pi = std::numbers::pi_v<renderer::TransportScalar>;
+    expect_error_code(SceneClosureMixture::create(closures, valid_probabilities,
+                                                  SceneClosureFrameMode::shading_normal, pi),
+                      core::StatusCode::invalid_argument);
+    expect_error_code(
+        SceneClosureMixture::create(
+            closures, valid_probabilities, SceneClosureFrameMode::shading_normal,
+            std::nextafter(-pi, -std::numeric_limits<renderer::TransportScalar>::infinity())),
+        core::StatusCode::invalid_argument);
+    expect_error_code(SceneClosureMixture::create(
+                          closures, valid_probabilities, SceneClosureFrameMode::shading_normal,
+                          std::numeric_limits<renderer::TransportScalar>::quiet_NaN()),
+                      core::StatusCode::invalid_argument);
+}
+
+TEST(FrameSceneTest, ValidatesRawSceneMixtureRecordsAndPreservesExplicitAbsorption) {
+    const auto wavelengths = make_scene_wavelengths();
+    const auto make_renderable_description = [&] {
+        auto description = make_scene_description();
+        description.spectral_environment = make_scene_environment(wavelengths);
+        for (auto& material : description.materials) {
+            material.spectral = make_scene_spectral_material(wavelengths);
+        }
+        return description;
+    };
+
+    {
+        auto description = make_renderable_description();
+        description.materials.front().spectral->closure_mixture.component_probabilities[1] = 0.125F;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto description = make_renderable_description();
+        description.materials.front().spectral->closure_mixture.component_probabilities[0] = 0.5F;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto description = make_renderable_description();
+        description.materials.front().spectral->closure_mixture.frame_mode =
+            static_cast<SceneClosureFrameMode>(0xFFU);
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+    {
+        auto description = make_renderable_description();
+        description.materials.front().spectral->closure_mixture.tangent_rotation_radians =
+            std::numbers::pi_v<renderer::TransportScalar>;
+        expect_error_code(FrameScene::create(std::move(description)),
+                          core::StatusCode::invalid_argument);
+    }
+
+    const auto absorption = SceneClosureMixture::create(
+        renderer::ClosureSet{}, std::span<const renderer::TransportScalar>{},
+        SceneClosureFrameMode::surface_tangent, 0.25F);
+    ASSERT_TRUE(absorption.has_value()) << absorption.error().message;
+    auto description = make_renderable_description();
+    const auto absorption_material_id = description.materials.front().id;
+    description.materials.front().spectral->closure_mixture = *absorption;
+    const auto scene = FrameScene::create(std::move(description));
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    const auto material = (*scene)->material(absorption_material_id);
+    ASSERT_TRUE(material.has_value()) << material.error().message;
+    ASSERT_TRUE(material->get().spectral.has_value());
+    EXPECT_TRUE(material->get().spectral->closure_mixture.closures.empty());
+    EXPECT_TRUE(material->get().spectral->closure_mixture.active_component_probabilities().empty());
+    EXPECT_EQ(material->get().spectral->closure_mixture.frame_mode,
+              SceneClosureFrameMode::surface_tangent);
+    EXPECT_EQ(material->get().spectral->closure_mixture.tangent_rotation_radians, 0.25F);
 }
 
 TEST(FrameSceneTest, RetainsValidatedPunctualLightsInStableSlotOrder) {

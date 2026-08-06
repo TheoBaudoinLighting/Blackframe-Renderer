@@ -8,14 +8,15 @@
 
 namespace blackframe::xpu::shared {
 
-inline constexpr std::uint64_t SceneSoaMagic = 0x31414F53464B4C42ULL; // "BLKFSOA1"
-inline constexpr std::uint16_t SceneSoaAbiMajor = 1U;
+inline constexpr std::uint64_t SceneSoaMagic = 0x32414F53464B4C42ULL; // "BLKFSOA2"
+inline constexpr std::uint16_t SceneSoaAbiMajor = 2U;
 inline constexpr std::uint16_t SceneSoaAbiMinor = 0U;
 inline constexpr std::uint32_t SceneSoaHashAlgorithmFnv1a64 = 1U;
 inline constexpr std::uint64_t SceneSoaFnv1aOffsetBasis = 14695981039346656037ULL;
 inline constexpr std::uint64_t SceneSoaFnv1aPrime = 1099511628211ULL;
 inline constexpr std::uint64_t SceneSoaColumnAlignment = 16U;
 inline constexpr std::uint32_t SceneSoaSpectrumLaneCount = 4U;
+inline constexpr std::uint32_t SceneSoaClosureParameterScalarCount = 10U;
 inline constexpr std::uint32_t SceneSoaMatrixElementCount = 16U;
 
 namespace scene_soa_column {
@@ -46,43 +47,53 @@ inline constexpr std::uint32_t material_spectral_present = 18U;
 inline constexpr std::uint32_t material_wavelength_nanometers = 19U;
 inline constexpr std::uint32_t material_wavelength_pdf = 23U;
 inline constexpr std::uint32_t material_wavelength_measure = 27U;
-inline constexpr std::uint32_t material_reflectance = 31U;
+inline constexpr std::uint32_t material_closure_offset = 31U;
+inline constexpr std::uint32_t material_closure_count = 32U;
+inline constexpr std::uint32_t material_closure_frame_mode = 33U;
+inline constexpr std::uint32_t material_closure_tangent_rotation_radians = 34U;
 inline constexpr std::uint32_t material_emitted_radiance = 35U;
 
-inline constexpr std::uint32_t instance_id = 39U;
-inline constexpr std::uint32_t instance_parent_present = 40U;
-inline constexpr std::uint32_t instance_parent_id = 41U;
-inline constexpr std::uint32_t instance_object_id = 42U;
-inline constexpr std::uint32_t instance_geometry_id = 43U;
-inline constexpr std::uint32_t instance_material_id = 44U;
-inline constexpr std::uint32_t instance_visibility_mask = 45U;
-inline constexpr std::uint32_t instance_local_to_parent = 46U;
-inline constexpr std::uint32_t instance_parent_to_local = 62U;
-inline constexpr std::uint32_t instance_local_to_world = 78U;
-inline constexpr std::uint32_t instance_world_to_local = 94U;
+inline constexpr std::uint32_t closure_kind = 39U;
+inline constexpr std::uint32_t closure_lobes = 40U;
+inline constexpr std::uint32_t closure_weight = 41U;
+inline constexpr std::uint32_t closure_parameters = 45U;
+inline constexpr std::uint32_t closure_probability =
+    closure_parameters + SceneSoaClosureParameterScalarCount;
 
-inline constexpr std::uint32_t punctual_kind = 110U;
-inline constexpr std::uint32_t punctual_position_x = 111U;
-inline constexpr std::uint32_t punctual_position_y = 112U;
-inline constexpr std::uint32_t punctual_position_z = 113U;
-inline constexpr std::uint32_t punctual_position_error_x = 114U;
-inline constexpr std::uint32_t punctual_position_error_y = 115U;
-inline constexpr std::uint32_t punctual_position_error_z = 116U;
-inline constexpr std::uint32_t punctual_direction_x = 117U;
-inline constexpr std::uint32_t punctual_direction_y = 118U;
-inline constexpr std::uint32_t punctual_direction_z = 119U;
-inline constexpr std::uint32_t punctual_inner_half_angle = 120U;
-inline constexpr std::uint32_t punctual_outer_half_angle = 121U;
-inline constexpr std::uint32_t punctual_spectrum = 122U;
+inline constexpr std::uint32_t instance_id = 56U;
+inline constexpr std::uint32_t instance_parent_present = 57U;
+inline constexpr std::uint32_t instance_parent_id = 58U;
+inline constexpr std::uint32_t instance_object_id = 59U;
+inline constexpr std::uint32_t instance_geometry_id = 60U;
+inline constexpr std::uint32_t instance_material_id = 61U;
+inline constexpr std::uint32_t instance_visibility_mask = 62U;
+inline constexpr std::uint32_t instance_local_to_parent = 63U;
+inline constexpr std::uint32_t instance_parent_to_local = 79U;
+inline constexpr std::uint32_t instance_local_to_world = 95U;
+inline constexpr std::uint32_t instance_world_to_local = 111U;
 
-inline constexpr std::uint32_t mesh_area_light_instance_id = 126U;
+inline constexpr std::uint32_t punctual_kind = 127U;
+inline constexpr std::uint32_t punctual_position_x = 128U;
+inline constexpr std::uint32_t punctual_position_y = 129U;
+inline constexpr std::uint32_t punctual_position_z = 130U;
+inline constexpr std::uint32_t punctual_position_error_x = 131U;
+inline constexpr std::uint32_t punctual_position_error_y = 132U;
+inline constexpr std::uint32_t punctual_position_error_z = 133U;
+inline constexpr std::uint32_t punctual_direction_x = 134U;
+inline constexpr std::uint32_t punctual_direction_y = 135U;
+inline constexpr std::uint32_t punctual_direction_z = 136U;
+inline constexpr std::uint32_t punctual_inner_half_angle = 137U;
+inline constexpr std::uint32_t punctual_outer_half_angle = 138U;
+inline constexpr std::uint32_t punctual_spectrum = 139U;
 
-inline constexpr std::uint32_t environment_wavelength_nanometers = 127U;
-inline constexpr std::uint32_t environment_wavelength_pdf = 131U;
-inline constexpr std::uint32_t environment_wavelength_measure = 135U;
-inline constexpr std::uint32_t environment_radiance = 139U;
+inline constexpr std::uint32_t mesh_area_light_instance_id = 143U;
 
-inline constexpr std::uint32_t count = 143U;
+inline constexpr std::uint32_t environment_wavelength_nanometers = 144U;
+inline constexpr std::uint32_t environment_wavelength_pdf = 148U;
+inline constexpr std::uint32_t environment_wavelength_measure = 152U;
+inline constexpr std::uint32_t environment_radiance = 156U;
+
+inline constexpr std::uint32_t count = 160U;
 
 } // namespace scene_soa_column
 
@@ -113,6 +124,7 @@ struct alignas(16) SceneSoaHeader final {
     std::uint64_t vertex_count{};
     std::uint64_t triangle_count{};
     std::uint64_t material_count{};
+    std::uint64_t closure_count{};
     std::uint64_t instance_count{};
     std::uint64_t punctual_light_count{};
     std::uint64_t mesh_area_light_count{};
@@ -150,8 +162,11 @@ enum class SceneSoaHeaderValidationStatus : std::uint32_t {
     if (column >= triangle_vertex_0 && column <= triangle_vertex_2) {
         return header.triangle_count;
     }
-    if (column >= material_id && column < instance_id) {
+    if (column >= material_id && column < closure_kind) {
         return header.material_count;
+    }
+    if (column >= closure_kind && column < instance_id) {
+        return header.closure_count;
     }
     if (column >= instance_id && column < punctual_kind) {
         return header.instance_count;
@@ -174,18 +189,21 @@ scene_soa_column_element_size(const std::uint32_t column) noexcept {
     if (column >= count) {
         return 0U;
     }
-    if (column >= geometry_vertex_offset && column <= geometry_triangle_count) {
+    if ((column >= geometry_vertex_offset && column <= geometry_triangle_count) ||
+        column == material_closure_offset || column == material_closure_count) {
         return sizeof(std::uint64_t);
     }
     if (column == material_spectral_present ||
-        (column >= material_wavelength_measure && column < material_reflectance) ||
-        column == instance_parent_present ||
+        (column >= material_wavelength_measure && column < material_closure_offset) ||
+        column == material_closure_frame_mode || column == instance_parent_present ||
         (column >= environment_wavelength_measure && column < environment_radiance)) {
         return sizeof(std::uint8_t);
     }
     if ((column >= position_x && column <= texture_coordinate_y) ||
         (column >= material_wavelength_nanometers && column < material_wavelength_measure) ||
-        (column >= material_reflectance && column < instance_id) ||
+        column == material_closure_tangent_rotation_radians ||
+        (column >= material_emitted_radiance && column < closure_kind) ||
+        (column >= closure_weight && column < instance_id) ||
         (column >= instance_local_to_parent && column < punctual_kind) ||
         (column >= punctual_position_x && column < mesh_area_light_instance_id) ||
         (column >= environment_wavelength_nanometers && column < environment_wavelength_measure) ||
@@ -287,7 +305,7 @@ static_assert(offsetof(SceneSoaColumnDescriptor, reserved) == 20U);
 static_assert(std::is_standard_layout_v<SceneSoaHeader>);
 static_assert(std::is_trivially_copyable_v<SceneSoaHeader>);
 static_assert(std::is_trivially_destructible_v<SceneSoaHeader>);
-static_assert(sizeof(SceneSoaHeader) == 3584U);
+static_assert(sizeof(SceneSoaHeader) == 4000U);
 static_assert(alignof(SceneSoaHeader) == 16U);
 static_assert(offsetof(SceneSoaHeader, magic) == 0U);
 static_assert(offsetof(SceneSoaHeader, abi_major) == 8U);
@@ -302,11 +320,12 @@ static_assert(offsetof(SceneSoaHeader, geometry_count) == 48U);
 static_assert(offsetof(SceneSoaHeader, vertex_count) == 56U);
 static_assert(offsetof(SceneSoaHeader, triangle_count) == 64U);
 static_assert(offsetof(SceneSoaHeader, material_count) == 72U);
-static_assert(offsetof(SceneSoaHeader, instance_count) == 80U);
-static_assert(offsetof(SceneSoaHeader, punctual_light_count) == 88U);
-static_assert(offsetof(SceneSoaHeader, mesh_area_light_count) == 96U);
-static_assert(offsetof(SceneSoaHeader, environment_count) == 104U);
-static_assert(offsetof(SceneSoaHeader, columns) == 112U);
-static_assert(offsetof(SceneSoaHeader, reserved) == 3544U);
+static_assert(offsetof(SceneSoaHeader, closure_count) == 80U);
+static_assert(offsetof(SceneSoaHeader, instance_count) == 88U);
+static_assert(offsetof(SceneSoaHeader, punctual_light_count) == 96U);
+static_assert(offsetof(SceneSoaHeader, mesh_area_light_count) == 104U);
+static_assert(offsetof(SceneSoaHeader, environment_count) == 112U);
+static_assert(offsetof(SceneSoaHeader, columns) == 120U);
+static_assert(offsetof(SceneSoaHeader, reserved) == 3960U);
 
 } // namespace blackframe::xpu::shared

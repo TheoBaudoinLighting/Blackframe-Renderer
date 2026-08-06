@@ -23,6 +23,31 @@ gtest_discover_tests(
 )
 
 add_executable(
+    BlackframeCudaTransportLobeTests
+    TransportLobeTest.cpp
+)
+blackframe_set_target_role(BlackframeCudaTransportLobeTests test)
+
+target_link_libraries(
+    BlackframeCudaTransportLobeTests
+    PRIVATE
+        Blackframe::CudaSmokeKernel
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeCudaTransportLobeTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cuda"
+        RESOURCE_LOCK blackframe_cuda_device_0
+        RUN_SERIAL TRUE
+)
+
+add_executable(
     BlackframeCudaMemoryTests
     DeviceMemoryTest.cpp
 )

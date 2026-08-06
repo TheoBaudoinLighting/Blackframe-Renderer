@@ -46,7 +46,7 @@ trace_scene_bsdf_only(const renderer::Ray& initial_ray, const renderer::PathStat
     auto query = detail::SceneSurfaceQuery{acceleration};
     const auto resolved_environment =
         renderer::BsdfOnlyEnvironment{*environment, environment_record.wavelengths};
-    return renderer::bsdf_only_path_loop_detail::trace_bsdf_only_with_query(
+    return renderer::bsdf_only_path_loop_detail::trace_closure_bsdf_only_with_query(
         initial_ray, initial_state, sample_stream, query, resolved_environment, depth_limits,
         roulette_policy);
 }
