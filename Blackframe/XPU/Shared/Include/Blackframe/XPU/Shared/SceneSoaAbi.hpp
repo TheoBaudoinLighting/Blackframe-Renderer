@@ -8,8 +8,8 @@
 
 namespace blackframe::xpu::shared {
 
-inline constexpr std::uint64_t SceneSoaMagic = 0x32414F53464B4C42ULL; // "BLKFSOA2"
-inline constexpr std::uint16_t SceneSoaAbiMajor = 2U;
+inline constexpr std::uint64_t SceneSoaMagic = 0x33414F53464B4C42ULL; // "BLKFSOA3"
+inline constexpr std::uint16_t SceneSoaAbiMajor = 3U;
 inline constexpr std::uint16_t SceneSoaAbiMinor = 0U;
 inline constexpr std::uint32_t SceneSoaHashAlgorithmFnv1a64 = 1U;
 inline constexpr std::uint64_t SceneSoaFnv1aOffsetBasis = 14695981039346656037ULL;
@@ -93,7 +93,11 @@ inline constexpr std::uint32_t environment_wavelength_pdf = 148U;
 inline constexpr std::uint32_t environment_wavelength_measure = 152U;
 inline constexpr std::uint32_t environment_radiance = 156U;
 
-inline constexpr std::uint32_t count = 160U;
+inline constexpr std::uint32_t texture_id = 160U;
+inline constexpr std::uint32_t texture_kind = 161U;
+inline constexpr std::uint32_t texture_value = 162U;
+
+inline constexpr std::uint32_t count = 166U;
 
 } // namespace scene_soa_column
 
@@ -129,8 +133,9 @@ struct alignas(16) SceneSoaHeader final {
     std::uint64_t punctual_light_count{};
     std::uint64_t mesh_area_light_count{};
     std::uint64_t environment_count{};
+    std::uint64_t texture_count{};
     std::array<SceneSoaColumnDescriptor, scene_soa_column::count> columns{};
-    std::array<std::uint64_t, 5> reserved{};
+    std::array<std::uint64_t, 4> reserved{};
 };
 
 enum class SceneSoaHeaderValidationStatus : std::uint32_t {
@@ -177,8 +182,11 @@ enum class SceneSoaHeaderValidationStatus : std::uint32_t {
     if (column == mesh_area_light_instance_id) {
         return header.mesh_area_light_count;
     }
-    if (column >= environment_wavelength_nanometers && column < count) {
+    if (column >= environment_wavelength_nanometers && column < texture_id) {
         return header.environment_count;
+    }
+    if (column >= texture_id && column < count) {
+        return header.texture_count;
     }
     return 0U;
 }
@@ -207,7 +215,8 @@ scene_soa_column_element_size(const std::uint32_t column) noexcept {
         (column >= instance_local_to_parent && column < punctual_kind) ||
         (column >= punctual_position_x && column < mesh_area_light_instance_id) ||
         (column >= environment_wavelength_nanometers && column < environment_wavelength_measure) ||
-        (column >= environment_radiance && column < count)) {
+        (column >= environment_radiance && column < texture_id) ||
+        (column >= texture_value && column < count)) {
         return sizeof(float);
     }
     return sizeof(std::uint32_t);
@@ -305,7 +314,7 @@ static_assert(offsetof(SceneSoaColumnDescriptor, reserved) == 20U);
 static_assert(std::is_standard_layout_v<SceneSoaHeader>);
 static_assert(std::is_trivially_copyable_v<SceneSoaHeader>);
 static_assert(std::is_trivially_destructible_v<SceneSoaHeader>);
-static_assert(sizeof(SceneSoaHeader) == 4000U);
+static_assert(sizeof(SceneSoaHeader) == 4144U);
 static_assert(alignof(SceneSoaHeader) == 16U);
 static_assert(offsetof(SceneSoaHeader, magic) == 0U);
 static_assert(offsetof(SceneSoaHeader, abi_major) == 8U);
@@ -325,7 +334,8 @@ static_assert(offsetof(SceneSoaHeader, instance_count) == 88U);
 static_assert(offsetof(SceneSoaHeader, punctual_light_count) == 96U);
 static_assert(offsetof(SceneSoaHeader, mesh_area_light_count) == 104U);
 static_assert(offsetof(SceneSoaHeader, environment_count) == 112U);
-static_assert(offsetof(SceneSoaHeader, columns) == 120U);
-static_assert(offsetof(SceneSoaHeader, reserved) == 3960U);
+static_assert(offsetof(SceneSoaHeader, texture_count) == 120U);
+static_assert(offsetof(SceneSoaHeader, columns) == 128U);
+static_assert(offsetof(SceneSoaHeader, reserved) == 4112U);
 
 } // namespace blackframe::xpu::shared

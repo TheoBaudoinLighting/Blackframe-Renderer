@@ -1,4 +1,5 @@
 #include <Blackframe/Backends/GPU/CUDA/SceneSoA.hpp>
+#include <Blackframe/XPU/Shared/ConstantTextureAbi.hpp>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,12 @@ static_assert(std::is_same_v<std::variant_alternative_t<0, ScenePunctualLight>, 
 static_assert(
     std::is_same_v<std::variant_alternative_t<1, ScenePunctualLight>, SceneDirectionalLight>);
 static_assert(std::is_same_v<std::variant_alternative_t<2, ScenePunctualLight>, SceneSpotLight>);
+static_assert(static_cast<std::uint32_t>(renderer::ConstantTextureKind::float_value) ==
+              static_cast<std::uint32_t>(xpu::shared::ConstantTextureKind::float_value));
+static_assert(static_cast<std::uint32_t>(renderer::ConstantTextureKind::color) ==
+              static_cast<std::uint32_t>(xpu::shared::ConstantTextureKind::linear_rgb));
+static_assert(static_cast<std::uint32_t>(renderer::ConstantTextureKind::spectrum) ==
+              static_cast<std::uint32_t>(xpu::shared::ConstantTextureKind::sampled_spectrum));
 
 struct SerializedScene final {
     SceneSoaHeader header{};
@@ -295,6 +302,33 @@ punctual_spectrum(const ScenePunctualLight& light) noexcept {
     return std::get<SceneSpotLight>(light).on_axis_spectral_radiant_intensity;
 }
 
+[[nodiscard]] float constant_texture_component(const SceneConstantTexture& record,
+                                               const std::uint32_t component) noexcept {
+    return std::visit(
+        [component](const auto& texture) noexcept {
+            using Texture = std::remove_cvref_t<decltype(texture)>;
+            if constexpr (std::is_same_v<Texture, renderer::ConstantFloatTexture>) {
+                return component == 0U ? texture.value() : 0.0F;
+            } else if constexpr (std::is_same_v<Texture, renderer::ConstantColorTexture>) {
+                const auto value = texture.value();
+                switch (component) {
+                case 0U:
+                    return value.red;
+                case 1U:
+                    return value.green;
+                case 2U:
+                    return value.blue;
+                default:
+                    return 0.0F;
+                }
+            } else {
+                static_assert(std::is_same_v<Texture, renderer::ConstantSpectrumTexture>);
+                return texture.value()[component];
+            }
+        },
+        record.texture);
+}
+
 [[nodiscard]] core::Result<SerializedScene>
 serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget budget) try {
     auto serialized = SerializedScene{};
@@ -306,6 +340,7 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
     const auto punctual_lights = scene.punctual_lights();
     const auto mesh_area_light_ids = scene.mesh_area_light_instance_ids();
     const auto& environment = scene.spectral_environment();
+    const auto textures = scene.constant_textures();
 
     header.magic = xpu::shared::SceneSoaMagic;
     header.abi_major = xpu::shared::SceneSoaAbiMajor;
@@ -320,6 +355,7 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
     header.punctual_light_count = punctual_lights.size();
     header.mesh_area_light_count = mesh_area_light_ids.size();
     header.environment_count = environment.has_value() ? 1U : 0U;
+    header.texture_count = textures.size();
 
     auto material_closure_offsets = std::vector<std::uint64_t>{};
     material_closure_offsets.reserve(materials.size());
@@ -800,6 +836,27 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
                                        header.environment_count, [&](auto&& emit) {
                                            if (environment) {
                                                emit((*environment).radiance[lane]);
+                                           }
+                                       });
+    }
+
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::texture_id, header.texture_count,
+                                   [&](auto&& emit) {
+                                       for (const auto& texture : textures) {
+                                           emit(texture.id.value);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::texture_kind, header.texture_count,
+                                   [&](auto&& emit) {
+                                       for (const auto& texture : textures) {
+                                           emit(static_cast<std::uint32_t>(texture.kind()));
+                                       }
+                                   });
+    for (auto value = std::uint32_t{0}; value < xpu::shared::ConstantTextureValueCount; ++value) {
+        BLACKFRAME_APPEND_SCENE_COLUMN(float, column::texture_value + value, header.texture_count,
+                                       [&](auto&& emit) {
+                                           for (const auto& texture : textures) {
+                                               emit(constant_texture_component(texture, value));
                                            }
                                        });
     }

@@ -121,8 +121,12 @@ bvh_descriptor(const SceneBvhHeader* const header, const std::uint32_t array) no
     if (column == scene_column::mesh_area_light_instance_id) {
         return header.mesh_area_light_count;
     }
-    if (column >= scene_column::environment_wavelength_nanometers && column < scene_column::count) {
+    if (column >= scene_column::environment_wavelength_nanometers &&
+        column < scene_column::texture_id) {
         return header.environment_count;
+    }
+    if (column >= scene_column::texture_id && column < scene_column::count) {
+        return header.texture_count;
     }
     return 0U;
 }
@@ -160,7 +164,8 @@ scene_column_element_size(const std::uint32_t column) noexcept {
          column < scene_column::mesh_area_light_instance_id) ||
         (column >= scene_column::environment_wavelength_nanometers &&
          column < scene_column::environment_wavelength_measure) ||
-        (column >= scene_column::environment_radiance && column < scene_column::count)) {
+        (column >= scene_column::environment_radiance && column < scene_column::texture_id) ||
+        (column >= scene_column::texture_value && column < scene_column::count)) {
         return sizeof(float);
     }
     return sizeof(std::uint32_t);
@@ -178,13 +183,14 @@ validate_scene_layout(const std::uint8_t* const bytes, const std::size_t byte_co
         header->column_count != scene_column::count ||
         header->hash_algorithm != shared::SceneSoaHashAlgorithmFnv1a64 ||
         header->environment_count > 1U || header->total_size_bytes != byte_count ||
-        header->total_size_bytes < sizeof(SceneSoaHeader)) {
+        header->total_size_bytes < sizeof(SceneSoaHeader) ||
+        header->texture_count > 0xFFFFFFFFULL) {
         return SceneClosestHitStatus::invalid_scene;
     }
 
     const auto* const reserved =
         reinterpret_cast<const std::uint64_t*>(bytes + offsetof(SceneSoaHeader, reserved));
-    for (auto index = std::uint32_t{0U}; index < 5U; ++index) {
+    for (auto index = std::uint32_t{0U}; index < 4U; ++index) {
         if (reserved[index] != 0U) {
             return SceneClosestHitStatus::invalid_scene;
         }

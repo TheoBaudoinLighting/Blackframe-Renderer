@@ -4,6 +4,7 @@ add_subdirectory(Applications)
 add_subdirectory(Core)
 add_subdirectory(Build)
 add_subdirectory(Renderer)
+add_subdirectory(Textures)
 add_subdirectory(Renderer/Convergence)
 add_subdirectory(Renderer/Mis)
 add_subdirectory(Renderer/Light)
@@ -24,6 +25,7 @@ endif()
 set(
     blackframe_test_targets
     BlackframeAccelBackendTests
+    BlackframeConstantTextureTests
     BlackframeCoreTests
     BlackframeEngineTests
     BlackframeExtensionAbiCTest

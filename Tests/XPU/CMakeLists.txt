@@ -36,6 +36,7 @@ gtest_discover_tests(
 
 add_executable(
     BlackframeXpuHostDeviceAbiTests
+    HostDeviceConstantTextureAbiTest.cpp
     HostDeviceTransportAbiTest.cpp
 )
 blackframe_set_target_role(BlackframeXpuHostDeviceAbiTests test)

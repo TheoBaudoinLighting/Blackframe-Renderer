@@ -92,6 +92,23 @@ validate_punctual_light(const ScenePunctualLight& record,
         record);
 }
 
+[[nodiscard]] core::Status validate_constant_texture(const SceneConstantTexture& record) {
+    if (record.texture.valueless_by_exception()) {
+        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
+                                           "A frame scene constant-texture slot has no value."));
+    }
+
+    return std::visit(
+        [](const auto& texture) -> core::Status {
+            const auto canonical = std::remove_cvref_t<decltype(texture)>::create(texture.value());
+            if (!canonical) {
+                return std::unexpected(canonical.error());
+            }
+            return {};
+        },
+        record.texture);
+}
+
 template <typename Record, typename Identifier>
 [[nodiscard]] std::optional<std::size_t> find_record_index(const std::vector<Record>& records,
                                                            const Identifier id) noexcept {
@@ -535,11 +552,18 @@ core::Result<FrameSceneHandle> FrameScene::create(const FrameSceneDescription& d
 
 core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& description) {
     try {
+        sort_by_identifier(description.constant_textures);
         sort_by_identifier(description.objects);
         sort_by_identifier(description.geometries);
         sort_by_identifier(description.materials);
         sort_by_identifier(description.instances);
 
+        if (auto status = reject_duplicate_identifiers(
+                description.constant_textures,
+                "A frame scene contains duplicate constant-texture identifiers.");
+            !status) {
+            return std::unexpected(std::move(status.error()));
+        }
         if (auto status = reject_duplicate_identifiers(
                 description.objects, "A frame scene contains duplicate object identifiers.");
             !status) {
@@ -559,6 +583,12 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
                 description.instances, "A frame scene contains duplicate instance identifiers.");
             !status) {
             return std::unexpected(std::move(status.error()));
+        }
+
+        for (const auto& texture : description.constant_textures) {
+            if (auto status = validate_constant_texture(texture); !status) {
+                return std::unexpected(std::move(status.error()));
+            }
         }
 
         for (const auto& geometry : description.geometries) {
@@ -623,7 +653,8 @@ FrameScene::FrameScene(FrameSceneDescription&& description,
                        std::vector<renderer::AffineTransform>&& world_transforms,
                        std::vector<renderer::MeshAreaLight>&& mesh_area_lights,
                        std::vector<renderer::InstanceId>&& mesh_area_light_instance_ids) noexcept
-    : objects_{std::move(description.objects)}, geometries_{std::move(description.geometries)},
+    : constant_textures_{std::move(description.constant_textures)},
+      objects_{std::move(description.objects)}, geometries_{std::move(description.geometries)},
       materials_{std::move(description.materials)}, instances_{std::move(description.instances)},
       punctual_lights_{std::move(description.punctual_lights)},
       spectral_environment_{std::move(description.spectral_environment)},
@@ -634,6 +665,10 @@ FrameScene::FrameScene(FrameSceneDescription&& description,
 
 std::span<const SceneObject> FrameScene::objects() const noexcept {
     return objects_;
+}
+
+std::span<const SceneConstantTexture> FrameScene::constant_textures() const noexcept {
+    return constant_textures_;
 }
 
 std::span<const SceneGeometry> FrameScene::geometries() const noexcept {
@@ -667,6 +702,12 @@ const std::optional<SceneSpectralEnvironment>& FrameScene::spectral_environment(
 core::Result<std::reference_wrapper<const SceneObject>>
 FrameScene::object(const renderer::ObjectId id) const {
     return find_record(objects_, id, "The frame scene does not contain the requested object.");
+}
+
+core::Result<std::reference_wrapper<const SceneConstantTexture>>
+FrameScene::constant_texture(const renderer::TextureId id) const {
+    return find_record(constant_textures_, id,
+                       "The frame scene does not contain the requested constant texture.");
 }
 
 core::Result<std::reference_wrapper<const SceneGeometry>>

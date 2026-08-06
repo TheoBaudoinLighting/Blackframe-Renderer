@@ -679,8 +679,12 @@ scene_descriptor(const SceneSoaHeader* const header, const std::uint32_t column)
     if (column == scene_column::mesh_area_light_instance_id) {
         return header.mesh_area_light_count;
     }
-    if (column >= scene_column::environment_wavelength_nanometers && column < scene_column::count) {
+    if (column >= scene_column::environment_wavelength_nanometers &&
+        column < scene_column::texture_id) {
         return header.environment_count;
+    }
+    if (column >= scene_column::texture_id && column < scene_column::count) {
+        return header.texture_count;
     }
     return 0U;
 }
@@ -718,7 +722,8 @@ scene_column_element_size(const std::uint32_t column) noexcept {
          column < scene_column::mesh_area_light_instance_id) ||
         (column >= scene_column::environment_wavelength_nanometers &&
          column < scene_column::environment_wavelength_measure) ||
-        (column >= scene_column::environment_radiance && column < scene_column::count)) {
+        (column >= scene_column::environment_radiance && column < scene_column::texture_id) ||
+        (column >= scene_column::texture_value && column < scene_column::count)) {
         return sizeof(float);
     }
     return sizeof(std::uint32_t);
@@ -741,7 +746,7 @@ scene_column_element_size(const std::uint32_t column) noexcept {
         header->triangle_count > 0xFFFFFFFFULL || header->material_count > 0xFFFFFFFFULL ||
         header->closure_count > 0xFFFFFFFFULL || header->instance_count > 0xFFFFFFFFULL ||
         header->mesh_area_light_count > 0xFFFFFFFFULL ||
-        header->punctual_light_count > 0xFFFFFFFFULL) {
+        header->punctual_light_count > 0xFFFFFFFFULL || header->texture_count > 0xFFFFFFFFULL) {
         return SceneDeviceStatus::invalid_scene;
     }
     if (header->mesh_area_light_count > MaximumUniformLightCount) {
@@ -749,7 +754,7 @@ scene_column_element_size(const std::uint32_t column) noexcept {
     }
     const auto* const reserved =
         reinterpret_cast<const std::uint64_t*>(bytes + offsetof(SceneSoaHeader, reserved));
-    for (auto index = std::uint32_t{0U}; index < 5U; ++index) {
+    for (auto index = std::uint32_t{0U}; index < 4U; ++index) {
         if (reserved[index] != 0U) {
             return SceneDeviceStatus::invalid_scene;
         }

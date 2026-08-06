@@ -14,6 +14,7 @@ add_library(
         Include/Blackframe/Renderer/ClosureSet.hpp
         Include/Blackframe/Renderer/Color.hpp
         Include/Blackframe/Renderer/ConvergenceMetrics.hpp
+        Include/Blackframe/Renderer/ConstantTexture.hpp
         Include/Blackframe/Renderer/CpuWavefrontScheduler.hpp
         Include/Blackframe/Renderer/DebugIntegrators.hpp
         Include/Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp

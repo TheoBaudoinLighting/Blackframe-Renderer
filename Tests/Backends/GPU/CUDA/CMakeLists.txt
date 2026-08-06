@@ -1,5 +1,6 @@
 add_executable(
     BlackframeCudaSceneTests
+    ConstantTextureParityTest.cpp
     ClosestHitTest.cpp
     SceneBvhTest.cpp
     SceneSoATest.cpp

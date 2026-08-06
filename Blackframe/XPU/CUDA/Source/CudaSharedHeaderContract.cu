@@ -1,6 +1,7 @@
 #include <Blackframe/XPU/CUDA/SmokeKernel.hpp>
 #include <Blackframe/XPU/CUDA/SmokeKernelPayload.hpp>
 #include <Blackframe/XPU/CUDA/TransportLobesDevice.cuh>
+#include <Blackframe/XPU/Shared/ConstantTextureAbi.hpp>
 #include <cstdint>
 #include <type_traits>
 
@@ -16,6 +17,12 @@ static_assert(__cplusplus == 202002L);
 
 static_assert(std::is_standard_layout_v<blackframe::xpu::cuda::SmokeKernelPayload>);
 static_assert(std::is_trivially_copyable_v<blackframe::xpu::cuda::SmokeKernelPayload>);
+static_assert(std::is_standard_layout_v<blackframe::xpu::shared::ConstantTextureEvaluationRequest>);
+static_assert(
+    std::is_trivially_copyable_v<blackframe::xpu::shared::ConstantTextureEvaluationRequest>);
+static_assert(std::is_standard_layout_v<blackframe::xpu::shared::ConstantTextureEvaluationResult>);
+static_assert(
+    std::is_trivially_copyable_v<blackframe::xpu::shared::ConstantTextureEvaluationResult>);
 
 extern "C" std::uint64_t blackframe_cuda_shared_header_language_level() noexcept {
     return __cplusplus;

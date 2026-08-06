@@ -35,6 +35,12 @@ struct MaterialId final {
     [[nodiscard]] constexpr bool operator==(const MaterialId&) const noexcept = default;
 };
 
+struct TextureId final {
+    std::uint32_t value{};
+
+    [[nodiscard]] constexpr bool operator==(const TextureId&) const noexcept = default;
+};
+
 struct SurfaceIdentifiers final {
     InstanceId instance{};
     GeometryId geometry{};
@@ -48,17 +54,23 @@ static_assert(!std::is_same_v<ObjectId, InstanceId>);
 static_assert(!std::is_same_v<ObjectId, GeometryId>);
 static_assert(!std::is_same_v<ObjectId, PrimitiveId>);
 static_assert(!std::is_same_v<ObjectId, MaterialId>);
+static_assert(!std::is_same_v<ObjectId, TextureId>);
 static_assert(!std::is_same_v<InstanceId, GeometryId>);
 static_assert(!std::is_same_v<InstanceId, PrimitiveId>);
 static_assert(!std::is_same_v<InstanceId, MaterialId>);
+static_assert(!std::is_same_v<InstanceId, TextureId>);
 static_assert(!std::is_same_v<GeometryId, PrimitiveId>);
 static_assert(!std::is_same_v<GeometryId, MaterialId>);
+static_assert(!std::is_same_v<GeometryId, TextureId>);
 static_assert(!std::is_same_v<PrimitiveId, MaterialId>);
+static_assert(!std::is_same_v<PrimitiveId, TextureId>);
+static_assert(!std::is_same_v<MaterialId, TextureId>);
 static_assert(sizeof(ObjectId) == sizeof(std::uint32_t));
 static_assert(sizeof(InstanceId) == sizeof(std::uint32_t));
 static_assert(sizeof(GeometryId) == sizeof(std::uint32_t));
 static_assert(sizeof(PrimitiveId) == sizeof(std::uint32_t));
 static_assert(sizeof(MaterialId) == sizeof(std::uint32_t));
+static_assert(sizeof(TextureId) == sizeof(std::uint32_t));
 static_assert(std::is_standard_layout_v<SurfaceIdentifiers>);
 static_assert(std::is_trivially_copyable_v<SurfaceIdentifiers>);
 

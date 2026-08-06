@@ -86,6 +86,64 @@ TEST(AnalyticAccelBackendTest, RejectsPunctualLightChangesDuringTransformOnlyRef
               (AccelBuildStatistics{.commits = 2U, .rebuilds = 1U, .refits = 0U}));
 }
 
+TEST(AnalyticAccelBackendTest, RejectsConstantTextureChangesDuringTransformOnlyRefit) {
+    const auto make_scene = [](const float value) {
+        auto description = FrameSceneDescription{};
+        description.constant_textures = {
+            SceneConstantTexture{
+                .id = {.value = 7U},
+                .texture = renderer::ConstantFloatTexture::create(value).value(),
+            },
+        };
+        return FrameScene::create(std::move(description));
+    };
+
+    const auto initial = make_scene(1.0F);
+    const auto changed = make_scene(2.0F);
+    ASSERT_TRUE(initial.has_value()) << initial.error().message;
+    ASSERT_TRUE(changed.has_value()) << changed.error().message;
+    auto backend = create_analytic_accel_backend(*initial);
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+
+    const auto rejected = (*backend)->refit(*changed);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, core::StatusCode::incompatible);
+    EXPECT_EQ((*backend)->frame_scene(), *initial);
+    EXPECT_EQ((*backend)->build_statistics(),
+              (AccelBuildStatistics{.commits = 1U, .rebuilds = 0U, .refits = 0U}));
+
+    const auto rebuilt = (*backend)->rebuild(*changed);
+    ASSERT_TRUE(rebuilt.has_value()) << rebuilt.error().message;
+    EXPECT_EQ((*backend)->frame_scene(), *changed);
+    EXPECT_EQ((*backend)->build_statistics(),
+              (AccelBuildStatistics{.commits = 2U, .rebuilds = 1U, .refits = 0U}));
+}
+
+TEST(AnalyticAccelBackendTest, DistinguishesSignedZeroTextureChangesDuringRefit) {
+    const auto make_scene = [](const float value) {
+        auto description = FrameSceneDescription{};
+        description.constant_textures = {
+            SceneConstantTexture{
+                .id = {.value = 3U},
+                .texture = renderer::ConstantFloatTexture::create(value).value(),
+            },
+        };
+        return FrameScene::create(std::move(description));
+    };
+
+    const auto initial = make_scene(0.0F);
+    const auto changed = make_scene(-0.0F);
+    ASSERT_TRUE(initial.has_value()) << initial.error().message;
+    ASSERT_TRUE(changed.has_value()) << changed.error().message;
+    auto backend = create_analytic_accel_backend(*initial);
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+
+    const auto rejected = (*backend)->refit(*changed);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, core::StatusCode::incompatible);
+    EXPECT_EQ((*backend)->frame_scene(), *initial);
+}
+
 TEST(AnalyticAccelBackendTest, RejectsMissingScenesAndUnrepresentableInstances) {
     const auto missing = create_analytic_accel_backend({});
     ASSERT_FALSE(missing.has_value());

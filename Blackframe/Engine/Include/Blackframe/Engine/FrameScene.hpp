@@ -4,6 +4,7 @@
 #include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/AreaLights.hpp>
 #include <Blackframe/Renderer/ClosureSet.hpp>
+#include <Blackframe/Renderer/ConstantTexture.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
@@ -20,6 +21,21 @@
 #include <vector>
 
 namespace blackframe::engine {
+
+using SceneConstantTextureValue =
+    std::variant<renderer::ConstantFloatTexture, renderer::ConstantColorTexture,
+                 renderer::ConstantSpectrumTexture>;
+
+struct SceneConstantTexture final {
+    renderer::TextureId id{};
+    SceneConstantTextureValue texture{};
+
+    [[nodiscard]] constexpr renderer::ConstantTextureKind kind() const noexcept {
+        return std::visit([](const auto& value) { return value.kind(); }, texture);
+    }
+
+    [[nodiscard]] constexpr bool operator==(const SceneConstantTexture&) const noexcept = default;
+};
 
 enum class SceneClosureFrameMode : std::uint8_t {
     shading_normal = 0U,
@@ -175,6 +191,7 @@ struct SceneInstance final {
 };
 
 struct FrameSceneDescription final {
+    std::vector<SceneConstantTexture> constant_textures{};
     std::vector<SceneObject> objects;
     std::vector<SceneGeometry> geometries;
     std::vector<SceneMaterial> materials;
@@ -203,6 +220,7 @@ class FrameScene final {
     ~FrameScene() noexcept = default;
 
     [[nodiscard]] std::span<const SceneObject> objects() const noexcept;
+    [[nodiscard]] std::span<const SceneConstantTexture> constant_textures() const noexcept;
     [[nodiscard]] std::span<const SceneGeometry> geometries() const noexcept;
     [[nodiscard]] std::span<const SceneMaterial> materials() const noexcept;
     [[nodiscard]] std::span<const SceneInstance> instances() const noexcept;
@@ -217,6 +235,8 @@ class FrameScene final {
 
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneObject>>
     object(renderer::ObjectId id) const;
+    [[nodiscard]] core::Result<std::reference_wrapper<const SceneConstantTexture>>
+    constant_texture(renderer::TextureId id) const;
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneGeometry>>
     geometry(renderer::GeometryId id) const;
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneMaterial>>
@@ -235,6 +255,7 @@ class FrameScene final {
                         std::vector<renderer::MeshAreaLight>&& mesh_area_lights,
                         std::vector<renderer::InstanceId>&& mesh_area_light_instance_ids) noexcept;
 
+    std::vector<SceneConstantTexture> constant_textures_;
     std::vector<SceneObject> objects_;
     std::vector<SceneGeometry> geometries_;
     std::vector<SceneMaterial> materials_;

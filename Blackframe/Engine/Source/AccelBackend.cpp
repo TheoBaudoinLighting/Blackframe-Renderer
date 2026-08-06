@@ -278,13 +278,14 @@ core::Status AccelBackend::validate_refit_scene(const FrameSceneHandle& scene) c
             accel_error(core::StatusCode::incompatible,
                         "Acceleration refit cannot change geometry identifiers or meshes."));
     }
-    if (!std::ranges::equal(scene_->materials(), scene->materials()) ||
+    if (!std::ranges::equal(scene_->constant_textures(), scene->constant_textures()) ||
+        !std::ranges::equal(scene_->materials(), scene->materials()) ||
         !std::ranges::equal(scene_->punctual_lights(), scene->punctual_lights()) ||
         scene_->spectral_environment() != scene->spectral_environment()) {
         return std::unexpected(
             accel_error(core::StatusCode::incompatible,
-                        "Acceleration refit cannot change frame scene material, punctual-light, "
-                        "or environment records."));
+                        "Acceleration refit cannot change frame scene texture, material, "
+                        "punctual-light, or environment records."));
     }
     if (!std::ranges::equal(scene_->instances(), scene->instances(),
                             [](const SceneInstance& left, const SceneInstance& right) {

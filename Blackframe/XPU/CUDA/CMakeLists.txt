@@ -26,6 +26,7 @@ target_sources(
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/ConstantTextureKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneClosestHit.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneOcclusion.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/SceneSoaHash.hpp"
@@ -82,6 +83,7 @@ target_link_libraries(
 add_library(
     BlackframeCudaSceneKernel
     STATIC
+        Source/CudaConstantTexture.cu
         Source/CudaSceneClosestHit.cu
         Source/CudaSceneBvhAbiContract.cu
         Source/CudaSceneSoaHash.cu

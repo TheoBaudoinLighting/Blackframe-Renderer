@@ -1,5 +1,6 @@
 #include <Blackframe/Backends/GPU/CUDA/SceneSoA.hpp>
 #include <Blackframe/XPU/CUDA/SceneSoaHash.hpp>
+#include <Blackframe/XPU/Shared/ConstantTextureAbi.hpp>
 #include <Blackframe/XPU/Shared/SceneSoaAbi.hpp>
 #include <algorithm>
 #include <array>
@@ -27,7 +28,7 @@ namespace column = xpu::shared::scene_soa_column;
 using core::StatusCode;
 using xpu::shared::SceneSoaHeader;
 
-inline constexpr std::uint64_t FrozenRichSceneHash = 0x0D31C3D2420A23DBULL;
+inline constexpr std::uint64_t FrozenRichSceneHash = 0x7C676D09A54980BDULL;
 
 [[nodiscard]] testing::AssertionResult select_test_device() {
     int device_count = 0;
@@ -144,6 +145,25 @@ inline constexpr std::uint64_t FrozenRichSceneHash = 0x0D31C3D2420A23DBULL;
     const auto second_mesh = distinct_mesh_allocations ? make_mesh() : first_mesh;
     auto description =
         FrameSceneDescription{
+            .constant_textures =
+                {
+                    SceneConstantTexture{
+                        .id = {.value = maximum},
+                        .texture = renderer::ConstantSpectrumTexture::create(
+                                       {.values = {-2.0F, -0.5F, 0.75F, 8.0F}})
+                                       .value(),
+                    },
+                    SceneConstantTexture{
+                        .id = {.value = 7U},
+                        .texture = renderer::ConstantColorTexture::create(
+                                       {.red = -1.0F, .green = 0.25F, .blue = 3.5F})
+                                       .value(),
+                    },
+                    SceneConstantTexture{
+                        .id = {.value = 0U},
+                        .texture = renderer::ConstantFloatTexture::create(-0.75F).value(),
+                    },
+                },
             .objects =
                 {
                     SceneObject{.id = {.value = maximum}},
@@ -165,10 +185,10 @@ inline constexpr std::uint64_t FrozenRichSceneHash = 0x0D31C3D2420A23DBULL;
                     },
                     SceneMaterial{
                         .id = {.value = 0U},
-                        .spectral = make_material(
-                            wavelengths,
-                            renderer::TransportSpectrum{.values = {0.65F, 0.55F, 0.45F, 0.35F}},
-                            renderer::TransportSpectrum{}, false),
+                        .spectral = make_material(wavelengths,
+                                                  renderer::TransportSpectrum{
+                                                      .values = {0.65F, 0.55F, 0.45F, 0.35F}},
+                                                  renderer::TransportSpectrum{}, false),
                     },
                 },
             .instances =
@@ -235,6 +255,7 @@ inline constexpr std::uint64_t FrozenRichSceneHash = 0x0D31C3D2420A23DBULL;
         };
 
     if (permute_sorted_domains) {
+        std::ranges::reverse(description.constant_textures);
         std::ranges::reverse(description.objects);
         std::ranges::reverse(description.geometries);
         std::ranges::reverse(description.materials);
@@ -396,15 +417,16 @@ expected_punctual_spectrum(const ScenePunctualLight& light) {
     return std::get<SceneSpotLight>(light).on_axis_spectral_radiant_intensity;
 }
 
-TEST(CudaSceneSoAAbi, FreezesVersionTwoMaterialClosureColumns) {
-    EXPECT_EQ(xpu::shared::SceneSoaMagic, 0x32414F53464B4C42ULL);
-    EXPECT_EQ(xpu::shared::SceneSoaAbiMajor, 2U);
+TEST(CudaSceneSoAAbi, FreezesVersionThreeConstantTextureColumns) {
+    EXPECT_EQ(xpu::shared::SceneSoaMagic, 0x33414F53464B4C42ULL);
+    EXPECT_EQ(xpu::shared::SceneSoaAbiMajor, 3U);
     EXPECT_EQ(xpu::shared::SceneSoaAbiMinor, 0U);
     EXPECT_EQ(xpu::shared::SceneSoaClosureParameterScalarCount, 10U);
-    EXPECT_EQ(sizeof(SceneSoaHeader), 4000U);
+    EXPECT_EQ(sizeof(SceneSoaHeader), 4144U);
     EXPECT_EQ(offsetof(SceneSoaHeader, closure_count), 80U);
-    EXPECT_EQ(offsetof(SceneSoaHeader, columns), 120U);
-    EXPECT_EQ(offsetof(SceneSoaHeader, reserved), 3960U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, texture_count), 120U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, columns), 128U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, reserved), 4112U);
 
     EXPECT_EQ(column::material_closure_offset, 31U);
     EXPECT_EQ(column::material_closure_count, 32U);
@@ -417,7 +439,10 @@ TEST(CudaSceneSoAAbi, FreezesVersionTwoMaterialClosureColumns) {
     EXPECT_EQ(column::closure_parameters, 45U);
     EXPECT_EQ(column::closure_probability, 55U);
     EXPECT_EQ(column::instance_id, 56U);
-    EXPECT_EQ(column::count, 160U);
+    EXPECT_EQ(column::texture_id, 160U);
+    EXPECT_EQ(column::texture_kind, 161U);
+    EXPECT_EQ(column::texture_value, 162U);
+    EXPECT_EQ(column::count, 166U);
 
     EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_closure_offset),
               sizeof(std::uint64_t));
@@ -437,6 +462,11 @@ TEST(CudaSceneSoAAbi, FreezesVersionTwoMaterialClosureColumns) {
               sizeof(float));
     EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::closure_probability),
               sizeof(float));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::texture_id),
+              sizeof(std::uint32_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::texture_kind),
+              sizeof(std::uint32_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::texture_value), sizeof(float));
 }
 
 TEST(CudaSceneSoAAbi, RejectsIncompatibleAndMalformedHeaders) {
@@ -533,6 +563,7 @@ TEST(CudaSceneSoA, MapsEveryCpuFieldToDeviceColumnsBitForBit) {
     const auto lights = cpu_scene->punctual_lights();
     const auto area_light_ids = cpu_scene->mesh_area_light_instance_ids();
     const auto& environment = cpu_scene->spectral_environment();
+    const auto textures = cpu_scene->constant_textures();
 
     EXPECT_EQ(header.object_count, objects.size());
     EXPECT_EQ(header.geometry_count, geometries.size());
@@ -541,6 +572,7 @@ TEST(CudaSceneSoA, MapsEveryCpuFieldToDeviceColumnsBitForBit) {
     EXPECT_EQ(header.punctual_light_count, lights.size());
     EXPECT_EQ(header.mesh_area_light_count, area_light_ids.size());
     EXPECT_EQ(header.environment_count, 1U);
+    EXPECT_EQ(header.texture_count, textures.size());
 
     expect_column(
         bytes, header, column::object_id,
@@ -793,6 +825,36 @@ TEST(CudaSceneSoA, MapsEveryCpuFieldToDeviceColumnsBitForBit) {
         expect_column(bytes, header, column::environment_radiance + lane,
                       std::vector{environment->radiance[lane]});
     }
+    expect_column(
+        bytes, header, column::texture_id,
+        projected<std::uint32_t>(textures, [](const auto& value) { return value.id.value; }));
+    expect_column(bytes, header, column::texture_kind,
+                  projected<std::uint32_t>(textures, [](const auto& value) {
+                      return static_cast<std::uint32_t>(value.kind());
+                  }));
+    for (auto value = std::uint32_t{0}; value < xpu::shared::ConstantTextureValueCount; ++value) {
+        expect_column(
+            bytes, header, column::texture_value + value,
+            projected<float>(textures, [value](const auto& texture) {
+                return std::visit(
+                    [value](const auto& concrete) {
+                        using Texture = std::remove_cvref_t<decltype(concrete)>;
+                        if constexpr (std::is_same_v<Texture, renderer::ConstantFloatTexture>) {
+                            return value == 0U ? concrete.value() : 0.0F;
+                        } else if constexpr (std::is_same_v<Texture,
+                                                            renderer::ConstantColorTexture>) {
+                            const auto color = concrete.value();
+                            return value == 0U   ? color.red
+                                   : value == 1U ? color.green
+                                   : value == 2U ? color.blue
+                                                 : 0.0F;
+                        } else {
+                            return concrete.value()[value];
+                        }
+                    },
+                    texture.texture);
+            }));
+    }
 }
 
 TEST(CudaSceneSoA, DeviceHashMatchesHostHashAndFrozenValue) {
@@ -913,6 +975,7 @@ TEST(CudaSceneSoA, EncodesAbsentSpectralDataWithoutInventingAnEnvironment) {
     EXPECT_EQ(header.closure_count, 0U);
     EXPECT_EQ(header.punctual_light_count, 0U);
     EXPECT_EQ(header.mesh_area_light_count, 0U);
+    EXPECT_EQ(header.texture_count, 0U);
     expect_column(bytes, header, column::material_spectral_present, std::vector<std::uint8_t>{0U});
     expect_column(bytes, header, column::material_closure_offset, std::vector<std::uint64_t>{0U});
     expect_column(bytes, header, column::material_closure_count, std::vector<std::uint64_t>{0U});
@@ -940,6 +1003,11 @@ TEST(CudaSceneSoA, EncodesAbsentSpectralDataWithoutInventingAnEnvironment) {
          ++parameter) {
         EXPECT_TRUE(
             read_column<float>(bytes, header, column::closure_parameters + parameter).empty());
+    }
+    EXPECT_TRUE(read_column<std::uint32_t>(bytes, header, column::texture_id).empty());
+    EXPECT_TRUE(read_column<std::uint32_t>(bytes, header, column::texture_kind).empty());
+    for (auto value = std::uint32_t{0}; value < xpu::shared::ConstantTextureValueCount; ++value) {
+        EXPECT_TRUE(read_column<float>(bytes, header, column::texture_value + value).empty());
     }
 }
 

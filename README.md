@@ -21,6 +21,12 @@ silently selecting another path.
   and shading normals, UVs, derivatives, identifiers, and time.
 - **Internal scene:** the Engine exposes an immutable frame snapshot storing a closed object,
   geometry, material, and nested-instance graph under explicit stable 32-bit identifiers.
+  The snapshot also owns a deterministic stable-ID registry of finite constant float, scene-linear
+  RGB, and four-lane spectrum textures. Scalar-reference lookup widens the stored transport values
+  to `double`, CPU lookup preserves their `float` payload bit-for-bit, and CUDA evaluates the same
+  sorted records from dedicated device SoA columns. Missing identifiers, value-kind mismatches,
+  malformed device records, and incompatible refits fail explicitly; signed values are neither
+  clamped nor replaced with black.
   Geometries retain immutable compact triangle meshes; instances carry validated local affine
   matrices, visibility masks, and optional parents. World transforms are resolved deterministically
   when the snapshot closes. A snapshot may remain geometry-only, or carry one explicit four-lane
@@ -326,6 +332,9 @@ environment, punctual and emissive-mesh lights, NEE, balance or power MIS, separ
 and compensated Russian roulette. A non-uniform light sampler, participating medium, unsupported
 scene spectrum, or malformed device state is rejected explicitly; `scalar_ref` remains a separate
 oracle rather than an execution fallback.
+Constant textures are currently typed scene resources with explicit scalar-reference, CPU, and CUDA
+evaluation paths. They are not yet material-parameter bindings: in particular, Blackframe does not
+invent an implicit RGB-to-spectrum conversion.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between

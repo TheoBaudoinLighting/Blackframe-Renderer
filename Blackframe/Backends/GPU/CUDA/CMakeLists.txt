@@ -1,6 +1,7 @@
 add_library(
     BlackframeCudaScene
     STATIC
+        Source/ConstantTextures.cpp
         Source/ClosestHit.cpp
         Source/Occlusion.cpp
         Source/SceneBvh.cpp
@@ -16,6 +17,7 @@ target_sources(
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
         FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/ConstantTextures.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/ClosestHit.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/Occlusion.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/Backends/GPU/CUDA/SceneBvh.hpp"

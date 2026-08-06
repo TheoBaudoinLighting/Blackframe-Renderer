@@ -33,6 +33,7 @@ gtest_discover_tests(
 
 add_executable(
     BlackframeSceneTests
+    ConstantTextureEvaluationTest.cpp
     FrameSceneTest.cpp
 )
 blackframe_set_target_role(BlackframeSceneTests test)
