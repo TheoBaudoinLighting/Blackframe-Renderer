@@ -25,6 +25,21 @@ function(require_target_role expected_target expected_role)
     message(FATAL_ERROR "Target graph does not contain '${expected_target}'.")
 endfunction()
 
+function(require_target_absent unexpected_target)
+    string(JSON node_count LENGTH "${target_graph}" nodes)
+    if(node_count EQUAL 0)
+        return()
+    endif()
+
+    math(EXPR last_node_index "${node_count} - 1")
+    foreach(node_index RANGE 0 "${last_node_index}")
+        string(JSON node_name GET "${target_graph}" nodes "${node_index}" name)
+        if(node_name STREQUAL unexpected_target)
+            message(FATAL_ERROR "Target graph unexpectedly contains '${unexpected_target}'.")
+        endif()
+    endforeach()
+endfunction()
+
 function(target_graph_has_edge source_target dependency_target dependency_kind output_variable)
     string(JSON edge_count LENGTH "${target_graph}" edges)
     if(edge_count EQUAL 0)
@@ -133,16 +148,20 @@ if(CPU_EMBREE_ENABLED)
 endif()
 if(CUDA_ENABLED)
     require_target_role(BlackframeCuda cuda)
+    require_target_role(BlackframeCudaAsyncRuntime cuda)
     require_target_role(BlackframeCudaScene cuda)
     require_target_role(BlackframeCudaSceneKernel cuda)
     require_target_role(BlackframeCudaSampleStreamKernel cuda)
     require_target_role(BlackframeCudaWavefrontStageKernel cuda)
     require_target_role(BlackframeCudaWavefrontTransport cuda)
+    require_target_role(BlackframeCudaAsyncRuntimeTests test)
     require_target_role(BlackframeCudaCornellSmokeTests test)
     require_target_role(BlackframeCudaSampleStreamTests test)
+    require_target_edge(BlackframeCuda BlackframeCudaAsyncRuntime link)
     require_target_edge(BlackframeCuda BlackframeCudaSmokeKernel link)
     require_target_edge(BlackframeCuda BlackframeCudaSampleStreamKernel link)
     require_target_edge(BlackframeCuda BlackframeCudaWavefrontStageKernel link)
+    require_target_edge(BlackframeCudaAsyncRuntime BlackframeCore link)
     require_target_edge(BlackframeCudaScene BlackframeCudaMemory link)
     require_target_edge(BlackframeCudaScene BlackframeCudaSceneKernel link)
     require_target_edge(BlackframeCudaScene BlackframeSceneGeometry link)
@@ -157,9 +176,20 @@ if(CUDA_ENABLED)
         link
     )
     require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaQueues link)
+    require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaAsyncRuntime link)
     require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaScene link)
     require_target_edge(BlackframeCudaWavefrontTransport BlackframeCudaWavefrontStageKernel link)
     require_target_edge(BlackframeCudaWavefrontTransport BlackframeRenderer link)
+    require_target_edge(
+        BlackframeCudaAsyncRuntimeTests
+        BlackframeCudaAsyncRuntime
+        link
+    )
+    require_target_edge(
+        BlackframeCudaAsyncRuntimeTests
+        BlackframeCudaMemory
+        link
+    )
     require_target_edge(
         BlackframeCudaSampleStreamTests
         BlackframeCudaSampleStreamKernel
@@ -170,6 +200,11 @@ if(CUDA_ENABLED)
         BlackframeCudaWavefrontTransport
         link
     )
+    require_target_edge(BlackframeTests BlackframeCudaAsyncRuntimeTests order)
+    forbid_target_edge(BlackframeCudaAsyncRuntime BlackframeEmbree)
+    forbid_target_edge(BlackframeCudaAsyncRuntime BlackframeCpuEmbree)
+    forbid_target_edge(BlackframeCudaAsyncRuntimeTests BlackframeEmbree)
+    forbid_target_edge(BlackframeCudaAsyncRuntimeTests BlackframeCpuEmbree)
     forbid_target_edge(BlackframeCudaWavefrontStageKernel BlackframeEmbree)
     forbid_target_edge(BlackframeCudaWavefrontStageKernel BlackframeCpuEmbree)
     forbid_target_edge(BlackframeCudaWavefrontTransport BlackframeEmbree)
@@ -184,6 +219,9 @@ if(CUDA_ENABLED)
     forbid_target_edge(BlackframeCudaScene BlackframeCpuEmbree)
     forbid_target_edge(BlackframeCuda BlackframeCpuEmbree)
     forbid_target_edge(BlackframeCpuEmbree BlackframeCuda)
+else()
+    require_target_absent(BlackframeCudaAsyncRuntime)
+    require_target_absent(BlackframeCudaAsyncRuntimeTests)
 endif()
 if(TOOLS_ENABLED)
     require_target_role(BlackframeRender tool)

@@ -77,6 +77,8 @@ foreach(
     forbidden_target
     IN ITEMS
         BlackframeCuda
+        BlackframeCudaAsyncRuntime
+        BlackframeCudaAsyncRuntimeTests
         BlackframeCudaScene
         BlackframeCudaSceneKernel
         BlackframeCudaSampleStreamKernel

@@ -304,73 +304,78 @@ static_assert(offsetof(WavefrontCameraInputDeviceSoa, reserved) == 28U);
 
 } // namespace blackframe::xpu::cuda
 
+// Every optional opaque stream handle must be a cudaStream_t created on the active device.
+// nullptr preserves the legacy default-stream ordering. All launches remain asynchronous; callers
+// own the dependency and completion boundaries.
 extern "C" int blackframe_cuda_launch_wavefront_seed_camera(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t first_path_slot,
-    std::uint32_t path_count, blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    std::uint32_t path_count, blackframe::xpu::cuda::WavefrontStageOutcome* outcomes,
+    void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_clear_queue(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues, std::uint32_t queue_kind,
-    std::uint32_t acknowledge_overflow, std::uint32_t* device_status) noexcept;
+    std::uint32_t acknowledge_overflow, std::uint32_t* device_status,
+    void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_camera_stage(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontCameraInputDeviceSoa inputs,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_gather_rays(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
     blackframe::xpu::shared::PathSlot* compact_path_slots,
     blackframe::xpu::shared::TransportRay* compact_rays,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_classify_closest_hit(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams,
     const blackframe::xpu::shared::PathSlot* compact_path_slots,
     const blackframe::xpu::shared::SceneClosestHitResult* compact_results, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_hit_stage(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_miss_stage(
     const std::uint8_t* scene_bytes, std::size_t scene_size,
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_shade_stage(
     const std::uint8_t* scene_bytes, std::size_t scene_size,
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams,
     blackframe::xpu::cuda::WavefrontTransportConfig config, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_gather_shadow_rays(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
     blackframe::xpu::shared::PathSlot* compact_path_slots,
     blackframe::xpu::shared::TransportRay* compact_rays,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_process_shadow(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams,
     const blackframe::xpu::shared::PathSlot* compact_path_slots,
     const blackframe::xpu::shared::SceneOcclusionResult* compact_results, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_continuation_stage(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     blackframe::xpu::cuda::WavefrontStageDeviceSoa streams, std::uint32_t work_count,
-    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes) noexcept;
+    blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, void* stream = nullptr) noexcept;
 
 extern "C" int blackframe_cuda_launch_wavefront_audit_stage(
     const blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, std::uint32_t work_count,
     std::uint32_t allowed_route_mask, std::uint32_t path_capacity, std::uint32_t stage_kind,
-    blackframe::xpu::cuda::WavefrontStageAudit* audit) noexcept;
+    blackframe::xpu::cuda::WavefrontStageAudit* audit, void* stream = nullptr) noexcept;

@@ -122,6 +122,7 @@ target_link_libraries(
         Blackframe::CudaScene
         Blackframe::Renderer
     PRIVATE
+        Blackframe::CudaAsyncRuntime
         Blackframe::CudaToolkit
         Blackframe::CudaWavefrontStageKernel
         Blackframe::ProjectOptions

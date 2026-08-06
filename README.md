@@ -269,9 +269,10 @@ silently selecting another path.
   fixed-width, explicitly
   aligned ray, hit, queue, sampler, spectrum, and path-state records. The host compiler and a CUDA
   kernel compare every frozen size, alignment, and member offset at test time. A separate host-only
-  C++26 layer owns typed device buffers through move-only RAII, provides explicitly bounded and
-  aligned scratch suballocation, preserves live storage when growth is refused, and reports CUDA
-  allocation exhaustion without selecting host memory. A committed `FrameScene` serializes into a
+  C++26 layer owns typed device buffers, pinned host buffers, nonblocking streams, and dependency
+  events through move-only RAII. It provides explicitly bounded and aligned scratch suballocation,
+  preserves live storage when growth is refused, and reports CUDA allocation exhaustion without
+  selecting pageable or host execution as a fallback. A committed `FrameScene` serializes into a
   deterministic pointer-free device SoA whose versioned material columns preserve bounded closure
   records, explicit probabilities, frame mode, and tangent rotation. A separate versioned CUDA blob
   builds one binary BLAS
@@ -291,9 +292,15 @@ silently selecting another path.
   stages, reduces every per-lane outcome into a deterministic fixed-size device audit, compacts each
   routed queue, validates every queue boundary, and reconstructs results in input path-slot order. A
   move-only fixed-capacity workspace retains device scratch, queues, and host staging across
-  synchronous batches; callers that omit it keep the explicit allocate-per-call behavior. A
-  dedicated CUDA Google Benchmark records stable compaction occupancy, published and rejected lane
-  counts, scratch bytes, throughput, and timing in machine-readable JSON. Device shading reads
+  batches. Its transfer mode is fixed at creation: synchronous batches retain the original blocking
+  path, while asynchronous batches use pinned staging, overlap input uploads with independent lane
+  initialization, order all kernels on an explicit compute stream, and hand final downloads to a
+  transfer stream through recorded events. Mode mismatches are rejected rather than substituted;
+  the versioned report records asynchronous byte counts and cross-stream event dependencies.
+  Callers that omit a workspace keep the explicit allocate-per-call behavior in the requested mode.
+  A dedicated CUDA Google Benchmark records stable compaction occupancy, published and rejected
+  lane counts, scratch bytes, transfer telemetry, throughput, and timing in machine-readable JSON.
+  Device shading reads
   four-lane closure parameters, one-sided emission, constant environment radiance, point,
   directional, spot, and mesh-area lights directly from the serialized scene. It uses robust
   triangle-area

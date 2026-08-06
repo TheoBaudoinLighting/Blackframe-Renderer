@@ -3928,12 +3928,18 @@ stage_audit_kernel(const WavefrontStageOutcome* const outcomes, const std::uint3
         (static_cast<std::uint64_t>(work_count) + ThreadsPerBlock - 1U) / ThreadsPerBlock);
 }
 
+[[nodiscard]] cudaStream_t cuda_stream(void* const stream_handle) noexcept {
+    return reinterpret_cast<cudaStream_t>(stream_handle);
+}
+
 } // namespace
 
-extern "C" int blackframe_cuda_launch_wavefront_seed_camera(
-    const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
-    const std::uint32_t first_path_slot, const std::uint32_t path_count,
-    WavefrontStageOutcome* const outcomes) noexcept {
+extern "C" int blackframe_cuda_launch_wavefront_seed_camera(const WavefrontQueueDeviceSoa queues,
+                                                            const WavefrontStageDeviceSoa streams,
+                                                            const std::uint32_t first_path_slot,
+                                                            const std::uint32_t path_count,
+                                                            WavefrontStageOutcome* const outcomes,
+                                                            void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) || (path_count != 0U && outcomes == nullptr) ||
         first_path_slot > streams.capacity || path_count > streams.capacity - first_path_slot) {
         return static_cast<int>(cudaErrorInvalidValue);
@@ -3941,31 +3947,34 @@ extern "C" int blackframe_cuda_launch_wavefront_seed_camera(
     if (path_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    seed_camera_kernel<<<block_count(path_count), ThreadsPerBlock>>>(
+    const auto stream = cuda_stream(stream_handle);
+    seed_camera_kernel<<<block_count(path_count), ThreadsPerBlock, 0U, stream>>>(
         queues, streams, first_path_slot, path_count, outcomes);
     auto status = cudaGetLastError();
     if (status != cudaSuccess) {
         return static_cast<int>(status);
     }
-    publish_seed_camera_header_kernel<<<1U, 1U>>>(queues, path_count);
+    publish_seed_camera_header_kernel<<<1U, 1U, 0U, stream>>>(queues, path_count);
     return static_cast<int>(cudaGetLastError());
 }
 
 extern "C" int blackframe_cuda_launch_wavefront_clear_queue(
     const WavefrontQueueDeviceSoa queues, const std::uint32_t queue_kind,
-    const std::uint32_t acknowledge_overflow, std::uint32_t* const device_status) noexcept {
+    const std::uint32_t acknowledge_overflow, std::uint32_t* const device_status,
+    void* const stream_handle) noexcept {
     if (!host_queue_view_is_valid(queues) || queue_kind >= cuda::CudaWavefrontQueueCount ||
         acknowledge_overflow > 1U || device_status == nullptr) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
-    clear_queue_kernel<<<1U, 1U>>>(queues, queue_kind, acknowledge_overflow, device_status);
+    clear_queue_kernel<<<1U, 1U, 0U, cuda_stream(stream_handle)>>>(
+        queues, queue_kind, acknowledge_overflow, device_status);
     return static_cast<int>(cudaGetLastError());
 }
 
 extern "C" int blackframe_cuda_launch_wavefront_camera_stage(
     const WavefrontQueueDeviceSoa queues, const WavefrontCameraInputDeviceSoa inputs,
     const WavefrontStageDeviceSoa streams, const std::uint32_t work_count,
-    WavefrontStageOutcome* const outcomes) noexcept {
+    WavefrontStageOutcome* const outcomes, void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) || inputs.reserved != 0U ||
         inputs.count > streams.capacity ||
         (inputs.count != 0U && (inputs.sample_streams == nullptr || inputs.rays == nullptr ||
@@ -3976,15 +3985,19 @@ extern "C" int blackframe_cuda_launch_wavefront_camera_stage(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    camera_stage_kernel<<<block_count(work_count), ThreadsPerBlock>>>(queues, inputs, streams,
-                                                                      work_count, outcomes);
+    camera_stage_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                          cuda_stream(stream_handle)>>>(queues, inputs, streams, work_count,
+                                                        outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
-extern "C" int blackframe_cuda_launch_wavefront_gather_rays(
-    const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
-    const std::uint32_t work_count, PathSlot* const compact_path_slots,
-    TransportRay* const compact_rays, WavefrontStageOutcome* const outcomes) noexcept {
+extern "C" int blackframe_cuda_launch_wavefront_gather_rays(const WavefrontQueueDeviceSoa queues,
+                                                            const WavefrontStageDeviceSoa streams,
+                                                            const std::uint32_t work_count,
+                                                            PathSlot* const compact_path_slots,
+                                                            TransportRay* const compact_rays,
+                                                            WavefrontStageOutcome* const outcomes,
+                                                            void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) ||
         (work_count != 0U &&
          (compact_path_slots == nullptr || compact_rays == nullptr || outcomes == nullptr))) {
@@ -3993,15 +4006,17 @@ extern "C" int blackframe_cuda_launch_wavefront_gather_rays(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    gather_rays_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
-        queues, streams, work_count, compact_path_slots, compact_rays, outcomes);
+    gather_rays_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                         cuda_stream(stream_handle)>>>(queues, streams, work_count,
+                                                       compact_path_slots, compact_rays, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
 extern "C" int blackframe_cuda_launch_wavefront_classify_closest_hit(
     const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
     const PathSlot* const compact_path_slots, const SceneClosestHitResult* const compact_results,
-    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes) noexcept {
+    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes,
+    void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) ||
         (work_count != 0U &&
          (compact_path_slots == nullptr || compact_results == nullptr || outcomes == nullptr))) {
@@ -4010,29 +4025,35 @@ extern "C" int blackframe_cuda_launch_wavefront_classify_closest_hit(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    classify_closest_hit_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
+    classify_closest_hit_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                                  cuda_stream(stream_handle)>>>(
         queues, streams, compact_path_slots, compact_results, work_count, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
-extern "C" int blackframe_cuda_launch_wavefront_hit_stage(
-    const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
-    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes) noexcept {
+extern "C" int blackframe_cuda_launch_wavefront_hit_stage(const WavefrontQueueDeviceSoa queues,
+                                                          const WavefrontStageDeviceSoa streams,
+                                                          const std::uint32_t work_count,
+                                                          WavefrontStageOutcome* const outcomes,
+                                                          void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) || (work_count != 0U && outcomes == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    hit_stage_kernel<<<block_count(work_count), ThreadsPerBlock>>>(queues, streams, work_count,
-                                                                   outcomes);
+    hit_stage_kernel<<<block_count(work_count), ThreadsPerBlock, 0U, cuda_stream(stream_handle)>>>(
+        queues, streams, work_count, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
-extern "C" int blackframe_cuda_launch_wavefront_miss_stage(
-    const std::uint8_t* const scene_bytes, const std::size_t scene_size,
-    const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
-    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes) noexcept {
+extern "C" int blackframe_cuda_launch_wavefront_miss_stage(const std::uint8_t* const scene_bytes,
+                                                           const std::size_t scene_size,
+                                                           const WavefrontQueueDeviceSoa queues,
+                                                           const WavefrontStageDeviceSoa streams,
+                                                           const std::uint32_t work_count,
+                                                           WavefrontStageOutcome* const outcomes,
+                                                           void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) ||
         (work_count != 0U &&
          (scene_bytes == nullptr || scene_size < sizeof(SceneSoaHeader) || outcomes == nullptr))) {
@@ -4041,8 +4062,8 @@ extern "C" int blackframe_cuda_launch_wavefront_miss_stage(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    miss_stage_kernel<<<block_count(work_count), ThreadsPerBlock>>>(scene_bytes, scene_size, queues,
-                                                                    streams, work_count, outcomes);
+    miss_stage_kernel<<<block_count(work_count), ThreadsPerBlock, 0U, cuda_stream(stream_handle)>>>(
+        scene_bytes, scene_size, queues, streams, work_count, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
@@ -4050,7 +4071,7 @@ extern "C" int blackframe_cuda_launch_wavefront_shade_stage(
     const std::uint8_t* const scene_bytes, const std::size_t scene_size,
     const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
     const WavefrontTransportConfig config, const std::uint32_t work_count,
-    WavefrontStageOutcome* const outcomes) noexcept {
+    WavefrontStageOutcome* const outcomes, void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) ||
         (work_count != 0U &&
          (scene_bytes == nullptr || scene_size < sizeof(SceneSoaHeader) || outcomes == nullptr))) {
@@ -4059,15 +4080,17 @@ extern "C" int blackframe_cuda_launch_wavefront_shade_stage(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    shade_stage_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
-        scene_bytes, scene_size, queues, streams, config, work_count, outcomes);
+    shade_stage_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                         cuda_stream(stream_handle)>>>(scene_bytes, scene_size, queues, streams,
+                                                       config, work_count, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
 extern "C" int blackframe_cuda_launch_wavefront_gather_shadow_rays(
     const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
     const std::uint32_t work_count, PathSlot* const compact_path_slots,
-    TransportRay* const compact_rays, WavefrontStageOutcome* const outcomes) noexcept {
+    TransportRay* const compact_rays, WavefrontStageOutcome* const outcomes,
+    void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) ||
         (work_count != 0U &&
          (compact_path_slots == nullptr || compact_rays == nullptr || outcomes == nullptr))) {
@@ -4076,7 +4099,8 @@ extern "C" int blackframe_cuda_launch_wavefront_gather_shadow_rays(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    gather_shadow_rays_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
+    gather_shadow_rays_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                                cuda_stream(stream_handle)>>>(
         queues, streams, work_count, compact_path_slots, compact_rays, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
@@ -4084,7 +4108,8 @@ extern "C" int blackframe_cuda_launch_wavefront_gather_shadow_rays(
 extern "C" int blackframe_cuda_launch_wavefront_process_shadow(
     const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
     const PathSlot* const compact_path_slots, const SceneOcclusionResult* const compact_results,
-    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes) noexcept {
+    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes,
+    void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) ||
         (work_count != 0U &&
          (compact_path_slots == nullptr || compact_results == nullptr || outcomes == nullptr))) {
@@ -4093,40 +4118,45 @@ extern "C" int blackframe_cuda_launch_wavefront_process_shadow(
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    process_shadow_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
-        queues, streams, compact_path_slots, compact_results, work_count, outcomes);
+    process_shadow_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                            cuda_stream(stream_handle)>>>(queues, streams, compact_path_slots,
+                                                          compact_results, work_count, outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
 extern "C" int blackframe_cuda_launch_wavefront_continuation_stage(
     const WavefrontQueueDeviceSoa queues, const WavefrontStageDeviceSoa streams,
-    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes) noexcept {
+    const std::uint32_t work_count, WavefrontStageOutcome* const outcomes,
+    void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) || (work_count != 0U && outcomes == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     if (work_count == 0U) {
         return static_cast<int>(cudaSuccess);
     }
-    continuation_stage_kernel<<<block_count(work_count), ThreadsPerBlock>>>(queues, streams,
-                                                                            work_count, outcomes);
+    continuation_stage_kernel<<<block_count(work_count), ThreadsPerBlock, 0U,
+                                cuda_stream(stream_handle)>>>(queues, streams, work_count,
+                                                              outcomes);
     return static_cast<int>(cudaGetLastError());
 }
 
 extern "C" int blackframe_cuda_launch_wavefront_audit_stage(
     const WavefrontStageOutcome* const outcomes, const std::uint32_t work_count,
     const std::uint32_t allowed_route_mask, const std::uint32_t path_capacity,
-    const std::uint32_t stage_kind, WavefrontStageAudit* const audit) noexcept {
+    const std::uint32_t stage_kind, WavefrontStageAudit* const audit,
+    void* const stream_handle) noexcept {
     if (audit == nullptr || (work_count != 0U && outcomes == nullptr) ||
         stage_kind > static_cast<std::uint32_t>(WavefrontStageKind::continuation)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
 
-    initialize_stage_audit_kernel<<<1U, 1U>>>(work_count, stage_kind, audit);
+    const auto stream = cuda_stream(stream_handle);
+    initialize_stage_audit_kernel<<<1U, 1U, 0U, stream>>>(work_count, stage_kind, audit);
     auto status = cudaGetLastError();
     if (status != cudaSuccess || work_count == 0U) {
         return static_cast<int>(status);
     }
-    stage_audit_kernel<<<block_count(work_count), ThreadsPerBlock>>>(
+    stage_audit_kernel<<<block_count(work_count), ThreadsPerBlock, 0U, stream>>>(
         outcomes, work_count, allowed_route_mask, path_capacity, stage_kind, audit);
     return static_cast<int>(cudaGetLastError());
 }

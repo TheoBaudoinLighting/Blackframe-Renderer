@@ -253,7 +253,8 @@ extern "C" int blackframe_cuda_query_wavefront_queue_compaction_scratch_bytes(
 extern "C" int blackframe_cuda_launch_wavefront_queue_compaction(
     const WavefrontQueueDeviceSoa queues, const WavefrontStageOutcome* const outcomes,
     const std::uint32_t input_count, const std::uint32_t route, void* const scratch,
-    const std::size_t scratch_bytes, WavefrontQueueCompactionResult* const device_result) noexcept {
+    const std::size_t scratch_bytes, WavefrontQueueCompactionResult* const device_result,
+    void* const stream_handle) noexcept {
     if (!host_queue_view_is_valid(queues) || !valid_route(route) ||
         input_count > queues.slot_stride || device_result == nullptr ||
         (input_count != 0U && outcomes == nullptr)) {
@@ -270,13 +271,14 @@ extern "C" int blackframe_cuda_launch_wavefront_queue_compaction(
         return static_cast<int>(status == cudaSuccess ? cudaErrorInvalidValue : status);
     }
 
-    initialize_compaction_kernel<<<1U, 1U>>>(queues, route, input_count, device_result);
+    const auto stream = reinterpret_cast<cudaStream_t>(stream_handle);
+    initialize_compaction_kernel<<<1U, 1U, 0U, stream>>>(queues, route, input_count, device_result);
     status = cudaGetLastError();
     if (status != cudaSuccess || input_count == 0U) {
         return static_cast<int>(status);
     }
 
-    validate_selected_slots_kernel<<<block_count(input_count), ThreadsPerBlock>>>(
+    validate_selected_slots_kernel<<<block_count(input_count), ThreadsPerBlock, 0U, stream>>>(
         outcomes, input_count, route, queues.slot_stride, device_result);
     status = cudaGetLastError();
     if (status != cudaSuccess) {
@@ -290,23 +292,24 @@ extern "C" int blackframe_cuda_launch_wavefront_queue_compaction(
     auto* const scan_temp = scratch_bytes_begin + temp_offset;
     auto scan_temp_bytes = scratch_bytes - temp_offset;
     const auto selection = SelectionIterator{outcomes, SelectSuccessfulRoute{.route = route}};
-    status =
-        cub::DeviceScan::ExclusiveSum(scan_temp, scan_temp_bytes, selection, offsets, input_count);
+    status = cub::DeviceScan::ExclusiveSum(scan_temp, scan_temp_bytes, selection, offsets,
+                                           input_count, stream);
     if (status != cudaSuccess) {
         return static_cast<int>(status);
     }
 
-    decide_compaction_kernel<<<1U, 1U>>>(queues, outcomes, offsets, input_count, device_result);
+    decide_compaction_kernel<<<1U, 1U, 0U, stream>>>(queues, outcomes, offsets, input_count,
+                                                     device_result);
     status = cudaGetLastError();
     if (status != cudaSuccess) {
         return static_cast<int>(status);
     }
-    scatter_compacted_slots_kernel<<<block_count(input_count), ThreadsPerBlock>>>(
+    scatter_compacted_slots_kernel<<<block_count(input_count), ThreadsPerBlock, 0U, stream>>>(
         queues, outcomes, offsets, input_count, device_result);
     status = cudaGetLastError();
     if (status != cudaSuccess) {
         return static_cast<int>(status);
     }
-    publish_compaction_kernel<<<1U, 1U>>>(queues, device_result);
+    publish_compaction_kernel<<<1U, 1U, 0U, stream>>>(queues, device_result);
     return static_cast<int>(cudaGetLastError());
 }

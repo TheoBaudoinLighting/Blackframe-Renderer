@@ -173,6 +173,7 @@ target_link_libraries(
 target_link_libraries(
     BlackframeCuda
     INTERFACE
+        Blackframe::CudaAsyncRuntime
         Blackframe::CudaMemory
         Blackframe::CudaQueueKernel
         Blackframe::CudaSampleStreamKernel

@@ -1257,7 +1257,8 @@ extern "C" int blackframe_cuda_launch_scene_closest_hit(
     const std::uint8_t* const scene_bytes, const std::size_t scene_size,
     const std::uint8_t* const bvh_bytes, const std::size_t bvh_size,
     const blackframe::xpu::shared::TransportRay* const rays, const std::uint32_t ray_count,
-    blackframe::xpu::shared::SceneClosestHitResult* const results) noexcept {
+    blackframe::xpu::shared::SceneClosestHitResult* const results,
+    void* const stream_handle) noexcept {
     if (scene_bytes == nullptr || scene_size < sizeof(blackframe::xpu::shared::SceneSoaHeader) ||
         bvh_bytes == nullptr || bvh_size < sizeof(blackframe::xpu::shared::SceneBvhHeader) ||
         (ray_count != 0U && (rays == nullptr || results == nullptr))) {
@@ -1269,8 +1270,9 @@ extern "C" int blackframe_cuda_launch_scene_closest_hit(
 
     const auto block_count = static_cast<std::uint32_t>(
         (static_cast<std::uint64_t>(ray_count) + ThreadsPerBlock - 1U) / ThreadsPerBlock);
-    scene_closest_hit_kernel<<<block_count, ThreadsPerBlock>>>(scene_bytes, scene_size, bvh_bytes,
-                                                               bvh_size, rays, ray_count, results);
+    const auto stream = reinterpret_cast<cudaStream_t>(stream_handle);
+    scene_closest_hit_kernel<<<block_count, ThreadsPerBlock, 0U, stream>>>(
+        scene_bytes, scene_size, bvh_bytes, bvh_size, rays, ray_count, results);
     return static_cast<int>(cudaGetLastError());
 }
 
@@ -1278,7 +1280,8 @@ extern "C" int blackframe_cuda_launch_scene_occlusion(
     const std::uint8_t* const scene_bytes, const std::size_t scene_size,
     const std::uint8_t* const bvh_bytes, const std::size_t bvh_size,
     const blackframe::xpu::shared::TransportRay* const rays, const std::uint32_t ray_count,
-    blackframe::xpu::shared::SceneOcclusionResult* const results) noexcept {
+    blackframe::xpu::shared::SceneOcclusionResult* const results,
+    void* const stream_handle) noexcept {
     if (scene_bytes == nullptr || scene_size < sizeof(blackframe::xpu::shared::SceneSoaHeader) ||
         bvh_bytes == nullptr || bvh_size < sizeof(blackframe::xpu::shared::SceneBvhHeader) ||
         (ray_count != 0U && (rays == nullptr || results == nullptr))) {
@@ -1290,7 +1293,8 @@ extern "C" int blackframe_cuda_launch_scene_occlusion(
 
     const auto block_count = static_cast<std::uint32_t>(
         (static_cast<std::uint64_t>(ray_count) + ThreadsPerBlock - 1U) / ThreadsPerBlock);
-    scene_occlusion_kernel<<<block_count, ThreadsPerBlock>>>(scene_bytes, scene_size, bvh_bytes,
-                                                             bvh_size, rays, ray_count, results);
+    const auto stream = reinterpret_cast<cudaStream_t>(stream_handle);
+    scene_occlusion_kernel<<<block_count, ThreadsPerBlock, 0U, stream>>>(
+        scene_bytes, scene_size, bvh_bytes, bvh_size, rays, ray_count, results);
     return static_cast<int>(cudaGetLastError());
 }

@@ -141,6 +141,40 @@ gtest_discover_tests(
         TIMEOUT 180
 )
 
+cmake_path(GET CMAKE_CUDA_COMPILER PARENT_PATH blackframe_cuda_compiler_bin)
+cmake_path(GET blackframe_cuda_compiler_bin PARENT_PATH blackframe_cuda_toolkit_root)
+find_program(
+    blackframe_compute_sanitizer_racecheck
+    NAMES compute-sanitizer compute-sanitizer.bat
+    HINTS
+        "${blackframe_cuda_compiler_bin}"
+        "${blackframe_cuda_toolkit_root}/compute-sanitizer"
+    REQUIRED
+    NO_DEFAULT_PATH
+    NO_CACHE
+)
+
+add_test(
+    NAME BlackframeCudaWavefrontAsyncRacecheck
+    COMMAND
+        "${blackframe_compute_sanitizer_racecheck}"
+        --tool racecheck
+        --racecheck-memcpy-async yes
+        --racecheck-detect-level warn
+        --racecheck-report all
+        --error-exitcode 99
+        "$<TARGET_FILE:BlackframeCudaCornellSmokeTests>"
+        --gtest_filter=CudaCornellWavefrontSmokeTest.SynchronousAndAsynchronousTransfersMatchExactly
+)
+set_tests_properties(
+    BlackframeCudaWavefrontAsyncRacecheck
+    PROPERTIES
+        LABELS "nightly;cuda"
+        RESOURCE_LOCK blackframe_cuda_device_0
+        RUN_SERIAL TRUE
+        TIMEOUT 600
+)
+
 add_executable(
     BlackframeCudaTransportParityTests
     CudaTransportParityTest.cpp

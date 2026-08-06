@@ -385,6 +385,9 @@ struct RegionSum final {
 void add_report(CudaWavefrontTransportReport& destination,
                 const CudaWavefrontTransportReport& source) noexcept {
     destination.path_count += source.path_count;
+    destination.asynchronous_upload_bytes += source.asynchronous_upload_bytes;
+    destination.asynchronous_download_bytes += source.asynchronous_download_bytes;
+    destination.cross_stream_event_dependencies += source.cross_stream_event_dependencies;
     destination.stage_lanes.camera += source.stage_lanes.camera;
     destination.stage_lanes.intersection += source.stage_lanes.intersection;
     destination.stage_lanes.hit += source.stage_lanes.hit;
@@ -405,9 +408,8 @@ void add_report(CudaWavefrontTransportReport& destination,
                                [](const auto value) { return std::isfinite(value) && value >= 0; });
 }
 
-void expect_transport_batches_exact(const CudaWavefrontTransportBatch& expected,
-                                    const CudaWavefrontTransportBatch& actual) {
-    EXPECT_EQ(actual.report, expected.report);
+void expect_transport_paths_exact(const CudaWavefrontTransportBatch& expected,
+                                  const CudaWavefrontTransportBatch& actual) {
     ASSERT_EQ(actual.paths.size(), expected.paths.size());
     for (auto index = std::size_t{}; index < expected.paths.size(); ++index) {
         SCOPED_TRACE(testing::Message{} << "path " << index);
@@ -433,6 +435,46 @@ void expect_transport_batches_exact(const CudaWavefrontTransportBatch& expected,
         EXPECT_EQ(actual_path.terminal_ray.current_medium(),
                   expected_path.terminal_ray.current_medium());
     }
+}
+
+void expect_transport_batches_exact(const CudaWavefrontTransportBatch& expected,
+                                    const CudaWavefrontTransportBatch& actual) {
+    EXPECT_EQ(actual.report, expected.report);
+    expect_transport_paths_exact(expected, actual);
+}
+
+void expect_transport_batches_physically_exact(const CudaWavefrontTransportBatch& expected,
+                                               const CudaWavefrontTransportBatch& actual) {
+    EXPECT_EQ(actual.report.schema_version, expected.report.schema_version);
+    EXPECT_EQ(actual.report.has_light_sampler, expected.report.has_light_sampler);
+    EXPECT_EQ(actual.report.registered_light_count, expected.report.registered_light_count);
+    EXPECT_EQ(actual.report.heuristic, expected.report.heuristic);
+    EXPECT_EQ(actual.report.light_sampling_strategy, expected.report.light_sampling_strategy);
+    EXPECT_EQ(actual.report.depth_limits, expected.report.depth_limits);
+    EXPECT_EQ(actual.report.roulette_policy, expected.report.roulette_policy);
+    EXPECT_EQ(actual.report.path_count, expected.report.path_count);
+    EXPECT_EQ(actual.report.stage_lanes, expected.report.stage_lanes);
+    EXPECT_EQ(actual.report.closure_samples, expected.report.closure_samples);
+    EXPECT_EQ(actual.report.light_samples, expected.report.light_samples);
+    EXPECT_EQ(actual.report.shadow_queries, expected.report.shadow_queries);
+    EXPECT_EQ(actual.report.terminated_paths, expected.report.terminated_paths);
+    EXPECT_EQ(actual.report.queue_overflow_attempts, expected.report.queue_overflow_attempts);
+    EXPECT_EQ(actual.report.queue_rejected_lanes, expected.report.queue_rejected_lanes);
+    expect_transport_paths_exact(expected, actual);
+}
+
+void expect_synchronous_transfer_report(const CudaWavefrontTransportReport& report) {
+    EXPECT_EQ(report.transfer_mode, CudaWavefrontTransferMode::synchronous);
+    EXPECT_EQ(report.asynchronous_upload_bytes, 0U);
+    EXPECT_EQ(report.asynchronous_download_bytes, 0U);
+    EXPECT_EQ(report.cross_stream_event_dependencies, 0U);
+}
+
+void expect_asynchronous_transfer_report(const CudaWavefrontTransportReport& report) {
+    EXPECT_EQ(report.transfer_mode, CudaWavefrontTransferMode::asynchronous);
+    EXPECT_GT(report.asynchronous_upload_bytes, 0U);
+    EXPECT_GT(report.asynchronous_download_bytes, 0U);
+    EXPECT_GT(report.cross_stream_event_dependencies, 0U);
 }
 
 class CudaCornellWavefrontSmokeTest : public testing::Test {
@@ -495,6 +537,10 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
     const auto samples_per_pixel =
         diagnostic_output ? DiagnosticCornellSamplesPerPixel : CornellSamplesPerPixel;
     const auto samples_per_batch = diagnostic_output ? std::uint32_t{1U} : samples_per_pixel;
+    const auto transfer_mode = diagnostic_output ? CudaWavefrontTransferMode::asynchronous
+                                                 : CudaWavefrontTransferMode::synchronous;
+    auto options = transport_options();
+    options.transfer_mode = transfer_mode;
 
     const auto camera = cornell_wavefront_test::make_camera(extent);
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
@@ -502,7 +548,8 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
     ASSERT_TRUE(film.has_value()) << film.error().message;
     const auto workspace_capacity = static_cast<std::size_t>(extent.width) * extent.height *
                                     static_cast<std::size_t>(samples_per_batch);
-    auto workspace = CudaWavefrontTransportWorkspace::create(workspace_capacity);
+    auto workspace = CudaWavefrontTransportWorkspace::create(
+        workspace_capacity, xpu::cuda::DeviceMemoryBudget{}, transfer_mode);
     ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
 
     auto aggregate_report = CudaWavefrontTransportReport{
@@ -513,6 +560,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
         .light_sampling_strategy = renderer::LightSamplingStrategy::uniform,
         .depth_limits = renderer::PathDepthLimits{.diffuse = CornellMaximumDiffuseDepth},
         .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
+        .transfer_mode = transfer_mode,
     };
     auto non_black_spectral_paths = std::size_t{};
     for (auto first_sample = std::uint32_t{}; first_sample < samples_per_pixel;
@@ -523,9 +571,8 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
             make_inputs(*camera, wavelengths(), extent, first_sample, batch_sample_count);
         ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 
-        const auto traced =
-            trace_cuda_wavefront_transport(*workspace, *scene_soa_, *scene_bvh_, *inputs,
-                                           std::cref(*light_sampler_), transport_options());
+        const auto traced = trace_cuda_wavefront_transport(
+            *workspace, *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), options);
         ASSERT_TRUE(traced.has_value()) << traced.error().message;
         ASSERT_EQ(traced->paths.size(), inputs->size());
 
@@ -539,6 +586,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
                   renderer::PathDepthLimits{.diffuse = CornellMaximumDiffuseDepth});
         EXPECT_EQ(report.roulette_policy, renderer::RussianRoulettePolicy::disabled());
         EXPECT_EQ(report.path_count, inputs->size());
+        EXPECT_EQ(report.transfer_mode, transfer_mode);
         EXPECT_EQ(report.terminated_paths, inputs->size());
         EXPECT_EQ(report.queue_overflow_attempts, 0U);
         EXPECT_EQ(report.queue_rejected_lanes, 0U);
@@ -594,6 +642,15 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
     EXPECT_GT(aggregate_report.light_samples, 0U);
     EXPECT_GT(aggregate_report.shadow_queries, 0U);
     EXPECT_GT(aggregate_report.light_samples, aggregate_report.shadow_queries);
+    if (transfer_mode == CudaWavefrontTransferMode::asynchronous) {
+        EXPECT_GT(aggregate_report.asynchronous_upload_bytes, 0U);
+        EXPECT_GT(aggregate_report.asynchronous_download_bytes, 0U);
+        EXPECT_GT(aggregate_report.cross_stream_event_dependencies, 0U);
+    } else {
+        EXPECT_EQ(aggregate_report.asynchronous_upload_bytes, 0U);
+        EXPECT_EQ(aggregate_report.asynchronous_download_bytes, 0U);
+        EXPECT_EQ(aggregate_report.cross_stream_event_dependencies, 0U);
+    }
     EXPECT_GT(non_black_spectral_paths, 0U);
 
     auto positive_image_energy = renderer::ReferenceScalar{};
@@ -970,47 +1027,134 @@ TEST_F(CudaCornellWavefrontSmokeTest, TerminatesZeroThroughputBeforeSampling) {
     EXPECT_EQ(traced->report.stage_lanes.continuation, 0U);
 }
 
-TEST_F(CudaCornellWavefrontSmokeTest, ReusesWorkspaceForFullAndSmallerBatchesExactly) {
+TEST_F(CudaCornellWavefrontSmokeTest, SynchronousAndAsynchronousTransfersMatchExactly) {
     const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
     ASSERT_TRUE(camera.has_value()) << camera.error().message;
     const auto full_inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 8U);
     ASSERT_TRUE(full_inputs.has_value()) << full_inputs.error().message;
     const auto smaller_inputs = make_pixel_inputs(*camera, wavelengths(), 31U, 33U, 97U, 3U);
     ASSERT_TRUE(smaller_inputs.has_value()) << smaller_inputs.error().message;
-    const auto options = transport_options();
-    const auto full_baseline = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_), options);
-    ASSERT_TRUE(full_baseline.has_value()) << full_baseline.error().message;
-    const auto smaller_baseline = trace_cuda_wavefront_transport(
-        *scene_soa_, *scene_bvh_, *smaller_inputs, std::cref(*light_sampler_), options);
-    ASSERT_TRUE(smaller_baseline.has_value()) << smaller_baseline.error().message;
+    auto synchronous_options = transport_options();
+    synchronous_options.transfer_mode = CudaWavefrontTransferMode::synchronous;
+    auto asynchronous_options = synchronous_options;
+    asynchronous_options.transfer_mode = CudaWavefrontTransferMode::asynchronous;
 
-    auto workspace = CudaWavefrontTransportWorkspace::create(8U);
-    ASSERT_TRUE(workspace.has_value()) << workspace.error().message;
-    const auto initial_capacity = workspace->capacity();
-    const auto initial_device_bytes = workspace->device_size_bytes();
-    const auto initial_device = workspace->device_ordinal();
-    EXPECT_EQ(initial_capacity, 8U);
-    EXPECT_GT(initial_device_bytes, 0U);
-    EXPECT_EQ(initial_device, scene_soa_->device_ordinal());
+    auto synchronous_workspace = CudaWavefrontTransportWorkspace::create(
+        8U, xpu::cuda::DeviceMemoryBudget{}, CudaWavefrontTransferMode::synchronous);
+    ASSERT_TRUE(synchronous_workspace.has_value()) << synchronous_workspace.error().message;
+    auto asynchronous_workspace = CudaWavefrontTransportWorkspace::create(
+        8U, xpu::cuda::DeviceMemoryBudget{}, CudaWavefrontTransferMode::asynchronous);
+    ASSERT_TRUE(asynchronous_workspace.has_value()) << asynchronous_workspace.error().message;
+    EXPECT_EQ(synchronous_workspace->transfer_mode(), CudaWavefrontTransferMode::synchronous);
+    EXPECT_EQ(asynchronous_workspace->transfer_mode(), CudaWavefrontTransferMode::asynchronous);
+    EXPECT_EQ(synchronous_workspace->capacity(), 8U);
+    EXPECT_EQ(asynchronous_workspace->capacity(), 8U);
+    EXPECT_EQ(synchronous_workspace->device_ordinal(), scene_soa_->device_ordinal());
+    EXPECT_EQ(asynchronous_workspace->device_ordinal(), scene_soa_->device_ordinal());
 
-    const auto first = trace_cuda_wavefront_transport(
-        *workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_), options);
-    ASSERT_TRUE(first.has_value()) << first.error().message;
-    const auto second = trace_cuda_wavefront_transport(
-        *workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_), options);
-    ASSERT_TRUE(second.has_value()) << second.error().message;
-    const auto smaller = trace_cuda_wavefront_transport(
-        *workspace, *scene_soa_, *scene_bvh_, *smaller_inputs, std::cref(*light_sampler_), options);
-    ASSERT_TRUE(smaller.has_value()) << smaller.error().message;
+    const auto synchronous_full_first = trace_cuda_wavefront_transport(
+        *synchronous_workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_),
+        synchronous_options);
+    ASSERT_TRUE(synchronous_full_first.has_value()) << synchronous_full_first.error().message;
+    const auto asynchronous_full_first = trace_cuda_wavefront_transport(
+        *asynchronous_workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_),
+        asynchronous_options);
+    ASSERT_TRUE(asynchronous_full_first.has_value()) << asynchronous_full_first.error().message;
+    expect_transport_batches_physically_exact(*synchronous_full_first, *asynchronous_full_first);
+    expect_synchronous_transfer_report(synchronous_full_first->report);
+    expect_asynchronous_transfer_report(asynchronous_full_first->report);
 
-    expect_transport_batches_exact(*full_baseline, *first);
-    expect_transport_batches_exact(*full_baseline, *second);
-    expect_transport_batches_exact(*smaller_baseline, *smaller);
-    EXPECT_EQ(workspace->capacity(), initial_capacity);
-    EXPECT_EQ(workspace->device_size_bytes(), initial_device_bytes);
-    EXPECT_EQ(workspace->device_ordinal(), initial_device);
-    EXPECT_TRUE(workspace->close().has_value());
+    const auto synchronous_smaller = trace_cuda_wavefront_transport(
+        *synchronous_workspace, *scene_soa_, *scene_bvh_, *smaller_inputs,
+        std::cref(*light_sampler_), synchronous_options);
+    ASSERT_TRUE(synchronous_smaller.has_value()) << synchronous_smaller.error().message;
+    const auto asynchronous_smaller = trace_cuda_wavefront_transport(
+        *asynchronous_workspace, *scene_soa_, *scene_bvh_, *smaller_inputs,
+        std::cref(*light_sampler_), asynchronous_options);
+    ASSERT_TRUE(asynchronous_smaller.has_value()) << asynchronous_smaller.error().message;
+    expect_transport_batches_physically_exact(*synchronous_smaller, *asynchronous_smaller);
+    expect_synchronous_transfer_report(synchronous_smaller->report);
+    expect_asynchronous_transfer_report(asynchronous_smaller->report);
+
+    const auto synchronous_full_second = trace_cuda_wavefront_transport(
+        *synchronous_workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_),
+        synchronous_options);
+    ASSERT_TRUE(synchronous_full_second.has_value()) << synchronous_full_second.error().message;
+    const auto asynchronous_full_second = trace_cuda_wavefront_transport(
+        *asynchronous_workspace, *scene_soa_, *scene_bvh_, *full_inputs, std::cref(*light_sampler_),
+        asynchronous_options);
+    ASSERT_TRUE(asynchronous_full_second.has_value()) << asynchronous_full_second.error().message;
+    expect_transport_batches_physically_exact(*synchronous_full_second, *asynchronous_full_second);
+    expect_transport_batches_exact(*synchronous_full_first, *synchronous_full_second);
+    expect_transport_batches_exact(*asynchronous_full_first, *asynchronous_full_second);
+    expect_synchronous_transfer_report(synchronous_full_second->report);
+    expect_asynchronous_transfer_report(asynchronous_full_second->report);
+
+    EXPECT_TRUE(synchronous_workspace->close().has_value());
+    EXPECT_TRUE(asynchronous_workspace->close().has_value());
+}
+
+TEST_F(CudaCornellWavefrontSmokeTest,
+       RejectsInvalidOrMismatchedTransferModesWithoutPoisoningWorkspace) {
+    const auto camera = cornell_wavefront_test::make_camera(CornellExtent);
+    ASSERT_TRUE(camera.has_value()) << camera.error().message;
+    const auto inputs = make_pixel_inputs(*camera, wavelengths(), 32U, 32U, 0U, 3U);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+
+    constexpr auto invalid_mode = static_cast<CudaWavefrontTransferMode>(0xFFU);
+    const auto invalid_workspace =
+        CudaWavefrontTransportWorkspace::create(3U, xpu::cuda::DeviceMemoryBudget{}, invalid_mode);
+    ASSERT_FALSE(invalid_workspace.has_value());
+    EXPECT_EQ(invalid_workspace.error().code, core::StatusCode::invalid_argument);
+
+    auto synchronous_options = transport_options();
+    synchronous_options.transfer_mode = CudaWavefrontTransferMode::synchronous;
+    auto asynchronous_options = synchronous_options;
+    asynchronous_options.transfer_mode = CudaWavefrontTransferMode::asynchronous;
+    auto invalid_options = synchronous_options;
+    invalid_options.transfer_mode = invalid_mode;
+
+    const auto baseline = trace_cuda_wavefront_transport(
+        *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), synchronous_options);
+    ASSERT_TRUE(baseline.has_value()) << baseline.error().message;
+    expect_synchronous_transfer_report(baseline->report);
+
+    auto synchronous_workspace = CudaWavefrontTransportWorkspace::create(
+        3U, xpu::cuda::DeviceMemoryBudget{}, CudaWavefrontTransferMode::synchronous);
+    ASSERT_TRUE(synchronous_workspace.has_value()) << synchronous_workspace.error().message;
+    const auto invalid_trace =
+        trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), invalid_options);
+    ASSERT_FALSE(invalid_trace.has_value());
+    EXPECT_EQ(invalid_trace.error().code, core::StatusCode::invalid_argument);
+    const auto asynchronous_mismatch =
+        trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), asynchronous_options);
+    ASSERT_FALSE(asynchronous_mismatch.has_value());
+    EXPECT_EQ(asynchronous_mismatch.error().code, core::StatusCode::incompatible);
+    const auto synchronous_recovered =
+        trace_cuda_wavefront_transport(*synchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), synchronous_options);
+    ASSERT_TRUE(synchronous_recovered.has_value()) << synchronous_recovered.error().message;
+    expect_transport_batches_exact(*baseline, *synchronous_recovered);
+
+    auto asynchronous_workspace = CudaWavefrontTransportWorkspace::create(
+        3U, xpu::cuda::DeviceMemoryBudget{}, CudaWavefrontTransferMode::asynchronous);
+    ASSERT_TRUE(asynchronous_workspace.has_value()) << asynchronous_workspace.error().message;
+    const auto synchronous_mismatch =
+        trace_cuda_wavefront_transport(*asynchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), synchronous_options);
+    ASSERT_FALSE(synchronous_mismatch.has_value());
+    EXPECT_EQ(synchronous_mismatch.error().code, core::StatusCode::incompatible);
+    const auto asynchronous_recovered =
+        trace_cuda_wavefront_transport(*asynchronous_workspace, *scene_soa_, *scene_bvh_, *inputs,
+                                       std::cref(*light_sampler_), asynchronous_options);
+    ASSERT_TRUE(asynchronous_recovered.has_value()) << asynchronous_recovered.error().message;
+    expect_transport_batches_physically_exact(*baseline, *asynchronous_recovered);
+    expect_asynchronous_transfer_report(asynchronous_recovered->report);
+
+    EXPECT_TRUE(synchronous_workspace->close().has_value());
+    EXPECT_TRUE(asynchronous_workspace->close().has_value());
 }
 
 TEST_F(CudaCornellWavefrontSmokeTest, CapacityAndBudgetRejectionsDoNotPoisonWorkspace) {

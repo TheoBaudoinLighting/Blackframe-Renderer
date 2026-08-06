@@ -30,3 +30,36 @@ target_link_libraries(
         Blackframe::CudaToolkit
         Blackframe::ProjectOptions
 )
+
+add_library(
+    BlackframeCudaAsyncRuntime
+    STATIC
+        Source/AsyncRuntime.cpp
+)
+add_library(Blackframe::CudaAsyncRuntime ALIAS BlackframeCudaAsyncRuntime)
+blackframe_set_target_role(BlackframeCudaAsyncRuntime cuda)
+
+target_sources(
+    BlackframeCudaAsyncRuntime
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Include"
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/AsyncRuntime.hpp"
+)
+
+target_include_directories(
+    BlackframeCudaAsyncRuntime
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+        $<INSTALL_INTERFACE:Include>
+)
+
+target_link_libraries(
+    BlackframeCudaAsyncRuntime
+    PUBLIC
+        Blackframe::Core
+    PRIVATE
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+)

@@ -56,6 +56,7 @@ if(BLACKFRAME_ENABLE_CUDA)
     list(
         APPEND
         blackframe_test_targets
+        BlackframeCudaAsyncRuntimeTests
         BlackframeCudaMemoryMemcheckTests
         BlackframeCudaMemoryTests
         BlackframeCudaSampleStreamTests

@@ -59,14 +59,17 @@ blackframe_cuda_query_wavefront_queue_compaction_scratch_bytes(std::uint32_t max
 
 // Selects successful outcomes whose route equals route, computes a stable exclusive prefix scan,
 // and appends their path slots to the queue whose numeric kind equals route. routes 1 through 6 are
-// accepted. All pointers name non-overlapping storage on the active CUDA device. The default stream
-// orders the scan, transactional capacity decision, and scatter. Invalid launch arguments are
-// rejected synchronously; device-side contract failures are written to device_result.
+// accepted. All pointers name non-overlapping storage on the active CUDA device. The optional
+// opaque handle must be a cudaStream_t created on that device; nullptr preserves default-stream
+// ordering. The selected stream orders the scan, transactional capacity decision, and scatter.
+// Invalid launch arguments are rejected synchronously; device-side contract failures are written
+// to device_result.
 extern "C" int blackframe_cuda_launch_wavefront_queue_compaction(
     blackframe::xpu::cuda::WavefrontQueueDeviceSoa queues,
     const blackframe::xpu::cuda::WavefrontStageOutcome* outcomes, std::uint32_t input_count,
     std::uint32_t route, void* scratch, std::size_t scratch_bytes,
-    blackframe::xpu::cuda::WavefrontQueueCompactionResult* device_result) noexcept;
+    blackframe::xpu::cuda::WavefrontQueueCompactionResult* device_result,
+    void* stream = nullptr) noexcept;
 
 namespace blackframe::xpu::cuda {
 
@@ -80,9 +83,10 @@ query_wavefront_queue_compaction_scratch_bytes(const std::uint32_t max_input_cou
 [[nodiscard]] inline int launch_wavefront_queue_compaction(
     const WavefrontQueueDeviceSoa queues, const WavefrontStageOutcome* const outcomes,
     const std::uint32_t input_count, const std::uint32_t route, void* const scratch,
-    const std::size_t scratch_bytes, WavefrontQueueCompactionResult* const device_result) noexcept {
-    return blackframe_cuda_launch_wavefront_queue_compaction(queues, outcomes, input_count, route,
-                                                             scratch, scratch_bytes, device_result);
+    const std::size_t scratch_bytes, WavefrontQueueCompactionResult* const device_result,
+    void* const stream = nullptr) noexcept {
+    return blackframe_cuda_launch_wavefront_queue_compaction(
+        queues, outcomes, input_count, route, scratch, scratch_bytes, device_result, stream);
 }
 
 } // namespace blackframe::xpu::cuda

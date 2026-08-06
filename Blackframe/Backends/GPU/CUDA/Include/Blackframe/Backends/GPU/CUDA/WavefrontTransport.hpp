@@ -21,7 +21,7 @@
 
 namespace blackframe::engine {
 
-inline constexpr std::uint32_t CurrentCudaWavefrontTransportReportSchemaVersion = 2U;
+inline constexpr std::uint32_t CurrentCudaWavefrontTransportReportSchemaVersion = 3U;
 
 struct CudaWavefrontPathInput final {
     renderer::Ray primary_ray;
@@ -35,6 +35,11 @@ enum class CudaWavefrontPathTermination : std::uint8_t {
     zero_throughput = 2U,
     outside_bsdf_support = 3U,
     russian_roulette = 4U,
+};
+
+enum class CudaWavefrontTransferMode : std::uint8_t {
+    synchronous = 0U,
+    asynchronous = 1U,
 };
 
 struct CudaWavefrontPathResult final {
@@ -67,6 +72,11 @@ struct CudaWavefrontTransportReport final {
     renderer::PathDepthLimits depth_limits{};
     renderer::RussianRoulettePolicy roulette_policy{renderer::RussianRoulettePolicy::disabled()};
     std::size_t path_count{};
+    CudaWavefrontTransferMode transfer_mode{CudaWavefrontTransferMode::synchronous};
+    std::uint64_t asynchronous_upload_bytes{};
+    std::uint64_t asynchronous_download_bytes{};
+    // Counts explicit event waits that establish dependencies between distinct CUDA streams.
+    std::uint64_t cross_stream_event_dependencies{};
     CudaWavefrontStageLaneCounts stage_lanes{};
     std::uint64_t closure_samples{};
     std::uint64_t light_samples{};
@@ -89,13 +99,14 @@ struct CudaWavefrontTransportOptions final {
     renderer::PathDepthLimits depth_limits{.diffuse = 5U};
     renderer::RussianRoulettePolicy roulette_policy{renderer::RussianRoulettePolicy::disabled()};
     xpu::cuda::DeviceMemoryBudget device_memory_budget{};
+    CudaWavefrontTransferMode transfer_mode{CudaWavefrontTransferMode::synchronous};
 };
 
 using CudaWavefrontLightSampler =
     std::optional<std::reference_wrapper<const renderer::LightSampler>>;
 
-// Owns fixed-capacity CUDA transport queues, scratch columns, and host staging buffers for reuse
-// across synchronous trace calls on one device. A workspace is not thread-safe: callers must not
+// Owns fixed-capacity CUDA transport queues, scratch columns, host staging buffers, and any stream
+// resources required by its fixed transfer mode. A workspace is not thread-safe: callers must not
 // use the same instance concurrently. The active path count may vary up to capacity without
 // reallocating. Explicit close reports teardown errors; the destructor remains the no-throw
 // ownership backstop.
@@ -108,11 +119,13 @@ class CudaWavefrontTransportWorkspace final {
     ~CudaWavefrontTransportWorkspace() noexcept;
 
     [[nodiscard]] static core::Result<CudaWavefrontTransportWorkspace>
-    create(std::size_t capacity, xpu::cuda::DeviceMemoryBudget device_memory_budget = {});
+    create(std::size_t capacity, xpu::cuda::DeviceMemoryBudget device_memory_budget = {},
+           CudaWavefrontTransferMode transfer_mode = CudaWavefrontTransferMode::synchronous);
 
     [[nodiscard]] std::size_t capacity() const noexcept;
     [[nodiscard]] std::size_t device_size_bytes() const noexcept;
     [[nodiscard]] std::int32_t device_ordinal() const noexcept;
+    [[nodiscard]] CudaWavefrontTransferMode transfer_mode() const noexcept;
     [[nodiscard]] explicit operator bool() const noexcept;
     [[nodiscard]] core::Status close();
 
@@ -154,6 +167,7 @@ trace_cuda_wavefront_transport(const CudaSceneSoA& scene, const CudaSceneBvh& bv
 static_assert(std::is_standard_layout_v<CudaWavefrontPathInput>);
 static_assert(std::is_trivially_copyable_v<CudaWavefrontPathInput>);
 static_assert(sizeof(CudaWavefrontPathTermination) == sizeof(std::uint8_t));
+static_assert(sizeof(CudaWavefrontTransferMode) == sizeof(std::uint8_t));
 static_assert(std::is_standard_layout_v<CudaWavefrontStageLaneCounts>);
 static_assert(std::is_trivially_copyable_v<CudaWavefrontStageLaneCounts>);
 static_assert(std::is_standard_layout_v<CudaWavefrontTransportReport>);

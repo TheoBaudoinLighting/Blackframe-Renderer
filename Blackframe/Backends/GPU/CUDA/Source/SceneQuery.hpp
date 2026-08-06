@@ -100,9 +100,10 @@ execute(const CudaSceneSoA& scene, const CudaSceneBvh& bvh,
     if (copy_status != cudaSuccess) {
         return std::unexpected(runtime_error(copy_status, query_name, "ray upload", ray_bytes));
     }
-    const auto launch_status = static_cast<cudaError_t>(launcher(
-        scene.device_data(), scene.size_bytes(), bvh.device_data(), bvh.size_bytes(),
-        device_rays->data(), static_cast<std::uint32_t>(rays.size()), device_results->data()));
+    const auto launch_status = static_cast<cudaError_t>(
+        launcher(scene.device_data(), scene.size_bytes(), bvh.device_data(), bvh.size_bytes(),
+                 device_rays->data(), static_cast<std::uint32_t>(rays.size()),
+                 device_results->data(), nullptr));
     if (launch_status != cudaSuccess) {
         return std::unexpected(
             runtime_error(launch_status, query_name, "kernel execution", total_bytes));
