@@ -37,6 +37,7 @@ target_sources(
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportDevice.cuh"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportLobeProbe.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/TransportLobesDevice.cuh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueCompaction.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueDevice.cuh"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontQueueKernel.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/Include/Blackframe/XPU/CUDA/WavefrontStageKernel.hpp"
@@ -124,12 +125,22 @@ add_library(Blackframe::Cuda ALIAS BlackframeCuda)
 add_library(
     BlackframeCudaQueueKernel
     STATIC
+        Source/CudaWavefrontQueueCompaction.cu
         Source/CudaWavefrontQueues.cu
 )
 add_library(Blackframe::CudaQueueKernel ALIAS BlackframeCudaQueueKernel)
 blackframe_set_target_role(BlackframeCudaQueueKernel cuda)
 
 blackframe_configure_cuda_target(BlackframeCudaQueueKernel)
+
+if(WIN32 AND CMAKE_CUDA_SIMULATE_ID STREQUAL "MSVC")
+    # CUB requires the conforming MSVC preprocessor. Keep this host option local to the queue
+    # kernel that includes CUB instead of changing unrelated CUDA targets.
+    target_compile_options(
+        BlackframeCudaQueueKernel
+        PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+    )
+endif()
 
 target_link_libraries(
     BlackframeCudaQueueKernel

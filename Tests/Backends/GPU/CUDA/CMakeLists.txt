@@ -51,6 +51,32 @@ gtest_discover_tests(
 )
 
 add_executable(
+    BlackframeCudaWavefrontQueueCompactionTests
+    WavefrontQueueCompactionTest.cpp
+)
+blackframe_set_target_role(BlackframeCudaWavefrontQueueCompactionTests test)
+
+target_link_libraries(
+    BlackframeCudaWavefrontQueueCompactionTests
+    PRIVATE
+        Blackframe::CudaQueues
+        Blackframe::CudaToolkit
+        Blackframe::ProjectOptions
+        GTest::gtest_main
+)
+
+gtest_discover_tests(
+    BlackframeCudaWavefrontQueueCompactionTests
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "unit;cuda"
+        RESOURCE_LOCK blackframe_cuda_device_0
+        RUN_SERIAL TRUE
+        TIMEOUT 60
+)
+
+add_executable(
     BlackframeCudaWavefrontStageAuditTests
     CudaWavefrontStageAuditTest.cpp
 )

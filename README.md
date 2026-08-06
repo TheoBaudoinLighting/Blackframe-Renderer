@@ -279,18 +279,21 @@ silently selecting another path.
   queries traverse that TLAS and its BLAS, apply resolved instance transforms and intersect
   two-sided watertight triangles with explicit per-ray miss and error states. Opaque shadow queries
   apply visibility masks and exit at the first eligible crossing without reconstructing surface
-  data. Seven fixed-capacity CUDA queue columns now store path-slot indices for camera, ray, hit,
-  miss, shade, shadow, and continuation work. Producers aggregate same-queue reservations within a
-  warp while preserving exact partial-capacity results. Published sizes remain bounded, and
-  saturated overflow and rejection counters make exhaustion explicit without overwriting adjacent
-  storage; reset requires an explicit overflow policy. Six CUDA C++20 stage
-  kernels now consume those queues for camera initialization, hit resolution, miss handling,
-  bounded closure shading, shadow visibility, and continuation. The host orchestrator dispatches the
-  existing CUDA closest-hit and any-hit kernels between stages, reduces every per-lane outcome into
-  a deterministic fixed-size device audit, validates each queue boundary, and reconstructs results
-  in input path-slot order. A move-only fixed-capacity workspace can retain device scratch, queues,
-  and host staging across synchronous batches; callers that omit it keep the explicit
-  allocate-per-call behavior. The device shading path reads
+  data. Seven fixed-capacity CUDA queue columns store path-slot indices for camera, ray, hit, miss,
+  shade, shadow, and continuation work. Each stage writes one explicit outcome per input lane; a
+  CUB exclusive prefix scan then selects a requested route and scatters its path slots in stable
+  input order before publishing the destination size. Appends are transactional: insufficient
+  capacity rejects the whole selected set, preserves existing slots and size, and saturates the
+  explicit overflow and rejection counters. The capacity-sized aligned scratch allocation is reused
+  by every smaller active prefix. Six CUDA C++20 stage kernels consume those queues for camera
+  initialization, hit resolution, miss handling, bounded closure shading, shadow visibility, and
+  continuation. The host orchestrator dispatches the CUDA closest-hit and any-hit kernels between
+  stages, reduces every per-lane outcome into a deterministic fixed-size device audit, compacts each
+  routed queue, validates every queue boundary, and reconstructs results in input path-slot order. A
+  move-only fixed-capacity workspace retains device scratch, queues, and host staging across
+  synchronous batches; callers that omit it keep the explicit allocate-per-call behavior. A
+  dedicated CUDA Google Benchmark records stable compaction occupancy, published and rejected lane
+  counts, scratch bytes, throughput, and timing in machine-readable JSON. Device shading reads
   four-lane closure parameters, one-sided emission, constant environment radiance, point,
   directional, spot, and mesh-area lights directly from the serialized scene. It uses robust
   triangle-area
@@ -378,6 +381,14 @@ with:
 ```powershell
 ctest --test-dir build/windows-cpu-release `
   -R '^Blackframe\.EmbreeScalarWavefrontParity\.Json$' `
+  --output-on-failure
+```
+
+The CUDA stable-compaction benchmark and its JSON contract are validated with:
+
+```powershell
+ctest --test-dir build/windows-cuda-release `
+  -R '^Blackframe\.Benchmarks\.CudaWavefrontCompaction\.Json$' `
   --output-on-failure
 ```
 

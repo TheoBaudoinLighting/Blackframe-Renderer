@@ -7,6 +7,19 @@ target_sources(
         WavefrontCompactionBenchmark.cpp
 )
 
+if(TARGET Blackframe::CudaQueues)
+    target_sources(
+        BlackframeRenderBenchmarks
+        PRIVATE CudaWavefrontCompactionBenchmark.cpp
+    )
+    target_link_libraries(
+        BlackframeRenderBenchmarks
+        PRIVATE
+            Blackframe::CudaQueues
+            Blackframe::CudaToolkit
+    )
+endif()
+
 if(TARGET Blackframe::CudaWavefrontTransport)
     target_sources(
         BlackframeRenderBenchmarks

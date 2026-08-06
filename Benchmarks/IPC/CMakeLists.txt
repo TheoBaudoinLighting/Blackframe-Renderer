@@ -61,6 +61,18 @@ if(BUILD_TESTING)
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/ValidateWavefrontQueueStatisticsJson.cmake"
     )
+    if(TARGET Blackframe::CudaQueues)
+        add_test(
+            NAME Blackframe.Benchmarks.CudaWavefrontCompaction.Json
+            COMMAND
+                "${CMAKE_COMMAND}"
+                "-DBENCHMARK_EXECUTABLE=$<TARGET_FILE:BlackframeRenderBenchmarks>"
+                "-DBINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
+                "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/cuda_wavefront_compaction.json"
+                -P
+                "${CMAKE_CURRENT_SOURCE_DIR}/ValidateCudaWavefrontCompactionJson.cmake"
+        )
+    endif()
     set_tests_properties(
         Blackframe.Executables.RenderBenchmarks.Help
         PROPERTIES
@@ -85,4 +97,14 @@ if(BUILD_TESTING)
             LABELS "regression;cpu"
             TIMEOUT 120
     )
+    if(TARGET Blackframe::CudaQueues)
+        set_tests_properties(
+            Blackframe.Benchmarks.CudaWavefrontCompaction.Json
+            PROPERTIES
+                LABELS "smoke;cuda"
+                RESOURCE_LOCK blackframe_cuda_device_0
+                RUN_SERIAL TRUE
+                TIMEOUT 120
+        )
+    endif()
 endif()

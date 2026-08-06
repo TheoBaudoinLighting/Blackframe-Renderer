@@ -35,7 +35,6 @@ using cuda::WavefrontLanePhase;
 using cuda::WavefrontPendingBsdfEncoding;
 using cuda::WavefrontPendingShadow;
 using cuda::WavefrontPreviousBsdfSample;
-using cuda::WavefrontQueueDevicePushStatus;
 using cuda::WavefrontQueueDeviceSoa;
 using cuda::WavefrontStageAudit;
 using cuda::WavefrontStageDeviceSoa;
@@ -637,18 +636,6 @@ finish_phase(WavefrontLaneControl& control, const WavefrontLanePhase phase,
     atomicExch(&control.phase, value(phase));
 }
 
-[[nodiscard]] __device__ WavefrontStageStatus push_route(const WavefrontQueueDeviceSoa queues,
-                                                         const std::uint32_t queue_kind,
-                                                         const PathSlot slot) noexcept {
-    const auto pushed = cuda::try_push_wavefront_queue_warp(queues, queue_kind, slot);
-    if (pushed == WavefrontQueueDevicePushStatus::pushed) {
-        return WavefrontStageStatus::success;
-    }
-    return pushed == WavefrontQueueDevicePushStatus::capacity_exhausted
-               ? WavefrontStageStatus::queue_overflow
-               : WavefrontStageStatus::invalid_contract;
-}
-
 [[nodiscard]] __device__ constexpr std::uint64_t align_up(const std::uint64_t input,
                                                           const std::uint64_t alignment) noexcept {
     const auto remainder = input % alignment;
@@ -1212,14 +1199,31 @@ __global__ void seed_camera_kernel(const WavefrontQueueDeviceSoa queues,
         return;
     }
     control.flags = 0U;
-    const auto routed = push_route(queues, CameraQueue, slot);
-    if (routed != WavefrontStageStatus::success) {
+    const auto& camera_header = queues.headers[CameraQueue];
+    if (!cuda::wavefront_queue_device_detail::immutable_header_contract_is_valid(
+            camera_header, CameraQueue, queues.slot_stride) ||
+        camera_header.size != 0U || camera_header.overflow_count != 0U ||
+        camera_header.rejected_count != 0U) {
         finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, CameraQueue);
+        outcomes[index] = outcome(WavefrontStageStatus::invalid_contract, WavefrontStageRoute::none,
+                                  slot.value, CameraQueue);
         return;
     }
+    const auto destination = static_cast<std::uint64_t>(CameraQueue) * queues.slot_stride + index;
+    queues.path_slots[destination] = slot;
     finish_phase(control, WavefrontLanePhase::camera);
     outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::none, slot.value);
+}
+
+__global__ void publish_seed_camera_header_kernel(const WavefrontQueueDeviceSoa queues,
+                                                  const std::uint32_t path_count) {
+    auto& header = queues.headers[CameraQueue];
+    if (cuda::wavefront_queue_device_detail::immutable_header_contract_is_valid(
+            header, CameraQueue, queues.slot_stride) &&
+        header.size == 0U && header.overflow_count == 0U && header.rejected_count == 0U &&
+        path_count <= header.capacity) {
+        header.size = path_count;
+    }
 }
 
 __global__ void clear_queue_kernel(const WavefrontQueueDeviceSoa queues,
@@ -1300,12 +1304,6 @@ __global__ void camera_stage_kernel(const WavefrontQueueDeviceSoa queues,
     streams.previous_bsdf_samples[slot.value] = WavefrontPreviousBsdfSample{};
     control.flags = 0U;
     control.blocked_depth_limits = 0U;
-    const auto routed = push_route(queues, RayQueue, slot);
-    if (routed != WavefrontStageStatus::success) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, RayQueue);
-        return;
-    }
     finish_phase(control, WavefrontLanePhase::ray);
     outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::ray, slot.value);
 }
@@ -1375,7 +1373,6 @@ __global__ void classify_closest_hit_kernel(const WavefrontQueueDeviceSoa queues
             return;
         }
     }
-    auto destination = MissQueue;
     auto route = WavefrontStageRoute::miss;
     auto phase = WavefrontLanePhase::miss;
     if (result.status == static_cast<std::uint32_t>(SceneClosestHitStatus::hit)) {
@@ -1386,19 +1383,12 @@ __global__ void classify_closest_hit_kernel(const WavefrontQueueDeviceSoa queues
             return;
         }
         streams.hits[queue_path.value] = result.hit;
-        destination = HitQueue;
         route = WavefrontStageRoute::hit;
         phase = WavefrontLanePhase::hit;
     } else if (result.status != static_cast<std::uint32_t>(SceneClosestHitStatus::miss)) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] = outcome(WavefrontStageStatus::traversal_error, WavefrontStageRoute::none,
                                   queue_path.value, result.status);
-        return;
-    }
-    const auto routed = push_route(queues, destination, queue_path);
-    if (routed != WavefrontStageStatus::success) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(routed, WavefrontStageRoute::none, queue_path.value, destination);
         return;
     }
     finish_phase(control, phase);
@@ -1427,12 +1417,6 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
         }
         outcomes[index] = outcome(WavefrontStageStatus::invalid_lane_state,
                                   WavefrontStageRoute::none, slot.value, control.phase);
-        return;
-    }
-    const auto routed = push_route(queues, ShadeQueue, slot);
-    if (routed != WavefrontStageStatus::success) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, ShadeQueue);
         return;
     }
     finish_phase(control, WavefrontLanePhase::shade);
@@ -3445,13 +3429,6 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
             streams.pending_shadows[slot.value] = pending;
             control.flags = cuda::WavefrontLaneShadowPending;
             control.blocked_depth_limits = 0U;
-            const auto routed = push_route(queues, ShadowQueue, slot);
-            if (routed != WavefrontStageStatus::success) {
-                finish_phase(control, WavefrontLanePhase::terminated);
-                outcomes[index] =
-                    outcome(routed, WavefrontStageRoute::none, slot.value, ShadowQueue);
-                return;
-            }
             finish_phase(control, WavefrontLanePhase::shadow);
             outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::shadow,
                                       slot.value, shade_detail);
@@ -3601,12 +3578,6 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         control.flags = cuda::WavefrontLaneShadowPending |
                         (continuation_pending ? cuda::WavefrontLaneContinuationPending : 0U);
         control.blocked_depth_limits = 0U;
-        const auto routed = push_route(queues, ShadowQueue, slot);
-        if (routed != WavefrontStageStatus::success) {
-            finish_phase(control, WavefrontLanePhase::terminated);
-            outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, ShadowQueue);
-            return;
-        }
         finish_phase(control, WavefrontLanePhase::shadow);
         outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::shadow,
                                   slot.value, shade_detail);
@@ -3619,12 +3590,6 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
         finish_phase(control, WavefrontLanePhase::terminated, pending_termination);
         outcomes[index] = outcome(WavefrontStageStatus::success, WavefrontStageRoute::terminated,
                                   slot.value, value(pending_termination) | shade_detail);
-        return;
-    }
-    const auto routed = push_route(queues, ContinuationQueue, slot);
-    if (routed != WavefrontStageStatus::success) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, ContinuationQueue);
         return;
     }
     finish_phase(control, WavefrontLanePhase::continuation);
@@ -3808,13 +3773,6 @@ __global__ void process_shadow_kernel(const WavefrontQueueDeviceSoa queues,
                                   queue_path.value, pending_termination);
         return;
     }
-    const auto routed = push_route(queues, ContinuationQueue, queue_path);
-    if (routed != WavefrontStageStatus::success) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] =
-            outcome(routed, WavefrontStageRoute::none, queue_path.value, ContinuationQueue);
-        return;
-    }
     finish_phase(control, WavefrontLanePhase::continuation);
     outcomes[index] =
         outcome(WavefrontStageStatus::success, WavefrontStageRoute::continuation, queue_path.value);
@@ -3849,12 +3807,6 @@ __global__ void continuation_stage_kernel(const WavefrontQueueDeviceSoa queues,
         }
         outcomes[index] = outcome(WavefrontStageStatus::invalid_lane_state,
                                   WavefrontStageRoute::none, slot.value, control.phase);
-        return;
-    }
-    const auto routed = push_route(queues, RayQueue, slot);
-    if (routed != WavefrontStageStatus::success) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] = outcome(routed, WavefrontStageRoute::none, slot.value, RayQueue);
         return;
     }
     finish_phase(control, WavefrontLanePhase::ray);
@@ -3991,6 +3943,11 @@ extern "C" int blackframe_cuda_launch_wavefront_seed_camera(
     }
     seed_camera_kernel<<<block_count(path_count), ThreadsPerBlock>>>(
         queues, streams, first_path_slot, path_count, outcomes);
+    auto status = cudaGetLastError();
+    if (status != cudaSuccess) {
+        return static_cast<int>(status);
+    }
+    publish_seed_camera_header_kernel<<<1U, 1U>>>(queues, path_count);
     return static_cast<int>(cudaGetLastError());
 }
 

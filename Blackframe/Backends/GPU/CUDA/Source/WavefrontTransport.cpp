@@ -5,6 +5,7 @@
 #include <Blackframe/Renderer/TransportConventions.hpp>
 #include <Blackframe/XPU/CUDA/SceneClosestHit.hpp>
 #include <Blackframe/XPU/CUDA/SceneOcclusion.hpp>
+#include <Blackframe/XPU/CUDA/WavefrontQueueCompaction.hpp>
 #include <Blackframe/XPU/CUDA/WavefrontStageKernel.hpp>
 #include <Blackframe/XPU/Shared/SceneTraversalAbi.hpp>
 #include <Blackframe/XPU/Shared/TransportAbi.hpp>
@@ -32,6 +33,8 @@ using xpu::cuda::WavefrontLaneControl;
 using xpu::cuda::WavefrontLanePhase;
 using xpu::cuda::WavefrontPendingShadow;
 using xpu::cuda::WavefrontPreviousBsdfSample;
+using xpu::cuda::WavefrontQueueCompactionResult;
+using xpu::cuda::WavefrontQueueCompactionStatus;
 using xpu::cuda::WavefrontStageAudit;
 using xpu::cuda::WavefrontStageDeviceSoa;
 using xpu::cuda::WavefrontStageKind;
@@ -56,6 +59,18 @@ static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::miss) == 
 static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::shade) == 4U);
 static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::shadow) == 5U);
 static_assert(static_cast<std::uint32_t>(renderer::WavefrontQueueKind::continuation) == 6U);
+static_assert(static_cast<std::uint32_t>(WavefrontStageRoute::ray) ==
+              static_cast<std::uint32_t>(renderer::WavefrontQueueKind::ray));
+static_assert(static_cast<std::uint32_t>(WavefrontStageRoute::hit) ==
+              static_cast<std::uint32_t>(renderer::WavefrontQueueKind::hit));
+static_assert(static_cast<std::uint32_t>(WavefrontStageRoute::miss) ==
+              static_cast<std::uint32_t>(renderer::WavefrontQueueKind::miss));
+static_assert(static_cast<std::uint32_t>(WavefrontStageRoute::shade) ==
+              static_cast<std::uint32_t>(renderer::WavefrontQueueKind::shade));
+static_assert(static_cast<std::uint32_t>(WavefrontStageRoute::shadow) ==
+              static_cast<std::uint32_t>(renderer::WavefrontQueueKind::shadow));
+static_assert(static_cast<std::uint32_t>(WavefrontStageRoute::continuation) ==
+              static_cast<std::uint32_t>(renderer::WavefrontQueueKind::continuation));
 static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::discrete) == 0U);
 static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::solid_angle) == 1U);
 static_assert(static_cast<std::uint32_t>(renderer::ProbabilityMeasure::area) == 2U);
@@ -580,6 +595,74 @@ execute_stage(const WavefrontStageKind stage_kind, const std::string_view stage_
     return audit;
 }
 
+[[nodiscard]] core::Result<WavefrontQueueCompactionResult>
+compact_route(const xpu::cuda::WavefrontQueueDeviceSoa queues,
+              const WavefrontStageOutcome* const device_outcomes, const std::uint32_t work_count,
+              const WavefrontStageRoute route, void* const device_scratch,
+              const std::size_t scratch_bytes,
+              WavefrontQueueCompactionResult* const device_result) {
+    const auto route_value = static_cast<std::uint32_t>(route);
+    auto cuda_status = static_cast<cudaError_t>(xpu::cuda::launch_wavefront_queue_compaction(
+        queues, device_outcomes, work_count, route_value, device_scratch, scratch_bytes,
+        device_result));
+    if (cuda_status != cudaSuccess) {
+        return std::unexpected(cuda_transport_error(cuda_status, "queue-compaction kernel launch"));
+    }
+
+    auto result = WavefrontQueueCompactionResult{};
+    cuda_status = cudaMemcpy(&result, device_result, sizeof(result), cudaMemcpyDeviceToHost);
+    if (cuda_status != cudaSuccess) {
+        return std::unexpected(
+            cuda_transport_error(cuda_status, "queue-compaction result download", sizeof(result)));
+    }
+
+    const auto status = static_cast<WavefrontQueueCompactionStatus>(result.status);
+    const auto reserved_is_zero = result.reserved[0U] == 0U && result.reserved[1U] == 0U &&
+                                  result.reserved[2U] == 0U && result.reserved[3U] == 0U;
+    const auto identity_is_canonical = result.queue_kind == route_value &&
+                                       result.route == route_value &&
+                                       result.input_count == work_count;
+    const auto counts_are_bounded = result.initial_size <= queues.slot_stride &&
+                                    result.selected_count <= work_count &&
+                                    result.published_count <= result.selected_count &&
+                                    result.rejected_count <= result.selected_count;
+    if (!reserved_is_zero || !identity_is_canonical || !counts_are_bounded) {
+        return std::unexpected(transport_error(
+            core::StatusCode::incompatible,
+            "CUDA wavefront queue compaction returned a non-canonical device result."));
+    }
+
+    switch (status) {
+    case WavefrontQueueCompactionStatus::success:
+        if (result.published_count != result.selected_count || result.rejected_count != 0U ||
+            result.published_count > queues.slot_stride - result.initial_size) {
+            return std::unexpected(transport_error(
+                core::StatusCode::incompatible,
+                "CUDA wavefront queue compaction returned inconsistent success counters."));
+        }
+        return result;
+    case WavefrontQueueCompactionStatus::capacity_exhausted:
+        if (result.selected_count == 0U || result.published_count != 0U ||
+            result.rejected_count != result.selected_count ||
+            result.selected_count <= queues.slot_stride - result.initial_size) {
+            return std::unexpected(transport_error(
+                core::StatusCode::incompatible,
+                "CUDA wavefront queue compaction returned inconsistent overflow counters."));
+        }
+        return std::unexpected(transport_error(
+            core::StatusCode::resource_exhausted,
+            "CUDA wavefront queue compaction rejected a complete append that exceeded its fixed "
+            "capacity."));
+    case WavefrontQueueCompactionStatus::invalid_contract:
+        return std::unexpected(
+            transport_error(core::StatusCode::incompatible,
+                            "CUDA wavefront queue compaction rejected its device contract."));
+    }
+    return std::unexpected(
+        transport_error(core::StatusCode::incompatible,
+                        "CUDA wavefront queue compaction returned an unknown status."));
+}
+
 [[nodiscard]] core::Result<QueueHeader>
 queue_header(const xpu::cuda::WavefrontQueueDeviceSoa queues,
              const renderer::WavefrontQueueKind kind, const std::uint32_t capacity) {
@@ -654,11 +737,15 @@ struct CudaWavefrontWorkspaceColumns final {
     SceneOcclusionResult* occlusion_results{};
     WavefrontStageOutcome* outcomes{};
     WavefrontStageAudit* stage_audit{};
+    WavefrontQueueCompactionResult* compaction_result{};
+    void* compaction_scratch{};
+    std::size_t compaction_scratch_bytes{};
     std::uint32_t* clear_status{};
 };
 
 [[nodiscard]] core::Result<CudaWavefrontWorkspaceColumns>
-allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::size_t capacity) {
+allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::size_t capacity,
+                           const std::size_t compaction_scratch_bytes) {
     auto allocate_column = [&]<typename Value>(const std::size_t count) -> core::Result<Value*> {
         if (count > std::numeric_limits<std::size_t>::max() / sizeof(Value)) {
             return std::unexpected(
@@ -689,6 +776,10 @@ allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::s
     auto occlusion_results = allocate_column.template operator()<SceneOcclusionResult>(capacity);
     auto outcomes = allocate_column.template operator()<WavefrontStageOutcome>(capacity);
     auto stage_audit = allocate_column.template operator()<WavefrontStageAudit>(1U);
+    auto compaction_result =
+        allocate_column.template operator()<WavefrontQueueCompactionResult>(1U);
+    auto compaction_scratch = scratch.allocate(compaction_scratch_bytes,
+                                               xpu::cuda::WavefrontQueueCompactionScratchAlignment);
     auto clear_status = allocate_column.template operator()<std::uint32_t>(1U);
     const auto allocation_error = [&]() -> const core::Error* {
         if (!input_samples)
@@ -723,6 +814,10 @@ allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::s
             return &outcomes.error();
         if (!stage_audit)
             return &stage_audit.error();
+        if (!compaction_result)
+            return &compaction_result.error();
+        if (!compaction_scratch)
+            return &compaction_scratch.error();
         if (!clear_status)
             return &clear_status.error();
         return nullptr;
@@ -748,12 +843,34 @@ allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::s
         .occlusion_results = *occlusion_results,
         .outcomes = *outcomes,
         .stage_audit = *stage_audit,
+        .compaction_result = *compaction_result,
+        .compaction_scratch = compaction_scratch->data,
+        .compaction_scratch_bytes = compaction_scratch->size_bytes,
         .clear_status = *clear_status,
     };
 }
 
-[[nodiscard]] core::Result<std::size_t>
+struct CudaWavefrontScratchRequirement final {
+    std::size_t total_bytes{};
+    std::size_t compaction_bytes{};
+};
+
+[[nodiscard]] core::Result<CudaWavefrontScratchRequirement>
 scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudget memory_budget) {
+    auto compaction_bytes = std::size_t{};
+    const auto query_status =
+        static_cast<cudaError_t>(xpu::cuda::query_wavefront_queue_compaction_scratch_bytes(
+            static_cast<std::uint32_t>(path_count), &compaction_bytes));
+    if (query_status != cudaSuccess) {
+        return std::unexpected(
+            cuda_transport_error(query_status, "queue-compaction scratch query"));
+    }
+    if (path_count != 0U && compaction_bytes == 0U) {
+        return std::unexpected(transport_error(
+            core::StatusCode::internal_error,
+            "CUDA wavefront queue compaction reported zero scratch for non-zero work."));
+    }
+
     constexpr auto column_element_bytes =
         sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(TransportPathStateLane) +
         sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(TransportPathStateLane) +
@@ -770,8 +887,10 @@ scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudg
         (alignof(PathSlot) - 1U) + (alignof(TransportRay) - 1U) +
         (alignof(SceneClosestHitResult) - 1U) + (alignof(SceneOcclusionResult) - 1U) +
         (alignof(WavefrontStageOutcome) - 1U) + (alignof(WavefrontStageAudit) - 1U) +
-        (alignof(std::uint32_t) - 1U);
-    constexpr auto fixed_bytes = sizeof(WavefrontStageAudit) + sizeof(std::uint32_t);
+        (alignof(WavefrontQueueCompactionResult) - 1U) +
+        (xpu::cuda::WavefrontQueueCompactionScratchAlignment - 1U) + (alignof(std::uint32_t) - 1U);
+    constexpr auto fixed_bytes = sizeof(WavefrontStageAudit) +
+                                 sizeof(WavefrontQueueCompactionResult) + sizeof(std::uint32_t);
     if (path_count >
         (std::numeric_limits<std::size_t>::max() - column_alignment_slack - fixed_bytes) /
             column_element_bytes) {
@@ -779,8 +898,14 @@ scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudg
             transport_error(core::StatusCode::resource_exhausted,
                             "CUDA wavefront scratch byte count overflowed its host size domain."));
     }
-    const auto scratch_bytes =
+    const auto column_bytes =
         path_count * column_element_bytes + column_alignment_slack + fixed_bytes;
+    if (compaction_bytes > std::numeric_limits<std::size_t>::max() - column_bytes) {
+        return std::unexpected(transport_error(
+            core::StatusCode::resource_exhausted,
+            "CUDA wavefront compaction scratch byte count overflowed its host size domain."));
+    }
+    const auto scratch_bytes = column_bytes + compaction_bytes;
     constexpr auto queue_header_bytes =
         static_cast<std::size_t>(xpu::cuda::CudaWavefrontQueueCount) * sizeof(QueueHeader);
     constexpr auto queue_slot_bytes_per_path =
@@ -797,7 +922,10 @@ scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudg
             core::StatusCode::resource_exhausted,
             "CUDA wavefront transport exceeds its explicit aggregate device-memory budget."));
     }
-    return scratch_bytes;
+    return CudaWavefrontScratchRequirement{
+        .total_bytes = scratch_bytes,
+        .compaction_bytes = compaction_bytes,
+    };
 }
 
 [[nodiscard]] constexpr std::size_t queue_capacity_bytes(const std::size_t capacity) noexcept {
@@ -857,17 +985,19 @@ core::Result<CudaWavefrontTransportWorkspace> CudaWavefrontTransportWorkspace::c
         return std::unexpected(required_scratch.error());
     }
     const auto required_queues = queue_capacity_bytes(capacity);
-    if (*required_scratch > std::numeric_limits<std::size_t>::max() - required_queues ||
-        *required_scratch + required_queues > device_memory_budget.maximum_bytes) {
+    if (required_scratch->total_bytes > std::numeric_limits<std::size_t>::max() - required_queues ||
+        required_scratch->total_bytes + required_queues > device_memory_budget.maximum_bytes) {
         return std::unexpected(transport_error(
             core::StatusCode::resource_exhausted,
             "CUDA wavefront workspace exceeds its aggregate device-memory budget."));
     }
-    auto scratch = xpu::cuda::DeviceScratchBuffer::create(*required_scratch, device_memory_budget);
+    auto scratch =
+        xpu::cuda::DeviceScratchBuffer::create(required_scratch->total_bytes, device_memory_budget);
     if (!scratch) {
         return std::unexpected(std::move(scratch.error()));
     }
-    auto columns = allocate_workspace_columns(*scratch, capacity);
+    auto columns =
+        allocate_workspace_columns(*scratch, capacity, required_scratch->compaction_bytes);
     if (!columns) {
         return std::unexpected(std::move(columns.error()));
     }
@@ -881,7 +1011,7 @@ core::Result<CudaWavefrontTransportWorkspace> CudaWavefrontTransportWorkspace::c
             core::StatusCode::internal_error,
             "CUDA wavefront workspace allocations unexpectedly landed on different devices."));
     }
-    const auto allocated_device_bytes = *required_scratch + required_queues;
+    const auto allocated_device_bytes = required_scratch->total_bytes + required_queues;
     auto storage = std::make_unique<Storage>(std::move(*scratch), std::move(*queues), *columns,
                                              capacity, allocated_device_bytes);
     return CudaWavefrontTransportWorkspace{std::move(storage)};
@@ -987,6 +1117,9 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
     auto* const occlusion_results = columns.occlusion_results;
     auto* const outcomes = columns.outcomes;
     auto* const stage_audit = columns.stage_audit;
+    auto* const compaction_result = columns.compaction_result;
+    auto* const compaction_scratch = columns.compaction_scratch;
+    const auto compaction_scratch_bytes = columns.compaction_scratch_bytes;
     auto* const clear_status = columns.clear_status;
     for (auto index = std::size_t{}; index < path_count; ++index) {
         storage.host_samples[index] = transport_sample_stream_index(inputs[index].sample);
@@ -1093,6 +1226,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
         !status) {
         return std::unexpected(std::move(status.error()));
     }
+    if (auto compacted =
+            compact_route(queue_view, outcomes, device_path_count, WavefrontStageRoute::ray,
+                          compaction_scratch, compaction_scratch_bytes, compaction_result);
+        !compacted) {
+        return std::unexpected(std::move(compacted.error()));
+    }
     report.stage_lanes.camera = device_path_count;
     if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::camera, clear_status);
         !status) {
@@ -1148,6 +1287,18 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             !status) {
             return std::unexpected(std::move(status.error()));
         }
+        if (auto compacted =
+                compact_route(queue_view, outcomes, ray_count, WavefrontStageRoute::hit,
+                              compaction_scratch, compaction_scratch_bytes, compaction_result);
+            !compacted) {
+            return std::unexpected(std::move(compacted.error()));
+        }
+        if (auto compacted =
+                compact_route(queue_view, outcomes, ray_count, WavefrontStageRoute::miss,
+                              compaction_scratch, compaction_scratch_bytes, compaction_result);
+            !compacted) {
+            return std::unexpected(std::move(compacted.error()));
+        }
         if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::ray, clear_status);
             !status) {
             return std::unexpected(std::move(status.error()));
@@ -1201,6 +1352,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 !status) {
                 return std::unexpected(std::move(status.error()));
             }
+            if (auto compacted = compact_route(queue_view, outcomes, hit_header->size,
+                                               WavefrontStageRoute::shade, compaction_scratch,
+                                               compaction_scratch_bytes, compaction_result);
+                !compacted) {
+                return std::unexpected(std::move(compacted.error()));
+            }
             if (auto status =
                     clear_queue(queue_view, renderer::WavefrontQueueKind::hit, clear_status);
                 !status) {
@@ -1234,6 +1391,18 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             }
             report.closure_samples += audit->closure_samples;
             report.light_samples += audit->light_samples;
+            if (auto compacted = compact_route(queue_view, outcomes, shade_header->size,
+                                               WavefrontStageRoute::shadow, compaction_scratch,
+                                               compaction_scratch_bytes, compaction_result);
+                !compacted) {
+                return std::unexpected(std::move(compacted.error()));
+            }
+            if (auto compacted = compact_route(
+                    queue_view, outcomes, shade_header->size, WavefrontStageRoute::continuation,
+                    compaction_scratch, compaction_scratch_bytes, compaction_result);
+                !compacted) {
+                return std::unexpected(std::move(compacted.error()));
+            }
             if (auto status =
                     clear_queue(queue_view, renderer::WavefrontQueueKind::shade, clear_status);
                 !status) {
@@ -1282,6 +1451,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 !status) {
                 return std::unexpected(std::move(status.error()));
             }
+            if (auto compacted = compact_route(
+                    queue_view, outcomes, shadow_header->size, WavefrontStageRoute::continuation,
+                    compaction_scratch, compaction_scratch_bytes, compaction_result);
+                !compacted) {
+                return std::unexpected(std::move(compacted.error()));
+            }
             if (auto status =
                     clear_queue(queue_view, renderer::WavefrontQueueKind::shadow, clear_status);
                 !status) {
@@ -1304,6 +1479,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                     });
                 !status) {
                 return std::unexpected(std::move(status.error()));
+            }
+            if (auto compacted = compact_route(queue_view, outcomes, continuation_header->size,
+                                               WavefrontStageRoute::ray, compaction_scratch,
+                                               compaction_scratch_bytes, compaction_result);
+                !compacted) {
+                return std::unexpected(std::move(compacted.error()));
             }
             if (auto status = clear_queue(queue_view, renderer::WavefrontQueueKind::continuation,
                                           clear_status);
