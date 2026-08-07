@@ -34,6 +34,7 @@ if(TARGET Blackframe::HostImage)
     add_executable(
         BlackframeHostImageCacheTests
         HostImageCacheTest.cpp
+        HostImageFilterTest.cpp
     )
     blackframe_set_target_role(BlackframeHostImageCacheTests test)
     target_link_libraries(
@@ -50,6 +51,19 @@ if(TARGET Blackframe::HostImage)
             BLACKFRAME_HOST_IMAGE_TEST_FIXTURE="${blackframe_host_image_fixture}"
             BLACKFRAME_HOST_IMAGE_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
     )
+
+    if(TARGET Blackframe::Png)
+        target_link_libraries(
+            BlackframeHostImageCacheTests
+            PRIVATE
+                Blackframe::Png
+        )
+        target_compile_definitions(
+            BlackframeHostImageCacheTests
+            PRIVATE
+                BLACKFRAME_HOST_IMAGE_FILTER_PNG=1
+        )
+    endif()
 
     gtest_discover_tests(
         BlackframeHostImageCacheTests

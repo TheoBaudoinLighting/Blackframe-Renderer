@@ -180,7 +180,9 @@ if(TARGET Blackframe::OpenImageIo)
         BlackframeHostImage
         STATIC
             Include/Blackframe/Renderer/HostImageCache.hpp
+            Include/Blackframe/Renderer/HostImageFilter.hpp
             Source/HostImageCache.cpp
+            Source/HostImageFilter.cpp
     )
     add_library(Blackframe::HostImage ALIAS BlackframeHostImage)
     blackframe_set_target_role(BlackframeHostImage renderer_io)

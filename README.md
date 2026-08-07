@@ -225,6 +225,13 @@ silently selecting another path.
   Per-tap addressing preserves partial filter support at image edges and avoids signed overflow.
   Invalid modes, empty extents, and unrepresentable texel intervals fail instead of selecting a
   default; black-border misses are represented separately from errors.
+- **Host texture filtering:** immutable host snapshots can be sampled per channel with nearest,
+  bilinear, or separable Catmull-Rom bicubic reconstruction. Texel centers use normalized UVs, V
+  follows stored scanline order without an implicit flip, and exact nearest boundaries select the
+  higher local texel. Every bilinear or bicubic tap applies its U/V wrap independently; black taps
+  contribute zero without renormalization. Transport evaluation remains float, reference
+  evaluation remains double, and signed HDR values or legitimate bicubic overshoot are never
+  clamped.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
   A deterministic tilted-normal Lambertian furnace validates both precisions against its analytic
@@ -348,9 +355,9 @@ oracle rather than an execution fallback.
 Constant textures are currently typed scene resources with explicit scalar-reference, CPU, and CUDA
 evaluation paths. They are not yet material-parameter bindings: in particular, Blackframe does not
 invent an implicit RGB-to-spectrum conversion.
-The host image cache now produces explicitly tagged working-space snapshots, and texture addressing
-has an explicit host contract, but neither is yet bound to filtered image-texture evaluation,
-material parameters, scene packets, or device uploads.
+The host image cache now produces explicitly tagged working-space snapshots with explicit host
+filtering and addressing, but image textures are not yet bound to material parameters, scene
+packets, or device uploads.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between
