@@ -3,6 +3,7 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/Color.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
+#include <Blackframe/Renderer/TextureColorSpace.hpp>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -81,6 +82,10 @@ class ConstantColorTexture final {
 
     [[nodiscard]] static constexpr ConstantTextureKind kind() noexcept {
         return ConstantTextureKind::color;
+    }
+
+    [[nodiscard]] static constexpr TextureColorSpace color_space() noexcept {
+        return TextureWorkingColorSpace;
     }
 
     [[nodiscard]] constexpr LinearRGB value() const noexcept {

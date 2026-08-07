@@ -213,11 +213,13 @@ silently selecting another path.
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
 - **Host images:** a pinned OpenImageIO loader reads the primary two-dimensional image into an
-  immutable interleaved-float snapshot and caches it by canonical absolute path. Loading preserves
-  unassociated values, exposes the selected reader's canonical channel order and performs no
-  color transform, clamp, reader retry, or substitute-image fallback. Exact embedded readers
-  handle PNM/PFM, PNG, and EXR with caller-owned color interpretation; all three families are
-  covered by tests.
+  immutable interleaved-float snapshot and caches it by canonical absolute path plus mandatory
+  source-space tag. `data` and scene-linear sRGB values remain bitwise unchanged; tagged sRGB
+  channels are decoded with the fixed IEC transfer function into Blackframe's D65 scene-linear
+  sRGB working space while unassociated alpha and extra channels remain unchanged. Tags are never
+  inferred from metadata or suffixes; color tags require exactly one named `R`, `G`, and `B`
+  channel. Loading never clamps, retries another reader, or returns a substitute image. Exact
+  embedded readers handle PNM/PFM, PNG, and EXR; all three families are covered by tests.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
   A deterministic tilted-normal Lambertian furnace validates both precisions against its analytic
@@ -341,8 +343,8 @@ oracle rather than an execution fallback.
 Constant textures are currently typed scene resources with explicit scalar-reference, CPU, and CUDA
 evaluation paths. They are not yet material-parameter bindings: in particular, Blackframe does not
 invent an implicit RGB-to-spectrum conversion.
-The host image cache is not yet bound to image textures, filtering, material parameters, scene
-packets, or device uploads.
+The host image cache now produces explicitly tagged working-space snapshots, but is not yet bound
+to filtered image-texture evaluation, material parameters, scene packets, or device uploads.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between

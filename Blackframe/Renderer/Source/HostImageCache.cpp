@@ -1,6 +1,8 @@
 #include <Blackframe/Renderer/HostImageCache.hpp>
+#include <Blackframe/Renderer/NumericConversion.hpp>
 #include <OpenImageIO/imageio.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -24,6 +26,20 @@ struct DecodedImage final {
     std::vector<TransportScalar> pixels;
 };
 
+using HostImageCacheKey = std::pair<std::filesystem::path, TextureColorSpace>;
+
+struct ColorChannelIndices final {
+    std::size_t red{};
+    std::size_t green{};
+    std::size_t blue{};
+};
+
+struct WorkingPixelStorage final {
+    TextureColorSpace color_space{TextureColorSpace::data};
+    std::shared_ptr<const std::vector<TransportScalar>> pixels;
+    std::uint64_t additional_pixel_bytes{};
+};
+
 [[nodiscard]] core::Error cache_error(const core::StatusCode code, std::string message) {
     return core::Error{
         .code = code,
@@ -45,6 +61,112 @@ struct DecodedImage final {
             "The host image byte limit must not exceed the cache resident-byte limit."));
     }
     return {};
+}
+
+[[nodiscard]] core::Status validate_source_color_space(const TextureColorSpace color_space) {
+    if (!is_valid_texture_color_space(color_space)) {
+        return std::unexpected(
+            cache_error(core::StatusCode::invalid_argument,
+                        "A host image source color-space tag must be a supported explicit value."));
+    }
+    return {};
+}
+
+[[nodiscard]] core::Result<ColorChannelIndices>
+color_channel_indices(const std::span<const std::string> channel_names) {
+    constexpr auto required_names =
+        std::array{std::string_view{"R"}, std::string_view{"G"}, std::string_view{"B"}};
+    auto indices = std::array<std::size_t, required_names.size()>{};
+    auto found = std::array<bool, required_names.size()>{};
+
+    for (auto channel = std::size_t{}; channel < channel_names.size(); ++channel) {
+        for (auto required = std::size_t{}; required < required_names.size(); ++required) {
+            if (channel_names[channel] != required_names[required]) {
+                continue;
+            }
+            if (found[required]) {
+                return std::unexpected(cache_error(
+                    core::StatusCode::incompatible,
+                    "A color-tagged host image must contain exactly one R, G, and B channel."));
+            }
+            found[required] = true;
+            indices[required] = channel;
+        }
+    }
+    if (!std::ranges::all_of(found, [](const bool value) { return value; })) {
+        return std::unexpected(
+            cache_error(core::StatusCode::incompatible,
+                        "A color-tagged host image must contain exactly one R, G, and B channel."));
+    }
+    return ColorChannelIndices{.red = indices[0], .green = indices[1], .blue = indices[2]};
+}
+
+[[nodiscard]] core::Result<TransportScalar> decode_srgb_component(const TransportScalar encoded) {
+    const auto reference = to_reference_scalar(encoded);
+    const auto linear =
+        reference <= ReferenceScalar{0.04045}
+            ? reference / ReferenceScalar{12.92}
+            : std::pow((reference + ReferenceScalar{0.055}) / ReferenceScalar{1.055},
+                       ReferenceScalar{2.4});
+    const auto narrowed = to_transport_scalar(linear);
+    if (!narrowed) {
+        return std::unexpected(
+            cache_error(core::StatusCode::incompatible,
+                        "An sRGB texture channel cannot be represented in transport precision."));
+    }
+    return *narrowed;
+}
+
+[[nodiscard]] core::Result<WorkingPixelStorage>
+convert_to_working_color_space(const std::shared_ptr<const DecodedImage>& source,
+                               const TextureColorSpace source_color_space,
+                               const std::uint64_t remaining_pixel_bytes) {
+    const auto source_pixels =
+        std::shared_ptr<const std::vector<TransportScalar>>{source, &source->pixels};
+    if (source_color_space == TextureColorSpace::data) {
+        return WorkingPixelStorage{
+            .color_space = TextureColorSpace::data,
+            .pixels = source_pixels,
+        };
+    }
+
+    const auto channels = color_channel_indices(source->channel_names);
+    if (!channels) {
+        return std::unexpected(channels.error());
+    }
+    if (source_color_space == TextureColorSpace::scene_linear_srgb) {
+        return WorkingPixelStorage{
+            .color_space = TextureWorkingColorSpace,
+            .pixels = source_pixels,
+        };
+    }
+
+    const auto byte_size =
+        static_cast<std::uint64_t>(source->pixels.size()) * sizeof(TransportScalar);
+    if (byte_size > remaining_pixel_bytes) {
+        return std::unexpected(cache_error(
+            core::StatusCode::resource_exhausted,
+            "The host image cache resident pixel budget cannot hold an sRGB conversion."));
+    }
+
+    auto converted_pixels = std::make_shared<std::vector<TransportScalar>>(source->pixels);
+    const auto channel_count = source->channel_names.size();
+    const auto pixel_count = converted_pixels->size() / channel_count;
+    for (auto pixel = std::size_t{}; pixel < pixel_count; ++pixel) {
+        const auto base = pixel * channel_count;
+        for (const auto channel : {channels->red, channels->green, channels->blue}) {
+            const auto converted = decode_srgb_component((*converted_pixels)[base + channel]);
+            if (!converted) {
+                return std::unexpected(converted.error());
+            }
+            (*converted_pixels)[base + channel] = *converted;
+        }
+    }
+    return WorkingPixelStorage{
+        .color_space = TextureWorkingColorSpace,
+        .pixels = std::move(converted_pixels),
+        .additional_pixel_bytes = byte_size,
+    };
 }
 
 [[nodiscard]] core::Result<std::filesystem::path>
@@ -268,16 +390,19 @@ struct HostImageCache::Impl final {
 
     HostImageCacheLimits configured_limits;
     mutable std::mutex mutex;
-    std::map<std::filesystem::path, HostImageHandle> images;
+    std::map<std::filesystem::path, std::shared_ptr<const DecodedImage>> source_images;
+    std::map<HostImageCacheKey, HostImageHandle> images;
     std::uint64_t resident_pixel_byte_count{};
 };
 
 HostImage::HostImage(std::filesystem::path source_path, std::string format_name,
-                     const std::int32_t origin_x, const std::int32_t origin_y,
-                     const std::uint32_t width, const std::uint32_t height,
-                     std::vector<std::string> channel_names,
-                     std::vector<TransportScalar> pixels) noexcept
+                     const TextureColorSpace source_color_space,
+                     const TextureColorSpace storage_color_space, const std::int32_t origin_x,
+                     const std::int32_t origin_y, const std::uint32_t width,
+                     const std::uint32_t height, std::vector<std::string> channel_names,
+                     std::shared_ptr<const std::vector<TransportScalar>> pixels) noexcept
     : source_path_{std::move(source_path)}, format_name_{std::move(format_name)},
+      source_color_space_{source_color_space}, storage_color_space_{storage_color_space},
       origin_x_{origin_x}, origin_y_{origin_y}, width_{width}, height_{height},
       channel_names_{std::move(channel_names)}, pixels_{std::move(pixels)} {}
 
@@ -287,6 +412,14 @@ const std::filesystem::path& HostImage::source_path() const noexcept {
 
 std::string_view HostImage::format_name() const noexcept {
     return format_name_;
+}
+
+TextureColorSpace HostImage::source_color_space() const noexcept {
+    return source_color_space_;
+}
+
+TextureColorSpace HostImage::storage_color_space() const noexcept {
+    return storage_color_space_;
 }
 
 std::int32_t HostImage::origin_x() const noexcept {
@@ -314,11 +447,11 @@ std::span<const std::string> HostImage::channel_names() const noexcept {
 }
 
 std::span<const TransportScalar> HostImage::pixels() const noexcept {
-    return pixels_;
+    return *pixels_;
 }
 
 std::uint64_t HostImage::pixel_byte_size() const noexcept {
-    return static_cast<std::uint64_t>(pixels_.size()) * sizeof(TransportScalar);
+    return static_cast<std::uint64_t>(pixels_->size()) * sizeof(TransportScalar);
 }
 
 core::Result<HostImageCache> HostImageCache::create(const HostImageCacheLimits limits) {
@@ -347,11 +480,15 @@ HostImageCache::~HostImageCache() = default;
 HostImageCache::HostImageCache(HostImageCache&&) noexcept = default;
 HostImageCache& HostImageCache::operator=(HostImageCache&&) noexcept = default;
 
-core::Result<HostImageHandle> HostImageCache::load(const std::filesystem::path& absolute_path) {
+core::Result<HostImageHandle> HostImageCache::load(const std::filesystem::path& absolute_path,
+                                                   const TextureColorSpace source_color_space) {
     try {
         if (!implementation_) {
             return std::unexpected(cache_error(core::StatusCode::incompatible,
                                                "The host image cache was moved from."));
+        }
+        if (const auto status = validate_source_color_space(source_color_space); !status) {
+            return std::unexpected(status.error());
         }
         if (absolute_path.empty() || !absolute_path.is_absolute()) {
             return std::unexpected(
@@ -361,16 +498,28 @@ core::Result<HostImageHandle> HostImageCache::load(const std::filesystem::path& 
         const auto normalized_path = absolute_path.lexically_normal();
 
         auto lock = std::scoped_lock{implementation_->mutex};
-        if (const auto cached = implementation_->images.find(normalized_path);
+        if (const auto cached = implementation_->images.find(
+                HostImageCacheKey{normalized_path, source_color_space});
             cached != implementation_->images.end()) {
             return cached->second;
         }
 
-        const auto canonical_path = canonical_input_path(normalized_path);
-        if (!canonical_path) {
-            return std::unexpected(canonical_path.error());
+        auto canonical_path = normalized_path;
+        auto source_image = std::shared_ptr<const DecodedImage>{};
+        if (const auto source = implementation_->source_images.find(normalized_path);
+            source != implementation_->source_images.end()) {
+            canonical_path = source->first;
+            source_image = source->second;
+        } else {
+            const auto canonical = canonical_input_path(normalized_path);
+            if (!canonical) {
+                return std::unexpected(canonical.error());
+            }
+            canonical_path = *canonical;
         }
-        if (const auto found = implementation_->images.find(*canonical_path);
+
+        const auto cache_key = HostImageCacheKey{canonical_path, source_color_space};
+        if (const auto found = implementation_->images.find(cache_key);
             found != implementation_->images.end()) {
             return found->second;
         }
@@ -379,22 +528,59 @@ core::Result<HostImageHandle> HostImageCache::load(const std::filesystem::path& 
                                                "The host image cache entry limit is exhausted."));
         }
 
+        if (!source_image) {
+            if (const auto source = implementation_->source_images.find(canonical_path);
+                source != implementation_->source_images.end()) {
+                source_image = source->second;
+            }
+        }
+
+        auto new_source_byte_size = std::uint64_t{};
+        if (!source_image) {
+            const auto remaining_pixel_bytes =
+                implementation_->configured_limits.maximum_resident_pixel_bytes -
+                implementation_->resident_pixel_byte_count;
+            auto decoded = decode_image(canonical_path, implementation_->configured_limits,
+                                        remaining_pixel_bytes);
+            if (!decoded) {
+                return std::unexpected(decoded.error());
+            }
+            new_source_byte_size =
+                static_cast<std::uint64_t>(decoded->pixels.size()) * sizeof(TransportScalar);
+            source_image = std::make_shared<DecodedImage>(std::move(*decoded));
+        }
+
         const auto remaining_pixel_bytes =
             implementation_->configured_limits.maximum_resident_pixel_bytes -
-            implementation_->resident_pixel_byte_count;
-        auto decoded = decode_image(*canonical_path, implementation_->configured_limits,
-                                    remaining_pixel_bytes);
-        if (!decoded) {
-            return std::unexpected(decoded.error());
+            implementation_->resident_pixel_byte_count - new_source_byte_size;
+        const auto working_pixels =
+            convert_to_working_color_space(source_image, source_color_space, remaining_pixel_bytes);
+        if (!working_pixels) {
+            return std::unexpected(working_pixels.error());
         }
-        const auto byte_size =
-            static_cast<std::uint64_t>(decoded->pixels.size()) * sizeof(TransportScalar);
+
         auto image = HostImageHandle{
-            new HostImage{*canonical_path, std::move(decoded->format_name), decoded->origin_x,
-                          decoded->origin_y, decoded->width, decoded->height,
-                          std::move(decoded->channel_names), std::move(decoded->pixels)}};
-        implementation_->images.emplace(*canonical_path, image);
-        implementation_->resident_pixel_byte_count += byte_size;
+            new HostImage{canonical_path, source_image->format_name, source_color_space,
+                          working_pixels->color_space, source_image->origin_x,
+                          source_image->origin_y, source_image->width, source_image->height,
+                          source_image->channel_names, working_pixels->pixels}};
+        if (new_source_byte_size != 0U) {
+            const auto source_insertion =
+                implementation_->source_images.emplace(canonical_path, source_image);
+            if (!source_insertion.second) {
+                return std::unexpected(
+                    cache_error(core::StatusCode::internal_error,
+                                "A host image source snapshot was inserted concurrently."));
+            }
+            implementation_->resident_pixel_byte_count += new_source_byte_size;
+        }
+        const auto insertion = implementation_->images.emplace(cache_key, image);
+        if (!insertion.second) {
+            return std::unexpected(
+                cache_error(core::StatusCode::internal_error,
+                            "A host image cache key was inserted concurrently."));
+        }
+        implementation_->resident_pixel_byte_count += working_pixels->additional_pixel_bytes;
         return image;
     } catch (const std::filesystem::filesystem_error& error) {
         return std::unexpected(

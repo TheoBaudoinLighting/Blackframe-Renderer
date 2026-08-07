@@ -16,6 +16,12 @@ TEST(ConstantTextureTest, KeepsTheThreeValueDomainsDistinctAndStable) {
     static_assert(ConstantFloatTexture::kind() == ConstantTextureKind::float_value);
     static_assert(ConstantColorTexture::kind() == ConstantTextureKind::color);
     static_assert(ConstantSpectrumTexture::kind() == ConstantTextureKind::spectrum);
+    static_assert(ConstantColorTexture::color_space() == TextureWorkingColorSpace);
+    static_assert(is_valid_texture_color_space(TextureColorSpace::data));
+    static_assert(is_valid_texture_color_space(TextureColorSpace::srgb));
+    static_assert(is_valid_texture_color_space(TextureColorSpace::scene_linear_srgb));
+    static_assert(is_color_texture_space(TextureColorSpace::srgb));
+    static_assert(!is_color_texture_space(TextureColorSpace::data));
 
     EXPECT_EQ(ConstantFloatTexture{}.value(), 0.0F);
     EXPECT_EQ(ConstantColorTexture{}.value(), LinearRGB{});

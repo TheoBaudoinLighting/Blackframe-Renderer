@@ -19,6 +19,10 @@
 namespace blackframe::renderer {
 namespace {
 
+inline constexpr auto DataTextureSpace = TextureColorSpace::data;
+inline constexpr auto SrgbTextureSpace = TextureColorSpace::srgb;
+inline constexpr auto WorkingTextureSpace = TextureColorSpace::scene_linear_srgb;
+
 [[nodiscard]] std::filesystem::path fixture_path() {
     return std::filesystem::path{BLACKFRAME_HOST_IMAGE_TEST_FIXTURE};
 }
@@ -95,6 +99,24 @@ namespace {
     return output;
 }
 
+[[nodiscard]] std::filesystem::path write_known_srgb_pnm_fixture() {
+    const auto output = artifact_path("host-image-known-srgb.ppm");
+    auto stream = std::ofstream{output, std::ios::binary | std::ios::trunc};
+    EXPECT_TRUE(stream.is_open());
+    stream << "P3\n2 1\n255\n0 10 11 128 255 50\n";
+    EXPECT_TRUE(stream.good());
+    return output;
+}
+
+[[nodiscard]] std::filesystem::path write_grayscale_pnm_fixture() {
+    const auto output = artifact_path("host-image-grayscale.pgm");
+    auto stream = std::ofstream{output, std::ios::binary | std::ios::trunc};
+    EXPECT_TRUE(stream.is_open());
+    stream << "P2\n1 1\n255\n128\n";
+    EXPECT_TRUE(stream.good());
+    return output;
+}
+
 [[nodiscard]] std::filesystem::path write_pfm_fixture() {
     static_assert(std::endian::native == std::endian::little ||
                   std::endian::native == std::endian::big);
@@ -107,6 +129,22 @@ namespace {
         stream << "PF\n2 1\n1.0\n";
     }
     constexpr auto pixels = std::array{-0.25F, 0.5F, 2.0F, 4.0F, 8.0F, 16.0F};
+    stream.write(reinterpret_cast<const char*>(pixels.data()),
+                 static_cast<std::streamsize>(sizeof(pixels)));
+    EXPECT_TRUE(stream.good());
+    return output;
+}
+
+[[nodiscard]] std::filesystem::path write_unrepresentable_srgb_pfm_fixture() {
+    const auto output = artifact_path("host-image-srgb-overflow.pfm");
+    auto stream = std::ofstream{output, std::ios::binary | std::ios::trunc};
+    EXPECT_TRUE(stream.is_open());
+    if constexpr (std::endian::native == std::endian::little) {
+        stream << "PF\n1 1\n-1.0\n";
+    } else {
+        stream << "PF\n1 1\n1.0\n";
+    }
+    constexpr auto pixels = std::array{std::numeric_limits<TransportScalar>::max(), 0.0F, 0.0F};
     stream.write(reinterpret_cast<const char*>(pixels.data()),
                  static_cast<std::streamsize>(sizeof(pixels)));
     EXPECT_TRUE(stream.good());
@@ -126,10 +164,12 @@ TEST(HostImageCacheTest, LoadsPnmPixelsAndCanonicalAliasesOnce) {
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value()) << cache.error().message;
 
-    const auto first = cache->load(fixture_path());
+    const auto first = cache->load(fixture_path(), DataTextureSpace);
     ASSERT_TRUE(first.has_value()) << first.error().message;
     EXPECT_EQ((*first)->format_name(), "pnm");
     EXPECT_EQ((*first)->source_path(), std::filesystem::canonical(fixture_path()));
+    EXPECT_EQ((*first)->source_color_space(), DataTextureSpace);
+    EXPECT_EQ((*first)->storage_color_space(), DataTextureSpace);
     EXPECT_EQ((*first)->origin_x(), 0);
     EXPECT_EQ((*first)->origin_y(), 0);
     EXPECT_EQ((*first)->width(), 2U);
@@ -149,7 +189,7 @@ TEST(HostImageCacheTest, LoadsPnmPixelsAndCanonicalAliasesOnce) {
     }
 
     const auto alias = fixture_path().parent_path() / "." / fixture_path().filename();
-    const auto second = cache->load(alias);
+    const auto second = cache->load(alias, DataTextureSpace);
     ASSERT_TRUE(second.has_value()) << second.error().message;
     EXPECT_EQ(first->get(), second->get());
     const auto entry_count = cache->entry_count();
@@ -165,9 +205,11 @@ TEST(HostImageCacheTest, LoadsSceneLinearExrWithoutClampingOrColorConversion) {
     ASSERT_TRUE(std::filesystem::is_regular_file(exr_path));
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value());
-    const auto image = cache->load(exr_path);
+    const auto image = cache->load(exr_path, WorkingTextureSpace);
     ASSERT_TRUE(image.has_value()) << image.error().message;
     EXPECT_EQ((*image)->format_name(), "openexr");
+    EXPECT_EQ((*image)->source_color_space(), WorkingTextureSpace);
+    EXPECT_EQ((*image)->storage_color_space(), WorkingTextureSpace);
     EXPECT_EQ((*image)->width(), 3U);
     EXPECT_EQ((*image)->height(), 2U);
     EXPECT_EQ((*image)->channel_count(), 3U);
@@ -182,7 +224,9 @@ TEST(HostImageCacheTest, LoadsSceneLinearExrWithoutClampingOrColorConversion) {
     };
     ASSERT_EQ((*image)->pixels().size(), expected.size());
     for (auto index = std::size_t{}; index < expected.size(); ++index) {
-        EXPECT_FLOAT_EQ((*image)->pixels()[index], expected[index]) << index;
+        EXPECT_EQ(std::bit_cast<std::uint32_t>((*image)->pixels()[index]),
+                  std::bit_cast<std::uint32_t>(expected[index]))
+            << index;
     }
 }
 
@@ -191,9 +235,11 @@ TEST(HostImageCacheTest, LoadsUnassociatedRawPngChannelsWithoutDisplayConversion
     ASSERT_TRUE(std::filesystem::is_regular_file(png_path));
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value());
-    const auto image = cache->load(png_path);
+    const auto image = cache->load(png_path, DataTextureSpace);
     ASSERT_TRUE(image.has_value()) << image.error().message;
     EXPECT_EQ((*image)->format_name(), "png");
+    EXPECT_EQ((*image)->source_color_space(), DataTextureSpace);
+    EXPECT_EQ((*image)->storage_color_space(), DataTextureSpace);
     EXPECT_EQ((*image)->width(), 2U);
     EXPECT_EQ((*image)->height(), 1U);
     EXPECT_EQ((*image)->channel_count(), 4U);
@@ -214,14 +260,68 @@ TEST(HostImageCacheTest, LoadsUnassociatedRawPngChannelsWithoutDisplayConversion
     EXPECT_FLOAT_EQ((*image)->pixels()[0], 200.0F / 255.0F);
 }
 
+TEST(HostImageCacheTest, ConvertsKnownSrgbTextureToWorkingSpaceAndPreservesAlpha) {
+    const auto png_path = write_png_fixture();
+    auto cache = HostImageCache::create();
+    ASSERT_TRUE(cache.has_value());
+
+    const auto raw = cache->load(png_path, DataTextureSpace);
+    const auto converted = cache->load(png_path, SrgbTextureSpace);
+    ASSERT_TRUE(raw.has_value()) << raw.error().message;
+    ASSERT_TRUE(converted.has_value()) << converted.error().message;
+    EXPECT_NE(raw->get(), converted->get());
+    EXPECT_EQ((*converted)->source_color_space(), SrgbTextureSpace);
+    EXPECT_EQ((*converted)->storage_color_space(), WorkingTextureSpace);
+    ASSERT_EQ((*converted)->pixels().size(), 8U);
+
+    constexpr auto expected_rgb =
+        std::array{0.5775804404296506, 0.12743768043564743, 0.03189603307301153};
+    for (auto pixel = std::size_t{}; pixel < 2U; ++pixel) {
+        for (auto channel = std::size_t{}; channel < expected_rgb.size(); ++channel) {
+            EXPECT_NEAR((*converted)->pixels()[pixel * 4U + channel], expected_rgb[channel], 2.0e-7)
+                << pixel << ':' << channel;
+        }
+        EXPECT_EQ(std::bit_cast<std::uint32_t>((*converted)->pixels()[pixel * 4U + 3U]),
+                  std::bit_cast<std::uint32_t>((*raw)->pixels()[pixel * 4U + 3U]));
+    }
+
+    const auto repeated = cache->load(png_path, SrgbTextureSpace);
+    ASSERT_TRUE(repeated.has_value());
+    EXPECT_EQ(repeated->get(), converted->get());
+    const auto entry_count = cache->entry_count();
+    const auto resident_bytes = cache->resident_pixel_bytes();
+    ASSERT_TRUE(entry_count.has_value());
+    ASSERT_TRUE(resident_bytes.has_value());
+    EXPECT_EQ(*entry_count, 2U);
+    EXPECT_EQ(*resident_bytes, 16U * sizeof(TransportScalar));
+}
+
+TEST(HostImageCacheTest, UsesBothBranchesOfTheFixedSrgbTransferFunction) {
+    const auto srgb_path = write_known_srgb_pnm_fixture();
+    auto cache = HostImageCache::create();
+    ASSERT_TRUE(cache.has_value());
+    const auto image = cache->load(srgb_path, SrgbTextureSpace);
+    ASSERT_TRUE(image.has_value()) << image.error().message;
+
+    constexpr auto expected =
+        std::array{0.0, 0.003035269835488375, 0.003346535763899161, 0.21586050011389926,
+                   1.0, 0.03189603307301153};
+    ASSERT_EQ((*image)->pixels().size(), expected.size());
+    for (auto index = std::size_t{}; index < expected.size(); ++index) {
+        EXPECT_NEAR((*image)->pixels()[index], expected[index], 1.0e-7) << index;
+    }
+}
+
 TEST(HostImageCacheTest, LoadsFloatingPointPfmValuesWithoutClamping) {
     const auto pfm_path = write_pfm_fixture();
     ASSERT_TRUE(std::filesystem::is_regular_file(pfm_path));
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value());
-    const auto image = cache->load(pfm_path);
+    const auto image = cache->load(pfm_path, DataTextureSpace);
     ASSERT_TRUE(image.has_value()) << image.error().message;
     EXPECT_EQ((*image)->format_name(), "pnm");
+    EXPECT_EQ((*image)->source_color_space(), DataTextureSpace);
+    EXPECT_EQ((*image)->storage_color_space(), DataTextureSpace);
     EXPECT_EQ((*image)->width(), 2U);
     EXPECT_EQ((*image)->height(), 1U);
     EXPECT_EQ((*image)->channel_count(), 3U);
@@ -229,8 +329,55 @@ TEST(HostImageCacheTest, LoadsFloatingPointPfmValuesWithoutClamping) {
     constexpr auto expected = std::array{-0.25F, 0.5F, 2.0F, 4.0F, 8.0F, 16.0F};
     ASSERT_EQ((*image)->pixels().size(), expected.size());
     for (auto index = std::size_t{}; index < expected.size(); ++index) {
-        EXPECT_FLOAT_EQ((*image)->pixels()[index], expected[index]) << index;
+        EXPECT_EQ(std::bit_cast<std::uint32_t>((*image)->pixels()[index]),
+                  std::bit_cast<std::uint32_t>(expected[index]))
+            << index;
     }
+}
+
+TEST(HostImageCacheTest, RejectsInvalidOrAmbiguousColorTagsWithoutCaching) {
+    const auto grayscale_path = write_grayscale_pnm_fixture();
+    auto cache = HostImageCache::create();
+    ASSERT_TRUE(cache.has_value());
+
+    const auto invalid = cache->load(
+        fixture_path(), static_cast<TextureColorSpace>(std::numeric_limits<std::uint32_t>::max()));
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, core::StatusCode::invalid_argument);
+
+    const auto srgb_grayscale = cache->load(grayscale_path, SrgbTextureSpace);
+    ASSERT_FALSE(srgb_grayscale.has_value());
+    EXPECT_EQ(srgb_grayscale.error().code, core::StatusCode::incompatible);
+    const auto linear_grayscale = cache->load(grayscale_path, WorkingTextureSpace);
+    ASSERT_FALSE(linear_grayscale.has_value());
+    EXPECT_EQ(linear_grayscale.error().code, core::StatusCode::incompatible);
+
+    const auto entry_count = cache->entry_count();
+    ASSERT_TRUE(entry_count.has_value());
+    EXPECT_EQ(*entry_count, 0U);
+
+    const auto data_grayscale = cache->load(grayscale_path, DataTextureSpace);
+    ASSERT_TRUE(data_grayscale.has_value()) << data_grayscale.error().message;
+    EXPECT_EQ((*data_grayscale)->source_color_space(), DataTextureSpace);
+    EXPECT_EQ((*data_grayscale)->storage_color_space(), DataTextureSpace);
+}
+
+TEST(HostImageCacheTest, RejectsUnrepresentableSrgbConversionWithoutClamping) {
+    const auto overflow_path = write_unrepresentable_srgb_pfm_fixture();
+    auto cache = HostImageCache::create();
+    ASSERT_TRUE(cache.has_value());
+
+    const auto converted = cache->load(overflow_path, SrgbTextureSpace);
+    ASSERT_FALSE(converted.has_value());
+    EXPECT_EQ(converted.error().code, core::StatusCode::incompatible);
+    const auto entry_count = cache->entry_count();
+    ASSERT_TRUE(entry_count.has_value());
+    EXPECT_EQ(*entry_count, 0U);
+
+    const auto linear = cache->load(overflow_path, WorkingTextureSpace);
+    ASSERT_TRUE(linear.has_value()) << linear.error().message;
+    EXPECT_EQ(std::bit_cast<std::uint32_t>((*linear)->pixels()[0]),
+              std::bit_cast<std::uint32_t>(std::numeric_limits<TransportScalar>::max()));
 }
 
 TEST(HostImageCacheTest, RetainsCachedImagesAfterCallerHandlesAreReleased) {
@@ -239,7 +386,7 @@ TEST(HostImageCacheTest, RetainsCachedImagesAfterCallerHandlesAreReleased) {
 
     const HostImage* cached_address = nullptr;
     {
-        const auto loaded = cache->load(fixture_path());
+        const auto loaded = cache->load(fixture_path(), DataTextureSpace);
         ASSERT_TRUE(loaded.has_value()) << loaded.error().message;
         cached_address = loaded->get();
     }
@@ -248,7 +395,7 @@ TEST(HostImageCacheTest, RetainsCachedImagesAfterCallerHandlesAreReleased) {
     ASSERT_TRUE(entry_count.has_value());
     EXPECT_EQ(*entry_count, 1U);
 
-    const auto reloaded = cache->load(fixture_path());
+    const auto reloaded = cache->load(fixture_path(), DataTextureSpace);
     ASSERT_TRUE(reloaded.has_value()) << reloaded.error().message;
     EXPECT_EQ(reloaded->get(), cached_address);
 }
@@ -257,26 +404,48 @@ TEST(HostImageCacheTest, KeepsSnapshotAccessibleAfterSourceChangesAndDisappears)
     const auto source_path = write_snapshot_pnm_fixture(false);
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value());
-    const auto initial = cache->load(source_path);
+    const auto initial = cache->load(source_path, DataTextureSpace);
     ASSERT_TRUE(initial.has_value()) << initial.error().message;
     constexpr auto expected = std::array{1.0F, 64.0F / 255.0F, 16.0F / 255.0F};
     ASSERT_EQ((*initial)->pixels().size(), expected.size());
 
     ASSERT_EQ(write_snapshot_pnm_fixture(true), source_path);
-    const auto after_change = cache->load(source_path);
+    const auto after_change = cache->load(source_path, DataTextureSpace);
     ASSERT_TRUE(after_change.has_value()) << after_change.error().message;
     EXPECT_EQ(after_change->get(), initial->get());
     EXPECT_TRUE(std::ranges::equal((*after_change)->pixels(), expected));
 
+    const auto srgb_after_change = cache->load(source_path, SrgbTextureSpace);
+    ASSERT_TRUE(srgb_after_change.has_value()) << srgb_after_change.error().message;
+    constexpr auto expected_srgb = std::array{1.0, 0.05126945837404324, 0.005181516702338386};
+    ASSERT_EQ((*srgb_after_change)->pixels().size(), expected_srgb.size());
+    for (auto index = std::size_t{}; index < expected_srgb.size(); ++index) {
+        EXPECT_NEAR((*srgb_after_change)->pixels()[index], expected_srgb[index], 1.0e-7) << index;
+    }
+
     std::error_code remove_error;
     ASSERT_TRUE(std::filesystem::remove(source_path, remove_error)) << remove_error.message();
-    const auto after_removal = cache->load(source_path);
+    const auto after_removal = cache->load(source_path, DataTextureSpace);
     ASSERT_TRUE(after_removal.has_value()) << after_removal.error().message;
     EXPECT_EQ(after_removal->get(), initial->get());
 
+    const auto linear_after_removal = cache->load(source_path, WorkingTextureSpace);
+    ASSERT_TRUE(linear_after_removal.has_value()) << linear_after_removal.error().message;
+    ASSERT_EQ((*linear_after_removal)->pixels().size(), expected.size());
+    for (auto index = std::size_t{}; index < expected.size(); ++index) {
+        EXPECT_EQ(std::bit_cast<std::uint32_t>((*linear_after_removal)->pixels()[index]),
+                  std::bit_cast<std::uint32_t>(expected[index]));
+    }
+    const auto cached_entries = cache->entry_count();
+    const auto cached_bytes = cache->resident_pixel_bytes();
+    ASSERT_TRUE(cached_entries.has_value());
+    ASSERT_TRUE(cached_bytes.has_value());
+    EXPECT_EQ(*cached_entries, 3U);
+    EXPECT_EQ(*cached_bytes, 6U * sizeof(TransportScalar));
+
     auto fresh_cache = HostImageCache::create();
     ASSERT_TRUE(fresh_cache.has_value());
-    const auto missing = fresh_cache->load(source_path);
+    const auto missing = fresh_cache->load(source_path, DataTextureSpace);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, core::StatusCode::not_found);
 }
@@ -286,8 +455,9 @@ TEST(HostImageCacheTest, ReturnsOneImmutableHandleAcrossConcurrentLoads) {
     ASSERT_TRUE(cache.has_value());
     auto futures = std::vector<std::future<core::Result<HostImageHandle>>>{};
     for (auto index = 0U; index < 8U; ++index) {
-        futures.push_back(
-            std::async(std::launch::async, [&cache] { return cache->load(fixture_path()); }));
+        futures.push_back(std::async(std::launch::async, [&cache] {
+            return cache->load(fixture_path(), DataTextureSpace);
+        }));
     }
 
     auto first = HostImageHandle{};
@@ -308,16 +478,16 @@ TEST(HostImageCacheTest, RejectsInvalidSourcesAndExhaustedBudgetsWithoutSubstitu
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value());
 
-    const auto relative = cache->load(std::filesystem::path{"relative.ppm"});
+    const auto relative = cache->load(std::filesystem::path{"relative.ppm"}, DataTextureSpace);
     ASSERT_FALSE(relative.has_value());
     EXPECT_EQ(relative.error().code, core::StatusCode::invalid_argument);
 
-    const auto missing = cache->load(artifact_path("missing.ppm"));
+    const auto missing = cache->load(artifact_path("missing.ppm"), DataTextureSpace);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, core::StatusCode::not_found);
 
     const auto directory =
-        cache->load(std::filesystem::path{BLACKFRAME_HOST_IMAGE_TEST_OUTPUT_DIR});
+        cache->load(std::filesystem::path{BLACKFRAME_HOST_IMAGE_TEST_OUTPUT_DIR}, DataTextureSpace);
     ASSERT_FALSE(directory.has_value());
     EXPECT_EQ(directory.error().code, core::StatusCode::invalid_argument);
 
@@ -327,7 +497,7 @@ TEST(HostImageCacheTest, RejectsInvalidSourcesAndExhaustedBudgetsWithoutSubstitu
         ASSERT_TRUE(corrupt.is_open());
         corrupt << "this is not an image";
     }
-    const auto corrupt = cache->load(corrupt_path);
+    const auto corrupt = cache->load(corrupt_path, DataTextureSpace);
     ASSERT_FALSE(corrupt.has_value());
     EXPECT_EQ(corrupt.error().code, core::StatusCode::incompatible);
     const auto entry_count = cache->entry_count();
@@ -338,7 +508,7 @@ TEST(HostImageCacheTest, RejectsInvalidSourcesAndExhaustedBudgetsWithoutSubstitu
     limits.maximum_image_pixel_bytes = 8U;
     auto bounded = HostImageCache::create(limits);
     ASSERT_TRUE(bounded.has_value());
-    const auto oversized = bounded->load(fixture_path());
+    const auto oversized = bounded->load(fixture_path(), DataTextureSpace);
     ASSERT_FALSE(oversized.has_value());
     EXPECT_EQ(oversized.error().code, core::StatusCode::resource_exhausted);
     const auto bounded_entry_count = bounded->entry_count();
@@ -376,10 +546,10 @@ TEST(HostImageCacheTest, RejectsUnsupportedSuffixesAndMismatchedPayloads) {
 
     auto cache = HostImageCache::create();
     ASSERT_TRUE(cache.has_value());
-    const auto unsupported = cache->load(unsupported_path);
+    const auto unsupported = cache->load(unsupported_path, DataTextureSpace);
     ASSERT_FALSE(unsupported.has_value());
     EXPECT_EQ(unsupported.error().code, core::StatusCode::incompatible);
-    const auto mismatched = cache->load(mismatched_path);
+    const auto mismatched = cache->load(mismatched_path, DataTextureSpace);
     ASSERT_FALSE(mismatched.has_value());
     EXPECT_EQ(mismatched.error().code, core::StatusCode::incompatible);
 
@@ -393,7 +563,7 @@ TEST(HostImageCacheTest, ReportsUseAfterMoveExplicitly) {
     ASSERT_TRUE(source.has_value());
     auto destination = std::move(*source);
 
-    const auto load = source->load(fixture_path());
+    const auto load = source->load(fixture_path(), DataTextureSpace);
     ASSERT_FALSE(load.has_value());
     EXPECT_EQ(load.error().code, core::StatusCode::incompatible);
     const auto count = source->entry_count();
@@ -406,7 +576,7 @@ TEST(HostImageCacheTest, ReportsUseAfterMoveExplicitly) {
     ASSERT_FALSE(cache_limits.has_value());
     EXPECT_EQ(cache_limits.error().code, core::StatusCode::incompatible);
 
-    const auto loaded = destination.load(fixture_path());
+    const auto loaded = destination.load(fixture_path(), DataTextureSpace);
     ASSERT_TRUE(loaded.has_value()) << loaded.error().message;
 }
 
@@ -418,8 +588,8 @@ TEST(HostImageCacheTest, EnforcesEntryAndResidentByteLimits) {
     entry_limits.maximum_entries = 1U;
     auto entry_bounded = HostImageCache::create(entry_limits);
     ASSERT_TRUE(entry_bounded.has_value());
-    ASSERT_TRUE(entry_bounded->load(fixture_path()).has_value());
-    const auto entry_overflow = entry_bounded->load(second_fixture);
+    ASSERT_TRUE(entry_bounded->load(fixture_path(), DataTextureSpace).has_value());
+    const auto entry_overflow = entry_bounded->load(second_fixture, DataTextureSpace);
     ASSERT_FALSE(entry_overflow.has_value());
     EXPECT_EQ(entry_overflow.error().code, core::StatusCode::resource_exhausted);
     const auto entry_count = entry_bounded->entry_count();
@@ -431,8 +601,8 @@ TEST(HostImageCacheTest, EnforcesEntryAndResidentByteLimits) {
     resident_limits.maximum_resident_pixel_bytes = 64U;
     auto resident_bounded = HostImageCache::create(resident_limits);
     ASSERT_TRUE(resident_bounded.has_value());
-    ASSERT_TRUE(resident_bounded->load(fixture_path()).has_value());
-    const auto resident_overflow = resident_bounded->load(second_fixture);
+    ASSERT_TRUE(resident_bounded->load(fixture_path(), DataTextureSpace).has_value());
+    const auto resident_overflow = resident_bounded->load(second_fixture, DataTextureSpace);
     ASSERT_FALSE(resident_overflow.has_value());
     EXPECT_EQ(resident_overflow.error().code, core::StatusCode::resource_exhausted);
     const auto resident_entry_count = resident_bounded->entry_count();
