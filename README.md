@@ -212,26 +212,18 @@ silently selecting another path.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
-- **Host images:** a pinned OpenImageIO loader reads the primary two-dimensional image into an
-  immutable interleaved-float snapshot and caches it by canonical absolute path plus mandatory
-  source-space tag. `data` and scene-linear sRGB values remain bitwise unchanged; tagged sRGB
-  channels are decoded with the fixed IEC transfer function into Blackframe's D65 scene-linear
-  sRGB working space while unassociated alpha and extra channels remain unchanged. Tags are never
-  inferred from metadata or suffixes; color tags require exactly one named `R`, `G`, and `B`
-  channel. Loading never clamps, retries another reader, or returns a substitute image. Exact
-  embedded readers handle PNM/PFM, PNG, and EXR; all three families are covered by tests.
-- **Texture addressing:** addressing is defined after normalized U and V are mapped into texel
-  space. Each integer tap independently supports repeat, clamp, mirrored repeat, or black borders.
-  Per-tap addressing preserves partial filter support at image edges and avoids signed overflow.
-  Invalid modes, empty extents, and unrepresentable texel intervals fail instead of selecting a
-  default; black-border misses are represented separately from errors.
-- **Host texture filtering:** immutable host snapshots can be sampled per channel with nearest,
-  bilinear, or separable Catmull-Rom bicubic reconstruction. Texel centers use normalized UVs, V
-  follows stored scanline order without an implicit flip, and exact nearest boundaries select the
-  higher local texel. Every bilinear or bicubic tap applies its U/V wrap independently; black taps
-  contribute zero without renormalization. Transport evaluation remains float, reference
-  evaluation remains double, and signed HDR values or legitimate bicubic overshoot are never
-  clamped.
+- **Host images:** pinned OpenImageIO loading produces immutable interleaved-float snapshots cached
+  by canonical path and mandatory color-space tag. Data and scene-linear values stay unchanged;
+  tagged sRGB channels use the fixed IEC decode while alpha and extra channels remain untouched.
+  PNM/PFM, PNG, and EXR are covered by tests. Tags are never guessed, and loading never clamps,
+  retries another reader, or returns a substitute image.
+- **Host texture sampling:** nearest, bilinear, and Catmull-Rom bicubic reconstruction share
+  per-tap repeat, clamp, mirrored-repeat, and black-border addressing. Mip pyramids are generated
+  from the converted snapshot down to 1x1 with exact-area box averages, including odd extents;
+  channel order and color tags are preserved. Trilinear filtering takes an explicit finite LOD and
+  blends bilinear samples from adjacent levels. Invalid modes, coordinates, channels, budgets, or
+  non-finite LODs fail explicitly. Float transport, double reference evaluation, signed HDR values,
+  bicubic overshoot, and black-border support are never silently normalized or clamped.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
   A deterministic tilted-normal Lambertian furnace validates both precisions against its analytic
@@ -355,9 +347,8 @@ oracle rather than an execution fallback.
 Constant textures are currently typed scene resources with explicit scalar-reference, CPU, and CUDA
 evaluation paths. They are not yet material-parameter bindings: in particular, Blackframe does not
 invent an implicit RGB-to-spectrum conversion.
-The host image cache now produces explicitly tagged working-space snapshots with explicit host
-filtering and addressing, but image textures are not yet bound to material parameters, scene
-packets, or device uploads.
+Host images can be loaded, converted, mipmapped, and filtered, but are not yet bound to material
+parameters, scene packets, or device uploads.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between
