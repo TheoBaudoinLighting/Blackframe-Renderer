@@ -35,6 +35,7 @@ if(TARGET Blackframe::HostImage)
         BlackframeHostImageCacheTests
         HostImageCacheTest.cpp
         HostImageFilterTest.cpp
+        HostImageMipChainTest.cpp
     )
     blackframe_set_target_role(BlackframeHostImageCacheTests test)
     target_link_libraries(

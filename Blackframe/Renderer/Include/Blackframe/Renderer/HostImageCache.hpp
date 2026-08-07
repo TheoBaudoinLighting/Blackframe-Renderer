@@ -14,6 +14,8 @@
 
 namespace blackframe::renderer {
 
+class HostImageMipChain;
+
 struct HostImageCacheLimits final {
     std::uint32_t maximum_width{32'768U};
     std::uint32_t maximum_height{32'768U};
@@ -42,6 +44,7 @@ class HostImage final {
 
   private:
     friend class HostImageCache;
+    friend class HostImageMipChain;
 
     HostImage(std::filesystem::path source_path, std::string format_name,
               TextureColorSpace source_color_space, TextureColorSpace storage_color_space,
