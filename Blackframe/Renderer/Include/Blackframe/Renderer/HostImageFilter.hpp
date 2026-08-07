@@ -3,6 +3,7 @@
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
 #include <Blackframe/Renderer/HostImageCache.hpp>
+#include <Blackframe/Renderer/TextureCoordinateDifferentials.hpp>
 #include <Blackframe/Renderer/TextureWrap.hpp>
 #include <cstdint>
 #include <type_traits>
@@ -16,19 +17,6 @@ enum class TextureFilterMode : std::uint32_t {
     bilinear = 1U,
     bicubic = 2U,
 };
-
-template <GeometryScalar Scalar> struct TextureCoordinateDifferentialsT final {
-    Scalar dudx{};
-    Scalar dvdx{};
-    Scalar dudy{};
-    Scalar dvdy{};
-
-    [[nodiscard]] constexpr bool
-    operator==(const TextureCoordinateDifferentialsT&) const noexcept = default;
-};
-
-using TextureCoordinateDifferentials = TextureCoordinateDifferentialsT<TransportScalar>;
-using ReferenceTextureCoordinateDifferentials = TextureCoordinateDifferentialsT<ReferenceScalar>;
 
 inline constexpr std::uint32_t HostImageEwaMaximumAnisotropy = 64U;
 
@@ -97,12 +85,6 @@ static_assert(std::is_trivially_copyable_v<TextureFilterMode>);
 static_assert(static_cast<std::uint32_t>(TextureFilterMode::nearest) == 0U);
 static_assert(static_cast<std::uint32_t>(TextureFilterMode::bilinear) == 1U);
 static_assert(static_cast<std::uint32_t>(TextureFilterMode::bicubic) == 2U);
-static_assert(sizeof(TextureCoordinateDifferentials) == 4U * sizeof(TransportScalar));
-static_assert(sizeof(ReferenceTextureCoordinateDifferentials) == 4U * sizeof(ReferenceScalar));
-static_assert(std::is_standard_layout_v<TextureCoordinateDifferentials>);
-static_assert(std::is_standard_layout_v<ReferenceTextureCoordinateDifferentials>);
-static_assert(std::is_trivially_copyable_v<TextureCoordinateDifferentials>);
-static_assert(std::is_trivially_copyable_v<ReferenceTextureCoordinateDifferentials>);
 static_assert(sizeof(HostImageEwaLimits) == 2U * sizeof(std::uint32_t));
 static_assert(std::is_standard_layout_v<HostImageEwaLimits>);
 static_assert(std::is_trivially_copyable_v<HostImageEwaLimits>);

@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/LocalFrame.hpp>
 #include <Blackframe/Renderer/PixelJitter.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
+#include <Blackframe/Renderer/RayDifferential.hpp>
 #include <Blackframe/Renderer/RenderConfiguration.hpp>
 #include <algorithm>
 #include <cmath>
@@ -109,6 +110,17 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
             Scalar{1} - Scalar{2} * raster_sample.y / raster_height, time);
     }
 
+    [[nodiscard]] core::Result<RayDifferentialT<Scalar>>
+    generate_primary_ray_differential(const Point2T<Scalar> raster_sample,
+                                      const Scalar time) const {
+        const auto primary = generate_primary_ray(raster_sample, time);
+        if (!primary) {
+            return std::unexpected(primary.error());
+        }
+        return generate_primary_ray_differential_from_validated_raster(*primary, raster_sample.x,
+                                                                       raster_sample.y, time);
+    }
+
     [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray(const PixelSampleT<Scalar> sample,
                                                                   const Scalar time) const {
         if (sample.pixel_x >= extent_.width || sample.pixel_y >= extent_.height) {
@@ -131,6 +143,17 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
             Scalar{1} - (twice_pixel_y + Scalar{2} * sample.offset_y) / raster_height, time);
     }
 
+    [[nodiscard]] core::Result<RayDifferentialT<Scalar>>
+    generate_primary_ray_differential(const PixelSampleT<Scalar> sample, const Scalar time) const {
+        const auto primary = generate_primary_ray(sample, time);
+        if (!primary) {
+            return std::unexpected(primary.error());
+        }
+        return generate_primary_ray_differential_from_validated_raster(
+            *primary, static_cast<Scalar>(sample.pixel_x) + sample.offset_x,
+            static_cast<Scalar>(sample.pixel_y) + sample.offset_y, time);
+    }
+
     [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray(const PixelSampleIndex index,
                                                                   const PixelJitterMode mode,
                                                                   const Scalar time) const {
@@ -139,6 +162,16 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
             return std::unexpected(sample.error());
         }
         return generate_primary_ray(*sample, time);
+    }
+
+    [[nodiscard]] core::Result<RayDifferentialT<Scalar>>
+    generate_primary_ray_differential(const PixelSampleIndex index, const PixelJitterMode mode,
+                                      const Scalar time) const {
+        const auto sample = generate_pixel_sample<Scalar>(index, mode);
+        if (!sample.has_value()) {
+            return std::unexpected(sample.error());
+        }
+        return generate_primary_ray_differential(*sample, time);
     }
 
     [[nodiscard]] constexpr const Point3T<Scalar>& origin() const noexcept {
@@ -158,6 +191,37 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
     }
 
   private:
+    [[nodiscard]] core::Result<RayDifferentialT<Scalar>>
+    generate_primary_ray_differential_from_validated_raster(const RayT<Scalar> primary,
+                                                            const Scalar raster_x,
+                                                            const Scalar raster_y,
+                                                            const Scalar time) const {
+        const auto raster_width = static_cast<Scalar>(extent_.width);
+        const auto raster_height = static_cast<Scalar>(extent_.height);
+        // Differential samples deliberately extrapolate one pixel beyond the right and bottom
+        // edges. Clamping or switching to a backward difference would collapse or flip the
+        // footprint at the film boundary.
+        const auto rx = generate_primary_ray_from_normalized_raster(
+            Scalar{2} * (raster_x + Scalar{1}) / raster_width - Scalar{1},
+            Scalar{1} - Scalar{2} * raster_y / raster_height, time);
+        if (!rx) {
+            return std::unexpected(rx.error());
+        }
+        const auto ry = generate_primary_ray_from_normalized_raster(
+            Scalar{2} * raster_x / raster_width - Scalar{1},
+            Scalar{1} - Scalar{2} * (raster_y + Scalar{1}) / raster_height, time);
+        if (!ry) {
+            return std::unexpected(ry.error());
+        }
+        if (rx->direction() == primary.direction() || ry->direction() == primary.direction()) {
+            return std::unexpected(pinhole_camera_detail::invalid_camera_input(
+                "A one-pixel pinhole differential is not representable at this extent and field "
+                "of view."));
+        }
+        return RayDifferentialT<Scalar>::create(primary, origin_, rx->direction(), origin_,
+                                                ry->direction());
+    }
+
     [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray_from_normalized_raster(
         const Scalar normalized_x, const Scalar normalized_y, const Scalar time) const {
         if (!std::isfinite(time)) {

@@ -9,6 +9,7 @@
 #include <Blackframe/Renderer/WavelengthSampling.hpp>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
@@ -144,7 +145,12 @@ class FixedHitBackend final : public AccelBackend {
 
     [[nodiscard]] core::Result<std::optional<AccelHit>>
     closest_hit(const renderer::Ray&) const override {
+        ++closest_hit_calls_;
         return hit_;
+    }
+
+    [[nodiscard]] std::size_t closest_hit_calls() const noexcept {
+        return closest_hit_calls_;
     }
 
     [[nodiscard]] core::Result<bool> occluded(const renderer::Ray&) const override {
@@ -163,6 +169,7 @@ class FixedHitBackend final : public AccelBackend {
 
   private:
     std::optional<AccelHit> hit_;
+    mutable std::size_t closest_hit_calls_{};
 };
 
 [[nodiscard]] core::Result<ResolvedSceneSurface>
@@ -309,6 +316,79 @@ TEST(SceneSurfaceInteractionTest, ResolvesGeometryIdentifiersTimeAndSpectralClos
     EXPECT_GT(result->position_error.x, 0.0F);
     EXPECT_GT(result->position_error.y, 0.0F);
     EXPECT_GT(result->position_error.z, 0.0F);
+}
+
+TEST(SceneSurfaceInteractionTest, ResolvesAnalyticNeighborsWithoutAdditionalTraversalQueries) {
+    const auto scene = make_spectral_scene();
+    const auto ray = make_surface_ray();
+    const auto differential = renderer::RayDifferential::create(
+        ray, ray.origin(), renderer::Vector3{.x = 0.25F, .z = 1.0F}, ray.origin(),
+        renderer::Vector3{.y = 0.25F, .z = 1.0F});
+    ASSERT_TRUE(differential.has_value());
+    auto acceleration = FixedHitBackend{scene, make_surface_hit()};
+
+    const auto resolved = resolve_scene_surface(acceleration, *differential);
+
+    ASSERT_TRUE(resolved.has_value()) << resolved.error().message;
+    ASSERT_TRUE(resolved->has_value());
+    EXPECT_EQ(acceleration.closest_hit_calls(), 1U);
+    const auto& screen = (**resolved).differentials;
+    expect_vector_near(screen.positions.dpdx, renderer::Vector3{.x = 0.5F});
+    expect_vector_near(screen.positions.dpdy, renderer::Vector3{.y = 0.5F});
+    EXPECT_NEAR(screen.texture_coordinates.dudx, 0.25F, 1.0e-6F);
+    EXPECT_NEAR(screen.texture_coordinates.dvdx, 0.0F, 1.0e-6F);
+    EXPECT_NEAR(screen.texture_coordinates.dudy, 0.0F, 1.0e-6F);
+    EXPECT_NEAR(screen.texture_coordinates.dvdy, 0.25F, 1.0e-6F);
+    expect_normal_near(screen.rx_shading_normal, renderer::Normal3{.z = 1.0F});
+    expect_normal_near(screen.ry_shading_normal, renderer::Normal3{.z = 1.0F});
+}
+
+TEST(SceneSurfaceInteractionTest,
+     PreservesSmallUvAndSmoothNormalChangesWithoutAbsoluteSubtraction) {
+    auto description = make_spectral_scene_description();
+    const auto tilted_z = std::sqrt(1.0F - 0.2F * 0.2F);
+    auto mesh = TriangleMesh::create(
+        {
+            renderer::Point3{},
+            renderer::Point3{.x = 2.0F},
+            renderer::Point3{.y = 2.0F},
+        },
+        {
+            renderer::Normal3{.z = 1.0F},
+            renderer::Normal3{.x = 0.2F, .z = tilted_z},
+            renderer::Normal3{.y = 0.2F, .z = tilted_z},
+        },
+        {
+            renderer::Point2{.x = 1'000'000.0F, .y = 1'000'000.0F},
+            renderer::Point2{.x = 1'000'001.0F, .y = 1'000'000.0F},
+            renderer::Point2{.x = 1'000'000.0F, .y = 1'000'001.0F},
+        },
+        {TriangleVertexIndices{.vertices = {0U, 1U, 2U}}});
+    ASSERT_TRUE(mesh.has_value()) << mesh.error().message;
+    description.geometries.front().mesh = std::make_shared<const TriangleMesh>(std::move(*mesh));
+    const auto scene = FrameScene::create(std::move(description));
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    const auto ray = make_surface_ray();
+    constexpr auto tangent = 5.0e-5F;
+    const auto differential = renderer::RayDifferential::create(
+        ray, ray.origin(), renderer::Vector3{.x = tangent, .z = 1.0F}, ray.origin(),
+        renderer::Vector3{.y = tangent, .z = 1.0F});
+    ASSERT_TRUE(differential.has_value());
+    auto acceleration = FixedHitBackend{*scene, make_surface_hit()};
+
+    const auto resolved = resolve_scene_surface(acceleration, *differential);
+
+    ASSERT_TRUE(resolved.has_value()) << resolved.error().message;
+    ASSERT_TRUE(resolved->has_value());
+    const auto& surface = **resolved;
+    EXPECT_NEAR(surface.differentials.texture_coordinates.dudx, 5.0e-5F, 1.0e-8F);
+    EXPECT_NEAR(surface.differentials.texture_coordinates.dvdx, 0.0F, 1.0e-8F);
+    EXPECT_NEAR(surface.differentials.texture_coordinates.dudy, 0.0F, 1.0e-8F);
+    EXPECT_NEAR(surface.differentials.texture_coordinates.dvdy, 5.0e-5F, 1.0e-8F);
+    EXPECT_GT(surface.differentials.rx_shading_normal.x,
+              surface.surface.interaction.shading_normal().x);
+    EXPECT_GT(surface.differentials.ry_shading_normal.y,
+              surface.surface.interaction.shading_normal().y);
 }
 
 TEST(SceneSurfaceInteractionTest, OrientsShadingNormalsUnderMirroredInstances) {

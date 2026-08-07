@@ -111,8 +111,9 @@ SMAPE, mean bias, heatmaps, time, rays, samples, queue statistics, and memory wh
 - Transport is vacuum-only. Unsupported media are rejected.
 - Host image textures are not yet bound to material parameters, scene packets, or device uploads.
   Blackframe does not invent an implicit RGB-to-spectrum conversion.
-- Ray differentials are not yet propagated through transport, so EWA footprints must currently be
-  supplied explicitly by a host caller.
+- The pinhole camera and `scalar_ref` propagate ray differentials across ideal reflection and
+  transmission. Continuous lobes report their loss explicitly; CPU/GPU wavefront propagation is
+  not implemented yet.
 - A latitude-longitude environment-map light contract exists, but scene transport currently
   resolves only the constant environment; maps are not connected to misses, NEE, or MIS.
 - Geometry updates cover full rebuilds and frame-to-frame transform refits, not deformation or

@@ -35,6 +35,7 @@ add_executable(
     PlanarPrimitivesTest.cpp
     PngWriterTest.cpp
     RayTest.cpp
+    RayDifferentialTest.cpp
     RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
     RenderSessionStateTest.cpp
@@ -283,6 +284,12 @@ if(TARGET Blackframe::Png)
         OwenScramblingTest.WritesStableVisualizer
         checksum-owen-scrambling-visualizer.png
         7f92475259a487f9f49e94706b4a44cb5198d6c60806ebd6827672659547c7b2
+    )
+    blackframe_add_png_checksum_test(
+        Blackframe.RayDifferentialSpecularPreview
+        RayDifferentialTest.WritesStableMirrorAndTransmissionFootprintPreview
+        checksum-ray-differential-specular-800x800.png
+        fe65ffb737101b249142418bf109bf9b5e36a9945f00dfe80c38c8cac573dd63
     )
     blackframe_add_png_checksum_test(
         Blackframe.DebugGolden.Normal

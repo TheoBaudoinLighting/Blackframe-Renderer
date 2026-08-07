@@ -1,5 +1,6 @@
 #include <Blackframe/Renderer/PinholeCamera.hpp>
 #include <cmath>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
 #include <numbers>
@@ -73,6 +74,73 @@ TEST(PinholeCameraTest, MapsTheCameraBasisToWorldSpace) {
     EXPECT_EQ(ray->direction(), (Vector3{.x = -1.0F, .y = 0.0F, .z = 0.0F}));
 }
 
+TEST(PinholeCameraTest, GeneratesPositiveOnePixelDifferentialsWithStableMetadata) {
+    const auto frame = identity_camera_frame<ReferenceScalar>();
+    ASSERT_TRUE(frame.has_value());
+    const auto origin = ReferencePoint3{.x = 1.0, .y = -2.0, .z = 3.0};
+    const auto medium = MediumId{.value = 17U};
+    const auto camera = ReferencePinholeCamera::create(
+        origin, *frame, RenderExtent{.width = 4U, .height = 4U},
+        std::numbers::pi_v<ReferenceScalar> / 2.0, 0.125, 12.0, 0x13579BDFU, medium);
+    ASSERT_TRUE(camera.has_value());
+
+    const auto differential =
+        camera->generate_primary_ray_differential(ReferencePoint2{.x = 2.0, .y = 2.0}, 0.75);
+    ASSERT_TRUE(differential.has_value()) << differential.error().message;
+    EXPECT_EQ(differential->ray().origin(), origin);
+    EXPECT_EQ(differential->ray().direction(), (ReferenceVector3{.z = -1.0}));
+    EXPECT_DOUBLE_EQ(differential->ray().t_min(), 0.125);
+    EXPECT_DOUBLE_EQ(differential->ray().t_max(), 12.0);
+    EXPECT_DOUBLE_EQ(differential->ray().time(), 0.75);
+    EXPECT_EQ(differential->ray().mask(), 0x13579BDFU);
+    EXPECT_EQ(differential->ray().current_medium(), medium);
+    EXPECT_EQ(differential->rx_origin(), origin);
+    EXPECT_EQ(differential->ry_origin(), origin);
+
+    const auto inverse_sqrt_five = 1.0 / std::sqrt(5.0);
+    EXPECT_NEAR(differential->rx_direction().x, inverse_sqrt_five, 2.0e-15);
+    EXPECT_DOUBLE_EQ(differential->rx_direction().y, 0.0);
+    EXPECT_NEAR(differential->rx_direction().z, -2.0 * inverse_sqrt_five, 2.0e-15);
+    EXPECT_DOUBLE_EQ(differential->ry_direction().x, 0.0);
+    EXPECT_NEAR(differential->ry_direction().y, -inverse_sqrt_five, 2.0e-15);
+    EXPECT_NEAR(differential->ry_direction().z, -2.0 * inverse_sqrt_five, 2.0e-15);
+}
+
+TEST(PinholeCameraTest, ExtrapolatesForwardDifferentialsBeyondTheFilmEdges) {
+    const auto frame = identity_camera_frame<TransportScalar>();
+    ASSERT_TRUE(frame.has_value());
+    const auto camera = PinholeCamera::create(
+        Point3{}, *frame, RenderExtent{.width = 4U, .height = 4U},
+        std::numbers::pi_v<TransportScalar> / 2.0F, 0.0F,
+        std::numeric_limits<TransportScalar>::infinity(), AllRayVisibility, VacuumMedium);
+    ASSERT_TRUE(camera.has_value());
+
+    const auto differential =
+        camera->generate_primary_ray_differential(Point2{.x = 3.5F, .y = 3.5F}, 0.0F);
+    ASSERT_TRUE(differential.has_value()) << differential.error().message;
+    EXPECT_GT(differential->rx_direction().x, differential->ray().direction().x);
+    EXPECT_LT(differential->ry_direction().y, differential->ray().direction().y);
+    EXPECT_NE(differential->rx_direction(), differential->ray().direction());
+    EXPECT_NE(differential->ry_direction(), differential->ray().direction());
+}
+
+TEST(PinholeCameraTest, RejectsOnePixelOffsetsLostToProjectionPrecision) {
+    const auto frame = identity_camera_frame<TransportScalar>();
+    ASSERT_TRUE(frame.has_value());
+    constexpr auto tiny_field_of_view = 2.0F * std::numeric_limits<TransportScalar>::denorm_min();
+    const auto camera =
+        PinholeCamera::create(Point3{}, *frame, RenderExtent{.width = 4U, .height = 4U},
+                              tiny_field_of_view, 0.0F, 1.0F, AllRayVisibility, VacuumMedium);
+    ASSERT_TRUE(camera.has_value());
+
+    const auto unresolved =
+        camera->generate_primary_ray_differential(Point2{.x = 2.0F, .y = 2.0F}, 0.0F);
+
+    ASSERT_FALSE(unresolved.has_value());
+    EXPECT_EQ(unresolved.error().code, core::StatusCode::invalid_argument);
+    EXPECT_FALSE(unresolved.error().message.empty());
+}
+
 TEST(PinholeCameraTest, RejectsInvalidConfigurationWithoutFallback) {
     const auto frame = identity_camera_frame<TransportScalar>();
     ASSERT_TRUE(frame.has_value());
@@ -120,6 +188,10 @@ TEST(PinholeCameraTest, RejectsInvalidRasterSamplesAndTimeWithoutFallback) {
     EXPECT_FALSE(camera->generate_primary_ray(Point2{.x = 0.5F, .y = 2.0F}, 0.0F).has_value());
     EXPECT_FALSE(camera->generate_primary_ray(Point2{.x = nan, .y = 0.5F}, 0.0F).has_value());
     EXPECT_FALSE(camera->generate_primary_ray(Point2{.x = 0.5F, .y = 0.5F}, infinity).has_value());
+    EXPECT_FALSE(
+        camera->generate_primary_ray_differential(Point2{.x = 2.0F, .y = 0.5F}, 0.0F).has_value());
+    EXPECT_FALSE(camera->generate_primary_ray_differential(Point2{.x = 0.5F, .y = 0.5F}, infinity)
+                     .has_value());
 }
 
 } // namespace

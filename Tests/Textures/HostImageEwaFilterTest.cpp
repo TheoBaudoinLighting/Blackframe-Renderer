@@ -1,5 +1,6 @@
 #include <Blackframe/Renderer/HostImageFilter.hpp>
 #include <Blackframe/Renderer/HostImageMipChain.hpp>
+#include <Blackframe/Renderer/RayDifferential.hpp>
 #if defined(BLACKFRAME_HOST_IMAGE_FILTER_PNG)
 #include <Blackframe/Renderer/Film.hpp>
 #include <Blackframe/Renderer/PngWriter.hpp>
@@ -150,6 +151,43 @@ TEST(HostImageEwaFilterTest, MatchesCenteredImpulseAnalyticallyAndNeedsNoZeroFoo
         sample_ewa(*chain, Point2{.x = 0.5F, .y = 0.5F}, TextureCoordinateDifferentials{});
     ASSERT_TRUE(zero.has_value()) << zero.error().message;
     EXPECT_EQ(*zero, 1.0F);
+}
+
+TEST(HostImageEwaFilterTest, ConsumesAnalyticRayDifferentialsWithoutFootprintSubstitution) {
+    constexpr auto pixels = std::array<TransportScalar, 9>{
+        0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+    };
+    auto cache = HostImageCache::create();
+    ASSERT_TRUE(cache.has_value()) << cache.error().message;
+    const auto chain = load_mip_chain(
+        *cache, write_pfm_fixture("texture-ewa-ray-differential.pfm", 3U, 3U, pixels));
+    ASSERT_TRUE(chain);
+    const auto central_ray =
+        Ray::create(Point3{}, Vector3{.z = -1.0F}, 0.0F, std::numeric_limits<float>::infinity(),
+                    0.25F, AllRayVisibility, VacuumMedium);
+    ASSERT_TRUE(central_ray.has_value());
+    constexpr auto auxiliary_tangent = 1.0F / 6.0F;
+    const auto ray_differential =
+        RayDifferential::create(*central_ray, Point3{}, Vector3{.x = auxiliary_tangent, .z = -1.0F},
+                                Point3{}, Vector3{.y = auxiliary_tangent, .z = -1.0F});
+    ASSERT_TRUE(ray_differential.has_value());
+    const auto surface = SurfaceInteraction::create(
+        Point3{.z = -2.0F}, Normal3{.z = 1.0F}, Normal3{.z = 1.0F}, Point2{.x = 0.5F, .y = 0.5F},
+        Vector3{.x = 1.0F}, Vector3{.y = 1.0F}, SurfaceIdentifiers{}, 0.25F);
+    ASSERT_TRUE(surface.has_value());
+    const auto positions = surface_point_differentials(*ray_differential, *surface);
+    ASSERT_TRUE(positions.has_value()) << positions.error().message;
+    const auto footprint = texture_coordinate_differentials(*surface, *positions);
+    ASSERT_TRUE(footprint.has_value()) << footprint.error().message;
+
+    const auto filtered = sample_ewa(*chain, surface->uv(), *footprint);
+
+    ASSERT_TRUE(filtered.has_value()) << filtered.error().message;
+    EXPECT_NEAR(footprint->dudx, 1.0F / 3.0F, 2.0e-7F);
+    EXPECT_NEAR(footprint->dvdy, 1.0F / 3.0F, 2.0e-7F);
+    const auto edge = std::exp(-2.0);
+    const auto expected = (1.0 - edge) / (1.0 + 4.0 * std::exp(-1.0) - 5.0 * edge);
+    EXPECT_NEAR(*filtered, static_cast<TransportScalar>(expected), 2.0e-6F);
 }
 
 TEST(HostImageEwaFilterTest, PreservesHdrConstantsAndBlackBorderWeight) {

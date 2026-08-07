@@ -526,14 +526,95 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
     return result;
 }
 
+struct RayDifferentialTracker final {
+    std::optional<renderer::RayDifferential> active;
+    RayDifferentialLossReason loss_reason{RayDifferentialLossReason::none};
+    std::uint32_t propagated_specular_bounces{};
+};
+
+[[nodiscard]] core::Status update_ray_differentials(RayDifferentialTracker& tracker,
+                                                    const detail::ScenePathSurface& surface,
+                                                    const renderer::ClosureMixtureSample& sample,
+                                                    const renderer::Vector3 outgoing_local,
+                                                    const renderer::Ray& next_ray) {
+    if (!tracker.active) {
+        return {};
+    }
+    if (!renderer::is_delta_surface_scattering_event(sample.lobes)) {
+        tracker.active.reset();
+        tracker.loss_reason = RayDifferentialLossReason::non_delta_scattering;
+        return {};
+    }
+    if (!surface.differentials()) {
+        return std::unexpected(scene_mis_error(
+            core::StatusCode::internal_error,
+            "An active scalar ray differential reached a surface without differential data."));
+    }
+    const auto closures = surface.closures().closure_set().closures();
+    if (sample.selected_closure >= closures.size()) {
+        return std::unexpected(
+            scene_mis_error(core::StatusCode::internal_error,
+                            "A sampled delta closure does not identify a source closure record."));
+    }
+    const auto& closure = closures[sample.selected_closure];
+    const auto& differentials = *surface.differentials();
+    const auto rx_position = surface.position() + differentials.positions.dpdx;
+    const auto ry_position = surface.position() + differentials.positions.dpdy;
+
+    switch (closure.kind) {
+    case renderer::ClosureKind::specular_reflection: {
+        const auto propagated = renderer::propagate_specular_reflection(
+            *tracker.active, next_ray, surface.shading_normal(), rx_position,
+            differentials.rx_shading_normal, ry_position, differentials.ry_shading_normal);
+        if (!propagated) {
+            return std::unexpected(propagated.error());
+        }
+        if (tracker.propagated_specular_bounces == std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(
+                scene_mis_error(core::StatusCode::resource_exhausted,
+                                "The scalar ray-differential bounce count is not representable."));
+        }
+        tracker.active = *propagated;
+        ++tracker.propagated_specular_bounces;
+        return {};
+    }
+    case renderer::ClosureKind::specular_transmission: {
+        const auto propagated = renderer::propagate_specular_transmission(
+            *tracker.active, next_ray, surface.shading_normal(), rx_position,
+            differentials.rx_shading_normal, ry_position, differentials.ry_shading_normal,
+            outgoing_local.z > 0.0F, closure.parameters[0], closure.parameters[1]);
+        if (!propagated) {
+            return std::unexpected(propagated.error());
+        }
+        if (!*propagated) {
+            tracker.active.reset();
+            tracker.loss_reason = RayDifferentialLossReason::specular_discontinuity;
+            return {};
+        }
+        if (tracker.propagated_specular_bounces == std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(
+                scene_mis_error(core::StatusCode::resource_exhausted,
+                                "The scalar ray-differential bounce count is not representable."));
+        }
+        tracker.active = **propagated;
+        ++tracker.propagated_specular_bounces;
+        return {};
+    }
+    default:
+        return std::unexpected(scene_mis_error(
+            core::StatusCode::incompatible,
+            "A delta scattering event selected a closure without differential propagation."));
+    }
+}
+
 // The MIS continuation state stays in this dedicated loop so the frozen
 // BSDF-only scalar oracle remains an independent transport implementation.
 [[nodiscard]] core::Result<renderer::BsdfOnlyPathResult> trace_lambertian_mis_with_query(
     const renderer::Ray& initial_ray, const renderer::PathState& initial_state,
     const renderer::SampleStream& sample_stream, detail::SceneSurfaceQuery& surface_query,
     const renderer::BsdfOnlyEnvironment& environment, const renderer::PathDepthLimits& depth_limits,
-    const renderer::RussianRoulettePolicy& roulette_policy,
-    SceneMisDirectLighting& direct_lighting) {
+    const renderer::RussianRoulettePolicy& roulette_policy, SceneMisDirectLighting& direct_lighting,
+    RayDifferentialTracker* const differentials) {
     const auto roulette_status = renderer::validate_russian_roulette_policy(roulette_policy);
     if (!roulette_status) {
         return std::unexpected(roulette_status.error());
@@ -582,7 +663,9 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
     };
 
     while (true) {
-        const auto resolved = surface_query.closest_hit(ray);
+        const auto resolved = differentials != nullptr && differentials->active
+                                  ? surface_query.closest_hit(*differentials->active)
+                                  : surface_query.closest_hit(ray);
         if (!resolved) {
             return std::unexpected(resolved.error());
         }
@@ -756,6 +839,13 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
         if (!recorded) {
             return std::unexpected(recorded.error());
         }
+        if (differentials != nullptr) {
+            const auto differential_status = update_ray_differentials(
+                *differentials, surface, bsdf_sample, outgoing_local, *next_ray);
+            if (!differential_status) {
+                return std::unexpected(differential_status.error());
+            }
+        }
 
         beta = *updated_beta;
         depth = *next_depth;
@@ -795,14 +885,14 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
     }
 }
 
-} // namespace
-
-core::Result<renderer::BsdfOnlyPathResult>
-trace_scene_mis(const renderer::Ray& initial_ray, const renderer::PathState& initial_state,
-                const renderer::SampleStream& sample_stream, const AccelBackend& acceleration,
-                const renderer::LightSampler& light_sampler, const renderer::MisHeuristic heuristic,
-                const renderer::PathDepthLimits& depth_limits,
-                const renderer::RussianRoulettePolicy& roulette_policy) {
+[[nodiscard]] core::Result<renderer::BsdfOnlyPathResult>
+trace_scene_mis_impl(const renderer::Ray& initial_ray, const renderer::PathState& initial_state,
+                     const renderer::SampleStream& sample_stream, const AccelBackend& acceleration,
+                     const renderer::LightSampler& light_sampler,
+                     const renderer::MisHeuristic heuristic,
+                     const renderer::PathDepthLimits& depth_limits,
+                     const renderer::RussianRoulettePolicy& roulette_policy,
+                     RayDifferentialTracker* const differentials) {
     if (initial_ray.current_medium() != initial_state.current_medium()) {
         return std::unexpected(
             scene_mis_error(core::StatusCode::invalid_argument,
@@ -879,7 +969,40 @@ trace_scene_mis(const renderer::Ray& initial_ray, const renderer::PathState& ini
         renderer::BsdfOnlyEnvironment{*environment, environment_record.wavelengths};
     return trace_lambertian_mis_with_query(initial_ray, initial_state, sample_stream, query,
                                            resolved_environment, depth_limits, roulette_policy,
-                                           direct_lighting);
+                                           direct_lighting, differentials);
+}
+
+} // namespace
+
+core::Result<renderer::BsdfOnlyPathResult>
+trace_scene_mis(const renderer::Ray& initial_ray, const renderer::PathState& initial_state,
+                const renderer::SampleStream& sample_stream, const AccelBackend& acceleration,
+                const renderer::LightSampler& light_sampler, const renderer::MisHeuristic heuristic,
+                const renderer::PathDepthLimits& depth_limits,
+                const renderer::RussianRoulettePolicy& roulette_policy) {
+    return trace_scene_mis_impl(initial_ray, initial_state, sample_stream, acceleration,
+                                light_sampler, heuristic, depth_limits, roulette_policy, nullptr);
+}
+
+core::Result<SceneMisRayDifferentialResult> trace_scene_mis_with_ray_differentials(
+    const renderer::RayDifferential& initial_ray, const renderer::PathState& initial_state,
+    const renderer::SampleStream& sample_stream, const AccelBackend& acceleration,
+    const renderer::LightSampler& light_sampler, const renderer::MisHeuristic heuristic,
+    const renderer::PathDepthLimits& depth_limits,
+    const renderer::RussianRoulettePolicy& roulette_policy) {
+    auto tracker = RayDifferentialTracker{.active = initial_ray};
+    auto path =
+        trace_scene_mis_impl(initial_ray.ray(), initial_state, sample_stream, acceleration,
+                             light_sampler, heuristic, depth_limits, roulette_policy, &tracker);
+    if (!path) {
+        return std::unexpected(path.error());
+    }
+    return SceneMisRayDifferentialResult{
+        .path = std::move(*path),
+        .terminal_differential = std::move(tracker.active),
+        .loss_reason = tracker.loss_reason,
+        .propagated_specular_bounces = tracker.propagated_specular_bounces,
+    };
 }
 
 } // namespace blackframe::engine

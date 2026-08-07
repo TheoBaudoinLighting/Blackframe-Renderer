@@ -233,18 +233,18 @@ interpolate_texture_coordinate(const std::array<renderer::Point2, 3>& coordinate
 
 [[nodiscard]] core::Result<renderer::Normal3>
 robust_transformed_normal(const renderer::AffineTransform& transform,
-                          const renderer::Normal3 normal) {
+                          const std::array<double, 3>& normal) {
     const auto& inverse = transform.inverse_matrix();
     const auto transformed = std::array{
-        std::fma(static_cast<double>(inverse(0, 0)), static_cast<double>(normal.x),
-                 std::fma(static_cast<double>(inverse(1, 0)), static_cast<double>(normal.y),
-                          static_cast<double>(inverse(2, 0)) * static_cast<double>(normal.z))),
-        std::fma(static_cast<double>(inverse(0, 1)), static_cast<double>(normal.x),
-                 std::fma(static_cast<double>(inverse(1, 1)), static_cast<double>(normal.y),
-                          static_cast<double>(inverse(2, 1)) * static_cast<double>(normal.z))),
-        std::fma(static_cast<double>(inverse(0, 2)), static_cast<double>(normal.x),
-                 std::fma(static_cast<double>(inverse(1, 2)), static_cast<double>(normal.y),
-                          static_cast<double>(inverse(2, 2)) * static_cast<double>(normal.z))),
+        std::fma(static_cast<double>(inverse(0, 0)), normal[0],
+                 std::fma(static_cast<double>(inverse(1, 0)), normal[1],
+                          static_cast<double>(inverse(2, 0)) * normal[2])),
+        std::fma(static_cast<double>(inverse(0, 1)), normal[0],
+                 std::fma(static_cast<double>(inverse(1, 1)), normal[1],
+                          static_cast<double>(inverse(2, 1)) * normal[2])),
+        std::fma(static_cast<double>(inverse(0, 2)), normal[0],
+                 std::fma(static_cast<double>(inverse(1, 2)), normal[1],
+                          static_cast<double>(inverse(2, 2)) * normal[2])),
     };
     const auto maximum_component =
         std::max({std::abs(transformed[0]), std::abs(transformed[1]), std::abs(transformed[2])});
@@ -274,6 +274,14 @@ robust_transformed_normal(const renderer::AffineTransform& transform,
                           "A scene shading normal normalization is not representable."));
     }
     return result;
+}
+
+[[nodiscard]] core::Result<renderer::Normal3>
+robust_transformed_normal(const renderer::AffineTransform& transform,
+                          const renderer::Normal3 normal) {
+    return robust_transformed_normal(transform, std::array{static_cast<double>(normal.x),
+                                                           static_cast<double>(normal.y),
+                                                           static_cast<double>(normal.z)});
 }
 
 [[nodiscard]] core::Result<renderer::Normal3>
@@ -315,6 +323,210 @@ struct SurfaceDerivatives final {
     renderer::Vector3 dpdu;
     renderer::Vector3 dpdv;
 };
+
+struct WideBarycentrics final {
+    double vertex0{};
+    double vertex1{};
+    double vertex2{};
+};
+
+[[nodiscard]] std::array<double, 2> projected_point(const renderer::Point3 point,
+                                                    const std::uint32_t dropped_axis) noexcept {
+    switch (dropped_axis) {
+    case 0U:
+        return {static_cast<double>(point.y), static_cast<double>(point.z)};
+    case 1U:
+        return {static_cast<double>(point.x), static_cast<double>(point.z)};
+    default:
+        return {static_cast<double>(point.x), static_cast<double>(point.y)};
+    }
+}
+
+[[nodiscard]] core::Result<WideBarycentrics>
+extrapolated_barycentrics(const std::array<renderer::Point3, 3>& vertices,
+                          const renderer::Point3 point, const renderer::Normal3 geometric_normal) {
+    const auto absolute_normal = std::array{
+        std::abs(geometric_normal.x), std::abs(geometric_normal.y), std::abs(geometric_normal.z)};
+    const auto dropped_axis = absolute_normal[0] > absolute_normal[1]
+                                  ? (absolute_normal[0] > absolute_normal[2] ? 0U : 2U)
+                                  : (absolute_normal[1] > absolute_normal[2] ? 1U : 2U);
+    const auto vertex0 = projected_point(vertices[0], dropped_axis);
+    const auto vertex1 = projected_point(vertices[1], dropped_axis);
+    const auto vertex2 = projected_point(vertices[2], dropped_axis);
+    const auto sample = projected_point(point, dropped_axis);
+    const auto edge1 = std::array{vertex1[0] - vertex0[0], vertex1[1] - vertex0[1]};
+    const auto edge2 = std::array{vertex2[0] - vertex0[0], vertex2[1] - vertex0[1]};
+    const auto offset = std::array{sample[0] - vertex0[0], sample[1] - vertex0[1]};
+    const auto determinant = std::fma(edge1[0], edge2[1], -edge1[1] * edge2[0]);
+    if (!std::isfinite(determinant) || determinant == 0.0) {
+        return std::unexpected(
+            surface_error(core::StatusCode::invalid_argument,
+                          "A scene ray differential triangle projection is not representable."));
+    }
+    const auto vertex1_weight = std::fma(offset[0], edge2[1], -offset[1] * edge2[0]) / determinant;
+    const auto vertex2_weight = std::fma(edge1[0], offset[1], -edge1[1] * offset[0]) / determinant;
+    const auto vertex0_weight = 1.0 - vertex1_weight - vertex2_weight;
+    if (!std::isfinite(vertex0_weight) || !std::isfinite(vertex1_weight) ||
+        !std::isfinite(vertex2_weight)) {
+        return std::unexpected(
+            surface_error(core::StatusCode::invalid_argument,
+                          "A scene ray differential barycentric coordinate is not representable."));
+    }
+    return WideBarycentrics{
+        .vertex0 = vertex0_weight,
+        .vertex1 = vertex1_weight,
+        .vertex2 = vertex2_weight,
+    };
+}
+
+[[nodiscard]] core::Result<renderer::Normal3> interpolate_differential_shading_normal(
+    const std::array<renderer::Normal3, 3>& normals, const WideBarycentrics barycentrics,
+    const renderer::AffineTransform& object_to_world, const renderer::Normal3 geometric_normal) {
+    const auto object_normal = std::array{
+        std::fma(barycentrics.vertex0, static_cast<double>(normals[0].x),
+                 std::fma(barycentrics.vertex1, static_cast<double>(normals[1].x),
+                          barycentrics.vertex2 * static_cast<double>(normals[2].x))),
+        std::fma(barycentrics.vertex0, static_cast<double>(normals[0].y),
+                 std::fma(barycentrics.vertex1, static_cast<double>(normals[1].y),
+                          barycentrics.vertex2 * static_cast<double>(normals[2].y))),
+        std::fma(barycentrics.vertex0, static_cast<double>(normals[0].z),
+                 std::fma(barycentrics.vertex1, static_cast<double>(normals[1].z),
+                          barycentrics.vertex2 * static_cast<double>(normals[2].z))),
+    };
+    auto shading_normal = robust_transformed_normal(object_to_world, object_normal);
+    if (!shading_normal) {
+        return std::unexpected(shading_normal.error());
+    }
+    const auto orientation = transform_orientation(object_to_world);
+    if (!orientation) {
+        return std::unexpected(orientation.error());
+    }
+    if (*orientation < 0) {
+        *shading_normal = -*shading_normal;
+    }
+    if (!(renderer::dot(geometric_normal, *shading_normal) > renderer::TransportScalar{0})) {
+        return std::unexpected(
+            surface_error(core::StatusCode::invalid_argument,
+                          "A differential shading normal lies outside the geometric hemisphere."));
+    }
+    return *shading_normal;
+}
+
+[[nodiscard]] std::array<double, 2>
+texture_coordinate_delta(const std::array<renderer::Point2, 3>& coordinates,
+                         const WideBarycentrics auxiliary,
+                         const WideBarycentrics central) noexcept {
+    const auto delta0 = auxiliary.vertex0 - central.vertex0;
+    const auto delta1 = auxiliary.vertex1 - central.vertex1;
+    const auto delta2 = auxiliary.vertex2 - central.vertex2;
+    return {
+        std::fma(delta0, static_cast<double>(coordinates[0].x),
+                 std::fma(delta1, static_cast<double>(coordinates[1].x),
+                          delta2 * static_cast<double>(coordinates[2].x))),
+        std::fma(delta0, static_cast<double>(coordinates[0].y),
+                 std::fma(delta1, static_cast<double>(coordinates[1].y),
+                          delta2 * static_cast<double>(coordinates[2].y))),
+    };
+}
+
+[[nodiscard]] core::Result<renderer::TransportScalar>
+narrow_texture_derivative(const double value) {
+    const auto narrowed = static_cast<renderer::TransportScalar>(value);
+    if (!std::isfinite(value) || !std::isfinite(narrowed) || (value != 0.0 && narrowed == 0.0F)) {
+        return std::unexpected(
+            surface_error(core::StatusCode::invalid_argument,
+                          "A scene texture-coordinate differential is not representable."));
+    }
+    return narrowed;
+}
+
+[[nodiscard]] core::Result<ResolvedSceneSurfaceDifferentials>
+resolve_surface_differentials(const FrameScene& scene, const AccelHit& hit,
+                              const renderer::RayDifferential& ray,
+                              const ResolvedSceneSurface& surface) {
+    const auto positions = renderer::surface_point_differentials(ray, surface.interaction);
+    if (!positions) {
+        return std::unexpected(positions.error());
+    }
+    const auto geometry = scene.geometry(hit.identifiers.geometry);
+    const auto transform = scene.world_transform(hit.identifiers.instance);
+    if (!geometry || !transform) {
+        return std::unexpected(
+            surface_error(core::StatusCode::internal_error,
+                          "A validated differential hit could not resolve its scene geometry."));
+    }
+    const auto primitive_index = static_cast<std::size_t>(hit.identifiers.primitive.value);
+    const auto mesh = geometry->get().mesh;
+    if (!mesh || primitive_index >= mesh->triangles().size()) {
+        return std::unexpected(
+            surface_error(core::StatusCode::incompatible,
+                          "A differential hit references an unknown scene triangle."));
+    }
+    const auto& indices = mesh->triangles()[primitive_index].vertices;
+    const auto object_positions =
+        std::array{mesh->positions()[indices[0]], mesh->positions()[indices[1]],
+                   mesh->positions()[indices[2]]};
+    const auto world_positions = std::array{transform->get().apply(object_positions[0]),
+                                            transform->get().apply(object_positions[1]),
+                                            transform->get().apply(object_positions[2])};
+    const auto object_normals = std::array{mesh->normals()[indices[0]], mesh->normals()[indices[1]],
+                                           mesh->normals()[indices[2]]};
+    const auto texture_coordinates =
+        std::array{mesh->texture_coordinates()[indices[0]], mesh->texture_coordinates()[indices[1]],
+                   mesh->texture_coordinates()[indices[2]]};
+    const auto rx_position = surface.interaction.position() + positions->dpdx;
+    const auto ry_position = surface.interaction.position() + positions->dpdy;
+    const auto rx_barycentrics = extrapolated_barycentrics(world_positions, rx_position,
+                                                           surface.interaction.geometric_normal());
+    const auto ry_barycentrics = extrapolated_barycentrics(world_positions, ry_position,
+                                                           surface.interaction.geometric_normal());
+    const auto central_barycentrics = extrapolated_barycentrics(
+        world_positions, surface.interaction.position(), surface.interaction.geometric_normal());
+    if (!rx_barycentrics) {
+        return std::unexpected(rx_barycentrics.error());
+    }
+    if (!ry_barycentrics) {
+        return std::unexpected(ry_barycentrics.error());
+    }
+    if (!central_barycentrics) {
+        return std::unexpected(central_barycentrics.error());
+    }
+    const auto rx_uv_delta =
+        texture_coordinate_delta(texture_coordinates, *rx_barycentrics, *central_barycentrics);
+    const auto ry_uv_delta =
+        texture_coordinate_delta(texture_coordinates, *ry_barycentrics, *central_barycentrics);
+    const auto dudx = narrow_texture_derivative(rx_uv_delta[0]);
+    const auto dvdx = narrow_texture_derivative(rx_uv_delta[1]);
+    const auto dudy = narrow_texture_derivative(ry_uv_delta[0]);
+    const auto dvdy = narrow_texture_derivative(ry_uv_delta[1]);
+    for (const auto* derivative : {&dudx, &dvdx, &dudy, &dvdy}) {
+        if (!derivative->has_value()) {
+            return std::unexpected(derivative->error());
+        }
+    }
+    const auto rx_normal = interpolate_differential_shading_normal(
+        object_normals, *rx_barycentrics, transform->get(), surface.interaction.geometric_normal());
+    const auto ry_normal = interpolate_differential_shading_normal(
+        object_normals, *ry_barycentrics, transform->get(), surface.interaction.geometric_normal());
+    if (!rx_normal) {
+        return std::unexpected(rx_normal.error());
+    }
+    if (!ry_normal) {
+        return std::unexpected(ry_normal.error());
+    }
+    const auto texture_differentials = renderer::TextureCoordinateDifferentials{
+        .dudx = *dudx,
+        .dvdx = *dvdx,
+        .dudy = *dudy,
+        .dvdy = *dvdy,
+    };
+    return ResolvedSceneSurfaceDifferentials{
+        .positions = *positions,
+        .texture_coordinates = texture_differentials,
+        .rx_shading_normal = *rx_normal,
+        .ry_shading_normal = *ry_normal,
+    };
+}
 
 [[nodiscard]] core::Result<SurfaceDerivatives>
 surface_derivatives(const std::array<renderer::Point3, 3>& positions,
@@ -487,6 +699,23 @@ resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const re
     return resolve_scene_surface_hit_impl(scene, hit, ray);
 }
 
+core::Result<ResolvedSceneSurfaceWithDifferentials>
+resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit,
+                          const renderer::RayDifferential& ray) {
+    auto surface = resolve_scene_surface_hit_impl(scene, hit, ray.ray());
+    if (!surface) {
+        return std::unexpected(surface.error());
+    }
+    auto differentials = resolve_surface_differentials(scene, hit, ray, *surface);
+    if (!differentials) {
+        return std::unexpected(differentials.error());
+    }
+    return ResolvedSceneSurfaceWithDifferentials{
+        .surface = std::move(*surface),
+        .differentials = *differentials,
+    };
+}
+
 core::Result<std::optional<ResolvedSceneSurface>>
 resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray) {
     const auto scene = acceleration.frame_scene();
@@ -507,6 +736,28 @@ resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray
         return std::unexpected(resolved.error());
     }
     return std::optional<ResolvedSceneSurface>{std::move(*resolved)};
+}
+
+core::Result<std::optional<ResolvedSceneSurfaceWithDifferentials>>
+resolve_scene_surface(const AccelBackend& acceleration, const renderer::RayDifferential& ray) {
+    const auto scene = acceleration.frame_scene();
+    if (!scene) {
+        return std::unexpected(
+            surface_error(core::StatusCode::internal_error,
+                          "The acceleration backend has no committed frame scene."));
+    }
+    const auto hit = acceleration.closest_hit(ray.ray());
+    if (!hit) {
+        return std::unexpected(hit.error());
+    }
+    if (!*hit) {
+        return std::optional<ResolvedSceneSurfaceWithDifferentials>{};
+    }
+    auto resolved = resolve_scene_surface_hit(*scene, **hit, ray);
+    if (!resolved) {
+        return std::unexpected(resolved.error());
+    }
+    return std::optional<ResolvedSceneSurfaceWithDifferentials>{std::move(*resolved)};
 }
 
 } // namespace blackframe::engine

@@ -6,7 +6,7 @@
     "files": [
       {
         "path": "Tests/Renderer/CMakeLists.txt",
-        "sha256": "922386c864c6b7b3352a470849ba33e1124f48a2deb6ec0e655069e335d6a960"
+        "sha256": "083d2dbbc0764b6057fe8a24c24ada7a3d39b1e3bba1ef88f22f113dae4b713e"
       },
       {
         "path": "Tests/Renderer/CornellDiffuseImageRenderer.hpp",

@@ -57,6 +57,7 @@ add_library(
         Include/Blackframe/Renderer/PunctualLights.hpp
         Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/Ray.hpp
+        Include/Blackframe/Renderer/RayDifferential.hpp
         Include/Blackframe/Renderer/RayDiagnostics.hpp
         Include/Blackframe/Renderer/RayOriginOffset.hpp
         Include/Blackframe/Renderer/RenderConfiguration.hpp
@@ -77,6 +78,7 @@ add_library(
         Include/Blackframe/Renderer/Sphere.hpp
         Include/Blackframe/Renderer/StratifiedSampling.hpp
         Include/Blackframe/Renderer/SurfaceInteraction.hpp
+        Include/Blackframe/Renderer/TextureCoordinateDifferentials.hpp
         Include/Blackframe/Renderer/TextureColorSpace.hpp
         Include/Blackframe/Renderer/TextureWrap.hpp
         Include/Blackframe/Renderer/Transforms.hpp

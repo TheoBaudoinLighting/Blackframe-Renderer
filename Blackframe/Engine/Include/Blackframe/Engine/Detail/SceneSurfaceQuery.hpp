@@ -11,6 +11,7 @@ namespace blackframe::engine::detail {
 // runtime transport or acceleration interface.
 struct ScenePathSurface final {
     ResolvedSceneSurface surface;
+    std::optional<ResolvedSceneSurfaceDifferentials> ray_differentials;
 
     [[nodiscard]] const renderer::SurfaceInteraction& interaction() const noexcept {
         return surface.interaction;
@@ -43,6 +44,11 @@ struct ScenePathSurface final {
     [[nodiscard]] const renderer::Vector3& position_error() const noexcept {
         return surface.position_error;
     }
+
+    [[nodiscard]] const std::optional<ResolvedSceneSurfaceDifferentials>&
+    differentials() const noexcept {
+        return ray_differentials;
+    }
 };
 
 class SceneSurfaceQuery final {
@@ -65,7 +71,25 @@ class SceneSurfaceQuery final {
         if (!*resolved) {
             return std::optional<ScenePathSurface>{};
         }
-        return std::optional<ScenePathSurface>{ScenePathSurface{.surface = std::move(**resolved)}};
+        return std::optional<ScenePathSurface>{ScenePathSurface{
+            .surface = std::move(**resolved),
+            .ray_differentials = std::nullopt,
+        }};
+    }
+
+    [[nodiscard]] core::Result<std::optional<ScenePathSurface>>
+    closest_hit(const renderer::RayDifferential& ray) const {
+        auto resolved = resolve_scene_surface(acceleration_, ray);
+        if (!resolved) {
+            return std::unexpected(resolved.error());
+        }
+        if (!*resolved) {
+            return std::optional<ScenePathSurface>{};
+        }
+        return std::optional<ScenePathSurface>{ScenePathSurface{
+            .surface = std::move((**resolved).surface),
+            .ray_differentials = std::move((**resolved).differentials),
+        }};
     }
 
   private:
