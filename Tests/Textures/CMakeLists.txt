@@ -34,6 +34,7 @@ if(TARGET Blackframe::HostImage)
     add_executable(
         BlackframeHostImageCacheTests
         HostImageCacheTest.cpp
+        HostImageEwaFilterTest.cpp
         HostImageFilterTest.cpp
         HostImageMipChainTest.cpp
     )
@@ -72,4 +73,23 @@ if(TARGET Blackframe::HostImage)
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit;smoke;cpu"
     )
+
+    if(TARGET Blackframe::Png)
+        add_test(
+            NAME Blackframe.TextureEwaObliquePreview
+            COMMAND
+                "${CMAKE_COMMAND}"
+                "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeHostImageCacheTests>"
+                "-DGTEST_FILTER=HostImageEwaFilterTest.WritesStableObliqueFilteringAtlas"
+                "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-texture-ewa-oblique-800x800.png"
+                "-DEXPECTED_SHA256=cafda3ac535ddd76745db21190714a1bc9eb7e2a8abd3a0c4062d15471012ac0"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer/PngChecksumTest.cmake"
+        )
+        set_tests_properties(
+            Blackframe.TextureEwaObliquePreview
+            PROPERTIES
+                LABELS "regression;cpu"
+                TIMEOUT 60
+        )
+    endif()
 endif()
