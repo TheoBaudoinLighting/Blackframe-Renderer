@@ -1,6 +1,7 @@
 add_executable(
     BlackframeConstantTextureTests
     ConstantTextureTest.cpp
+    TextureWrapTest.cpp
 )
 blackframe_set_target_role(BlackframeConstantTextureTests test)
 

@@ -220,6 +220,11 @@ silently selecting another path.
   inferred from metadata or suffixes; color tags require exactly one named `R`, `G`, and `B`
   channel. Loading never clamps, retries another reader, or returns a substitute image. Exact
   embedded readers handle PNM/PFM, PNG, and EXR; all three families are covered by tests.
+- **Texture addressing:** addressing is defined after normalized U and V are mapped into texel
+  space. Each integer tap independently supports repeat, clamp, mirrored repeat, or black borders.
+  Per-tap addressing preserves partial filter support at image edges and avoids signed overflow.
+  Invalid modes, empty extents, and unrepresentable texel intervals fail instead of selecting a
+  default; black-border misses are represented separately from errors.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
   A deterministic tilted-normal Lambertian furnace validates both precisions against its analytic
@@ -343,8 +348,9 @@ oracle rather than an execution fallback.
 Constant textures are currently typed scene resources with explicit scalar-reference, CPU, and CUDA
 evaluation paths. They are not yet material-parameter bindings: in particular, Blackframe does not
 invent an implicit RGB-to-spectrum conversion.
-The host image cache now produces explicitly tagged working-space snapshots, but is not yet bound
-to filtered image-texture evaluation, material parameters, scene packets, or device uploads.
+The host image cache now produces explicitly tagged working-space snapshots, and texture addressing
+has an explicit host contract, but neither is yet bound to filtered image-texture evaluation,
+material parameters, scene packets, or device uploads.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between

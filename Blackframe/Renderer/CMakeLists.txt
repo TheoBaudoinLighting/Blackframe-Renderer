@@ -78,6 +78,7 @@ add_library(
         Include/Blackframe/Renderer/StratifiedSampling.hpp
         Include/Blackframe/Renderer/SurfaceInteraction.hpp
         Include/Blackframe/Renderer/TextureColorSpace.hpp
+        Include/Blackframe/Renderer/TextureWrap.hpp
         Include/Blackframe/Renderer/Transforms.hpp
         Include/Blackframe/Renderer/TransportConventionDiagnostics.hpp
         Include/Blackframe/Renderer/TransportConventions.hpp
