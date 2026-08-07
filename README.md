@@ -212,6 +212,12 @@ silently selecting another path.
 - **Film and output:** weighted float accumulation, compensated double reference accumulation,
   crops, deterministic tile fusion, a tested scene-linear 32-bit RGB OpenEXR writer, and an
   optional stb-backed PNG preview writer with a fixed display transform.
+- **Host images:** a pinned OpenImageIO loader reads the primary two-dimensional image into an
+  immutable interleaved-float snapshot and caches it by canonical absolute path. Loading preserves
+  unassociated values, exposes the selected reader's canonical channel order and performs no
+  color transform, clamp, reader retry, or substitute-image fallback. Exact embedded readers
+  handle PNM/PFM, PNG, and EXR with caller-owned color interpretation; all three families are
+  covered by tests.
 - **Validation:** linear and HDR error metrics, display-referred PSNR and heatmaps, plus debug
   encodings for normals, depth, UVs, barycentrics, and identifiers covered by five 64x64 goldens.
   A deterministic tilted-normal Lambertian furnace validates both precisions against its analytic
@@ -335,6 +341,8 @@ oracle rather than an execution fallback.
 Constant textures are currently typed scene resources with explicit scalar-reference, CPU, and CUDA
 evaluation paths. They are not yet material-parameter bindings: in particular, Blackframe does not
 invent an implicit RGB-to-spectrum conversion.
+The host image cache is not yet bound to image textures, filtering, material parameters, scene
+packets, or device uploads.
 Environment maps are not yet sampled by NEE/MIS, and the public MIS entry points start complete
 primary paths because `PathState` does not carry a prior vertex's directional PDFs. Acceleration
 updates currently cover explicit full rebuilds and frame-to-frame transform refits between
@@ -355,6 +363,8 @@ Requirements:
   Clang toolchain. Windows CUDA presets must run from a Visual Studio developer environment.
 - An internet connection for the first configuration, unless the pinned FetchContent archives are
   already populated below the selected build directory.
+- Git for OpenImageIO's verified, commit-pinned transitive dependency recipes during their first
+  configuration.
 - CUDA Toolkit 13.3.33 only when a CUDA preset is selected. Linux expects `nvcc` in `PATH`; CUDA
   architectures must be explicit, and the supplied presets target architecture 86. CUDA test
   configurations also require the matching `compute-sanitizer` shipped by that toolkit.
@@ -362,10 +372,11 @@ Requirements:
   `BLACKFRAME_ENABLE_NSIGHT_VALIDATION=ON` and requires an absolute
   `BLACKFRAME_NSYS_EXECUTABLE` path; configuration fails if that executable cannot be verified.
 
-OpenEXR, Imath, Embree, stb, GoogleTest, and Google Benchmark are fetched at immutable revisions
-with verified hashes as required by the selected configuration. All dependency sources and build
-artifacts remain below `build/`; no manual third-party source checkout is required. Enabling a
-dependency-backed feature without its required toolchain is a configuration error. Each
+OpenImageIO, OpenEXR, Imath, Embree, stb, GoogleTest, and Google Benchmark are fetched at immutable
+revisions with verified hashes as required by the selected configuration. OpenImageIO's required
+transitives are resolved by its verified commit recipes when absent. All dependency sources and
+build artifacts remain below `build/`; no manual third-party source checkout is required. Enabling
+a dependency-backed feature without its required toolchain is a configuration error. Each
 configuration also writes `blackframe-dependencies.json` and its SHA-256 file in the preset build
 directory.
 

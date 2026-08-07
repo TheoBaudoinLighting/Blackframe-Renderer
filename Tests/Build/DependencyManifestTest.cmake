@@ -74,8 +74,8 @@ endif()
 require_json_value("1" schema_version)
 require_json_value("Blackframe" project name)
 string(JSON dependency_count LENGTH "${manifest}" dependencies)
-if(NOT dependency_count EQUAL 7)
-    message(FATAL_ERROR "Dependency manifest contains ${dependency_count} entries, expected 7.")
+if(NOT dependency_count EQUAL 8)
+    message(FATAL_ERROR "Dependency manifest contains ${dependency_count} entries, expected 8.")
 endif()
 
 require_fetch_dependency(
@@ -127,20 +127,29 @@ require_fetch_dependency(
     ON
 )
 
-require_json_value("CUDA Toolkit" dependencies 6 name)
-require_json_value("system" dependencies 6 kind)
+require_fetch_dependency(
+    6
+    "OpenImageIO"
+    "${OPENIMAGEIO_VERSION}"
+    "${OPENIMAGEIO_REVISION}"
+    "${OPENIMAGEIO_SHA256}"
+    "${OPENIMAGEIO_ENABLED}"
+)
+
+require_json_value("CUDA Toolkit" dependencies 7 name)
+require_json_value("system" dependencies 7 kind)
 if(CUDA_ENABLED)
     set(expected_cuda_enabled ON)
 else()
     set(expected_cuda_enabled OFF)
 endif()
-require_json_value("${expected_cuda_enabled}" dependencies 6 enabled)
-require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 6 version)
-require_json_value("ON" dependencies 6 exact)
+require_json_value("${expected_cuda_enabled}" dependencies 7 enabled)
+require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 7 version)
+require_json_value("ON" dependencies 7 exact)
 
-string(JSON manifest_cuda_architecture_count LENGTH "${manifest}" dependencies 6 architectures)
+string(JSON manifest_cuda_architecture_count LENGTH "${manifest}" dependencies 7 architectures)
 if(CUDA_ENABLED)
-    require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 6 resolved_version)
+    require_json_value("${CUDA_TOOLKIT_VERSION}" dependencies 7 resolved_version)
 
     list(LENGTH CUDA_ARCHITECTURES expected_cuda_architecture_count)
     if(NOT manifest_cuda_architecture_count EQUAL expected_cuda_architecture_count)
@@ -152,7 +161,7 @@ if(CUDA_ENABLED)
         require_json_value(
             "${cuda_architecture}"
             dependencies
-            6
+            7
             architectures
             "${cuda_architecture_index}"
         )

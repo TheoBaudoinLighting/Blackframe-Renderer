@@ -20,7 +20,8 @@
         "BLACKFRAME_BUILD_REFERENCE_PLUGINS": true,
         "BLACKFRAME_BUILD_DCC_MAYA": false,
         "BLACKFRAME_ENABLE_EMBREE": true,
-        "BLACKFRAME_ENABLE_STB": true
+        "BLACKFRAME_ENABLE_STB": true,
+        "BLACKFRAME_ENABLE_OPENIMAGEIO": true
       }
     },
     {

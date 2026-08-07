@@ -28,6 +28,11 @@ option(BLACKFRAME_BUILD_REFERENCE_PLUGINS "Build reference XPU plugins" ${PROJEC
 option(BLACKFRAME_BUILD_DCC_MAYA "Build the Maya DCC plugin (requires the Maya SDK)" OFF)
 option(BLACKFRAME_ENABLE_EMBREE "Fetch the Embree 4 CPU ray-query dependency" ${PROJECT_IS_TOP_LEVEL})
 option(BLACKFRAME_ENABLE_STB "Fetch the stb image utility headers" ${PROJECT_IS_TOP_LEVEL})
+option(
+    BLACKFRAME_ENABLE_OPENIMAGEIO
+    "Fetch OpenImageIO for deterministic host image loading and caching"
+    ${PROJECT_IS_TOP_LEVEL}
+)
 option(BLACKFRAME_ENABLE_CUDA "Expose the locally installed CUDA toolkit" ${PROJECT_IS_TOP_LEVEL})
 option(
     BLACKFRAME_ENABLE_NSIGHT_VALIDATION
@@ -112,6 +117,10 @@ if(BLACKFRAME_ENABLE_STB)
 endif()
 
 blackframe_fetch_openexr()
+
+if(BLACKFRAME_ENABLE_OPENIMAGEIO)
+    blackframe_fetch_openimageio()
+endif()
 
 if(BUILD_TESTING)
     blackframe_fetch_googletest()

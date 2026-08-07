@@ -1,0 +1,55 @@
+include_guard(GLOBAL)
+
+set(blackframe_parent_toolchain [==[@CMAKE_TOOLCHAIN_FILE@]==])
+if(NOT blackframe_parent_toolchain STREQUAL "")
+    include("${blackframe_parent_toolchain}")
+endif()
+unset(blackframe_parent_toolchain)
+
+# OIIO and OpenColorIO both create nested CMake projects. Pin those projects
+# to the already-selected parent toolchain instead of re-detecting from PATH.
+set(CMAKE_C_COMPILER [==[@CMAKE_C_COMPILER@]==] CACHE FILEPATH "" FORCE)
+set(CMAKE_CXX_COMPILER [==[@CMAKE_CXX_COMPILER@]==] CACHE FILEPATH "" FORCE)
+set(CMAKE_MAKE_PROGRAM [==[@CMAKE_MAKE_PROGRAM@]==] CACHE FILEPATH "" FORCE)
+
+function(blackframe_set_toolchain_cache variable_name variable_value)
+    if(NOT variable_value STREQUAL "")
+        set(
+            ${variable_name}
+            "${variable_value}"
+            CACHE STRING
+            ""
+            FORCE
+        )
+    endif()
+endfunction()
+
+blackframe_set_toolchain_cache(
+    CMAKE_C_COMPILER_TARGET
+    [==[@CMAKE_C_COMPILER_TARGET@]==]
+)
+blackframe_set_toolchain_cache(
+    CMAKE_CXX_COMPILER_TARGET
+    [==[@CMAKE_CXX_COMPILER_TARGET@]==]
+)
+blackframe_set_toolchain_cache(
+    CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN
+    [==[@CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN@]==]
+)
+blackframe_set_toolchain_cache(
+    CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN
+    [==[@CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN@]==]
+)
+blackframe_set_toolchain_cache(CMAKE_SYSROOT [==[@CMAKE_SYSROOT@]==])
+blackframe_set_toolchain_cache(
+    CMAKE_OSX_ARCHITECTURES
+    [==[@CMAKE_OSX_ARCHITECTURES@]==]
+)
+blackframe_set_toolchain_cache(
+    CMAKE_OSX_DEPLOYMENT_TARGET
+    [==[@CMAKE_OSX_DEPLOYMENT_TARGET@]==]
+)
+blackframe_set_toolchain_cache(
+    CMAKE_MSVC_RUNTIME_LIBRARY
+    [==[@CMAKE_MSVC_RUNTIME_LIBRARY@]==]
+)

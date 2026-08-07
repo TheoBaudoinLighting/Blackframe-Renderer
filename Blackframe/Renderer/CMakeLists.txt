@@ -173,6 +173,40 @@ set_target_properties(
         DEBUG_POSTFIX d
 )
 
+if(TARGET Blackframe::OpenImageIo)
+    add_library(
+        BlackframeHostImage
+        STATIC
+            Include/Blackframe/Renderer/HostImageCache.hpp
+            Source/HostImageCache.cpp
+    )
+    add_library(Blackframe::HostImage ALIAS BlackframeHostImage)
+    blackframe_set_target_role(BlackframeHostImage renderer_io)
+
+    target_include_directories(
+        BlackframeHostImage
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+
+    target_link_libraries(
+        BlackframeHostImage
+        PUBLIC
+            Blackframe::Renderer
+        PRIVATE
+            Blackframe::OpenImageIo
+            Blackframe::ProjectOptions
+    )
+
+    set_target_properties(
+        BlackframeHostImage
+        PROPERTIES
+            OUTPUT_NAME BlackframeHostImage
+            DEBUG_POSTFIX d
+    )
+endif()
+
 if(TARGET Blackframe::Stb)
     add_library(
         BlackframePng
