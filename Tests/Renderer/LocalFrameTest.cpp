@@ -108,6 +108,41 @@ TEST(LocalFrameTest, OrthogonalizesAnExplicitTangent) {
     EXPECT_GT(dot(frame->tangent(), Vector3{.x = 2.0F, .y = 1.0F, .z = 0.0F}), 0.0F);
 }
 
+TEST(LocalFrameTest, RestoresValidatedSnapshotAxesExactlyWithoutRenormalizing) {
+    const auto source = OrthonormalFrame::from_normal_and_tangent(
+        Normal3{.x = 0.2F, .y = 0.3F, .z = 1.0F}, Vector3{.x = 1.0F, .y = -0.1F, .z = -0.17F});
+    ASSERT_TRUE(source.has_value()) << source.error().message;
+
+    const auto restored = OrthonormalFrame::from_orthonormal_axes(
+        source->tangent(), source->bitangent(), source->normal());
+
+    ASSERT_TRUE(restored.has_value()) << restored.error().message;
+    EXPECT_EQ(restored->tangent(), source->tangent());
+    EXPECT_EQ(restored->bitangent(), source->bitangent());
+    EXPECT_EQ(restored->normal(), source->normal());
+}
+
+TEST(LocalFrameTest, RejectsInvalidSnapshotAxesWithoutRepair) {
+    constexpr auto tangent = Vector3{.x = 1.0F};
+    constexpr auto bitangent = Vector3{.y = 1.0F};
+    constexpr auto normal = Normal3{.z = 1.0F};
+
+    const auto non_unit =
+        OrthonormalFrame::from_orthonormal_axes(Vector3{.x = 2.0F}, bitangent, normal);
+    const auto non_orthogonal =
+        OrthonormalFrame::from_orthonormal_axes(tangent, Vector3{.x = 0.25F, .y = 1.0F}, normal);
+    const auto left_handed =
+        OrthonormalFrame::from_orthonormal_axes(tangent, Vector3{.y = -1.0F}, normal);
+    const auto non_finite = OrthonormalFrame::from_orthonormal_axes(
+        tangent, bitangent, Normal3{.z = std::numeric_limits<TransportScalar>::infinity()});
+
+    for (const auto* result : {&non_unit, &non_orthogonal, &left_handed, &non_finite}) {
+        ASSERT_FALSE(result->has_value());
+        EXPECT_EQ(result->error().code, core::StatusCode::invalid_argument);
+        EXPECT_FALSE(result->error().message.empty());
+    }
+}
+
 TEST(LocalFrameTest, RejectsDegenerateInputsWithoutChoosingAnotherAxis) {
     const auto zero_normal = OrthonormalFrame::from_normal(Normal3{});
     ASSERT_FALSE(zero_normal.has_value());

@@ -7,6 +7,7 @@ add_library(
         Include/Blackframe/Engine/FrameScene.hpp
         Include/Blackframe/Engine/SceneBsdfOnlyPathLoop.hpp
         Include/Blackframe/Engine/SceneDescription.hpp
+        Include/Blackframe/Engine/SceneDescriptionJson.hpp
         Include/Blackframe/Engine/SceneMisPathLoop.hpp
         Include/Blackframe/Engine/SceneMisStages.hpp
         Include/Blackframe/Engine/SceneNeePathLoop.hpp
@@ -18,6 +19,8 @@ add_library(
         Source/FrameScene.cpp
         Source/SceneBsdfOnlyPathLoop.cpp
         Source/SceneDescription.cpp
+        Source/SceneDescriptionJsonReader.cpp
+        Source/SceneDescriptionJsonWriter.cpp
         Source/SceneHierarchyValidation.cpp
         Source/SceneHierarchyValidation.hpp
         Source/SceneMisPathLoop.cpp
@@ -25,6 +28,8 @@ add_library(
         Source/SceneNeePathLoop.cpp
         Source/SceneRecordValidation.cpp
         Source/SceneRecordValidation.hpp
+        Source/SceneJsonSyntax.cpp
+        Source/SceneJsonSyntax.hpp
         Source/SceneSurfaceInteraction.cpp
         Source/SceneVisibility.cpp
         Source/TriangleMesh.cpp

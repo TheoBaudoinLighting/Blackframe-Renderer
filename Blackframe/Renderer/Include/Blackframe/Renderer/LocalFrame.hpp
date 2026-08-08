@@ -116,6 +116,21 @@ template <GeometryScalar Scalar> class OrthonormalFrameT final {
         return from_unit_normal_and_tangent(*unit_normal, tangent);
     }
 
+    // Restores an already canonical frame without renormalizing its components. This is intended
+    // for validated immutable snapshots whose exact axes must survive serialization. All three
+    // axes remain mandatory: no missing or invalid axis is reconstructed from the other two.
+    [[nodiscard]] static core::Result<OrthonormalFrameT>
+    from_orthonormal_axes(const Vector3T<Scalar> tangent, const Vector3T<Scalar> bitangent,
+                          const Normal3T<Scalar> normal) {
+        if (!local_frame_detail::orthonormal(tangent, bitangent, normal)) {
+            return std::unexpected(core::Error{
+                .code = core::StatusCode::invalid_argument,
+                .message = "Snapshot frame axes must be finite, orthonormal, and right-handed.",
+            });
+        }
+        return OrthonormalFrameT{tangent, bitangent, normal};
+    }
+
     [[nodiscard]] const Vector3T<Scalar>& tangent() const noexcept {
         return tangent_;
     }

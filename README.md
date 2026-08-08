@@ -26,6 +26,8 @@ or unsupported path fails before rendering instead of silently choosing a substi
   geometric and shading normals separate and expose UVs, derivatives, stable IDs, and time.
 - Immutable `FrameScene` snapshots own stable object, geometry, material, texture, light, and
   instance identifiers. Nested transforms are resolved when the snapshot closes.
+- Backend-free `SceneDescription` values have a strict versioned native JSON codec with canonical
+  output, inline mesh/image snapshots, hard budgets, and explicit schema errors.
 - Strict OBJ and ASCII PLY import validates positions, normals, UVs, and triangle indices.
   Compacted meshes retain contiguous position, normal, UV, and index storage without duplicating
   aligned vertices unnecessarily.
@@ -117,8 +119,8 @@ SMAPE, mean bias, heatmaps, time, rays, samples, queue statistics, and memory wh
 
 ## Current limitations
 
-- There is no general scene-file loader or command-line scene renderer yet. The Cornell JSON files
-  are closed validation descriptors, not an interchange format.
+- The native scene codec is not wired to a command-line file loader yet. The Cornell JSON files are
+  closed validation descriptors and do not use that format.
 - Transport is vacuum-only. Unsupported media are rejected.
 - Image textures currently bind only to normal and bump material slots; reflectance and emission
   image parameters are not connected yet. Blackframe does not invent an implicit RGB-to-spectrum
