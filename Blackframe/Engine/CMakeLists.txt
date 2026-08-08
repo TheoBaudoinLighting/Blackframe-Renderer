@@ -6,6 +6,7 @@ add_library(
         Include/Blackframe/Engine/Detail/SceneSurfaceQuery.hpp
         Include/Blackframe/Engine/FrameScene.hpp
         Include/Blackframe/Engine/SceneBsdfOnlyPathLoop.hpp
+        Include/Blackframe/Engine/SceneDescription.hpp
         Include/Blackframe/Engine/SceneMisPathLoop.hpp
         Include/Blackframe/Engine/SceneMisStages.hpp
         Include/Blackframe/Engine/SceneNeePathLoop.hpp
@@ -16,9 +17,14 @@ add_library(
         Source/ConstantTextureEvaluation.cpp
         Source/FrameScene.cpp
         Source/SceneBsdfOnlyPathLoop.cpp
+        Source/SceneDescription.cpp
+        Source/SceneHierarchyValidation.cpp
+        Source/SceneHierarchyValidation.hpp
         Source/SceneMisPathLoop.cpp
         Source/SceneMisStages.cpp
         Source/SceneNeePathLoop.cpp
+        Source/SceneRecordValidation.cpp
+        Source/SceneRecordValidation.hpp
         Source/SceneSurfaceInteraction.cpp
         Source/SceneVisibility.cpp
         Source/TriangleMesh.cpp

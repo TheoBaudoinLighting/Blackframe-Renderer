@@ -35,6 +35,7 @@ add_executable(
     BlackframeSceneTests
     ConstantTextureEvaluationTest.cpp
     FrameSceneTest.cpp
+    SceneDescriptionTest.cpp
 )
 blackframe_set_target_role(BlackframeSceneTests test)
 

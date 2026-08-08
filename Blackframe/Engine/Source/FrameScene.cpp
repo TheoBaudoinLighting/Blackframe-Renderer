@@ -1,3 +1,6 @@
+#include "SceneHierarchyValidation.hpp"
+#include "SceneRecordValidation.hpp"
+
 #include <Blackframe/Engine/FrameScene.hpp>
 #include <Blackframe/Renderer/ClosureMixture.hpp>
 #include <Blackframe/Renderer/Emission.hpp>
@@ -92,153 +95,6 @@ validate_punctual_light(const ScenePunctualLight& record,
         record);
 }
 
-[[nodiscard]] core::Status validate_constant_texture(const SceneConstantTexture& record) {
-    if (record.texture.valueless_by_exception()) {
-        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
-                                           "A frame scene constant-texture slot has no value."));
-    }
-
-    return std::visit(
-        [](const auto& texture) -> core::Status {
-            const auto canonical = std::remove_cvref_t<decltype(texture)>::create(texture.value());
-            if (!canonical) {
-                return std::unexpected(canonical.error());
-            }
-            return {};
-        },
-        record.texture);
-}
-
-template <typename Record, typename Identifier>
-[[nodiscard]] std::optional<std::size_t> find_record_index(const std::vector<Record>& records,
-                                                           Identifier id) noexcept;
-
-[[nodiscard]] core::Status validate_host_image_texture(const SceneHostImageTexture& record) {
-    if (!record.image) {
-        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
-                                           "A frame scene host-image texture requires an immutable "
-                                           "mip chain."));
-    }
-    const auto source = record.image->source_image();
-    if (!source || record.image->level_count() == 0U || source->channel_count() == 0U) {
-        return std::unexpected(scene_error(
-            core::StatusCode::invalid_argument,
-            "A frame scene host-image texture requires a non-empty immutable mip chain."));
-    }
-    if (source->source_color_space() != renderer::TextureColorSpace::data ||
-        source->storage_color_space() != renderer::TextureColorSpace::data) {
-        return std::unexpected(scene_error(
-            core::StatusCode::invalid_argument,
-            "A frame scene surface-detail texture must use the explicit data source and storage "
-            "color spaces."));
-    }
-    return {};
-}
-
-[[nodiscard]] core::Status
-reject_shared_texture_identifiers(const std::vector<SceneConstantTexture>& constants,
-                                  const std::vector<SceneHostImageTexture>& host_images) {
-    auto constant = constants.begin();
-    auto host_image = host_images.begin();
-    while (constant != constants.end() && host_image != host_images.end()) {
-        if (constant->id == host_image->id) {
-            return std::unexpected(
-                scene_error(core::StatusCode::invalid_argument,
-                            "A texture identifier cannot name both a constant and a host image."));
-        }
-        if (constant->id.value < host_image->id.value) {
-            ++constant;
-        } else {
-            ++host_image;
-        }
-    }
-    return {};
-}
-
-[[nodiscard]] bool valid_ewa_limits(const renderer::HostImageEwaLimits limits) noexcept {
-    return limits.maximum_anisotropy >= 1U &&
-           limits.maximum_anisotropy <= renderer::HostImageEwaMaximumAnisotropy &&
-           limits.maximum_texel_visits > 0U;
-}
-
-template <typename Binding>
-[[nodiscard]] core::Result<std::reference_wrapper<const SceneHostImageTexture>>
-validate_surface_map_binding(const std::vector<SceneHostImageTexture>& textures,
-                             const Binding& binding) {
-    if (!renderer::is_valid_texture_wrap_mode(binding.u_wrap) ||
-        !renderer::is_valid_texture_wrap_mode(binding.v_wrap)) {
-        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
-                                           "A frame scene surface map requires explicit valid wrap "
-                                           "modes."));
-    }
-    if (!valid_ewa_limits(binding.ewa_limits)) {
-        return std::unexpected(
-            scene_error(core::StatusCode::invalid_argument,
-                        "A frame scene surface map requires valid bounded EWA limits."));
-    }
-    const auto index = find_record_index(textures, binding.texture);
-    if (!index) {
-        return std::unexpected(scene_error(
-            core::StatusCode::invalid_argument,
-            "A frame scene surface map references an unknown host-image texture identifier."));
-    }
-    return std::cref(textures[*index]);
-}
-
-[[nodiscard]] core::Status
-validate_normal_map_binding(const std::vector<SceneHostImageTexture>& textures,
-                            const SceneNormalMapBinding& binding) {
-    switch (binding.y_convention) {
-    case renderer::TangentSpaceNormalYConvention::positive_v:
-    case renderer::TangentSpaceNormalYConvention::negative_v:
-        break;
-    default:
-        return std::unexpected(
-            scene_error(core::StatusCode::invalid_argument,
-                        "A frame scene normal map requires an explicit supported Y convention."));
-    }
-    const auto texture = validate_surface_map_binding(textures, binding);
-    if (!texture) {
-        return std::unexpected(texture.error());
-    }
-    const auto source = texture->get().image->source_image();
-    const auto channels = source->channel_count();
-    if (binding.red_channel >= channels || binding.green_channel >= channels ||
-        binding.blue_channel >= channels) {
-        return std::unexpected(
-            scene_error(core::StatusCode::invalid_argument,
-                        "A frame scene normal map channel lies outside its host image."));
-    }
-    if (binding.red_channel == binding.green_channel ||
-        binding.red_channel == binding.blue_channel ||
-        binding.green_channel == binding.blue_channel) {
-        return std::unexpected(
-            scene_error(core::StatusCode::invalid_argument,
-                        "A frame scene normal map requires three distinct source channels."));
-    }
-    return {};
-}
-
-[[nodiscard]] core::Status
-validate_bump_map_binding(const std::vector<SceneHostImageTexture>& textures,
-                          const SceneBumpMapBinding& binding) {
-    if (!std::isfinite(binding.scale)) {
-        return std::unexpected(
-            scene_error(core::StatusCode::invalid_argument,
-                        "A frame scene bump map requires a finite signed scale."));
-    }
-    const auto texture = validate_surface_map_binding(textures, binding);
-    if (!texture) {
-        return std::unexpected(texture.error());
-    }
-    if (binding.channel >= texture->get().image->source_image()->channel_count()) {
-        return std::unexpected(
-            scene_error(core::StatusCode::invalid_argument,
-                        "A frame scene bump map channel lies outside its host image."));
-    }
-    return {};
-}
-
 template <typename Record, typename Identifier>
 [[nodiscard]] std::optional<std::size_t> find_record_index(const std::vector<Record>& records,
                                                            const Identifier id) noexcept {
@@ -262,17 +118,6 @@ find_record(const std::vector<Record>& records, const Identifier id,
     return std::cref(*candidate);
 }
 
-enum class HierarchyState : std::uint8_t {
-    unresolved,
-    resolving,
-    resolved,
-};
-
-struct ResolvedInstanceTransforms final {
-    std::vector<renderer::AffineTransform> local;
-    std::vector<renderer::AffineTransform> world;
-};
-
 struct TransformedMeshPositions final {
     std::vector<renderer::Point3> positions;
     renderer::Vector3 absolute_position_error;
@@ -293,35 +138,6 @@ canonical_tangent_rotation(const renderer::TransportScalar tangent_rotation_radi
     constexpr auto pi = std::numbers::pi_v<renderer::TransportScalar>;
     return std::isfinite(tangent_rotation_radians) && tangent_rotation_radians >= -pi &&
            tangent_rotation_radians < pi;
-}
-
-[[nodiscard]] core::Status
-validate_scene_closure_mixture(const SceneClosureMixture& closure_mixture) {
-    const auto canonical = SceneClosureMixture::create(
-        closure_mixture.closures, closure_mixture.active_component_probabilities(),
-        closure_mixture.frame_mode, closure_mixture.tangent_rotation_radians);
-    if (!canonical) {
-        return std::unexpected(canonical.error());
-    }
-
-    const auto active_count = static_cast<std::size_t>(closure_mixture.closures.size());
-    const auto inactive_probabilities = std::span<const renderer::TransportScalar>{
-        closure_mixture.component_probabilities.data() + active_count,
-        closure_mixture.component_probabilities.size() - active_count,
-    };
-    if (std::ranges::any_of(inactive_probabilities,
-                            [](const auto probability) { return probability != 0.0F; })) {
-        return std::unexpected(scene_error(
-            core::StatusCode::invalid_argument,
-            "A frame scene closure mixture requires an exactly zero inactive probability tail."));
-    }
-    if (!std::ranges::equal(canonical->active_component_probabilities(),
-                            closure_mixture.active_component_probabilities())) {
-        return std::unexpected(scene_error(
-            core::StatusCode::invalid_argument,
-            "A frame scene closure mixture requires canonical component probabilities."));
-    }
-    return {};
 }
 
 [[nodiscard]] core::Result<TransformedMeshPositions>
@@ -506,7 +322,8 @@ derive_mesh_area_lights(const FrameSceneDescription& description,
                 core::StatusCode::invalid_argument,
                 "Frame scene materials and environment must use the same wavelength packet."));
         }
-        if (auto status = validate_scene_closure_mixture(material.spectral->closure_mixture);
+        if (auto status = scene_record_validation::validate_closure_mixture(
+                material.spectral->closure_mixture);
             !status) {
             return std::unexpected(std::move(status.error()));
         }
@@ -516,122 +333,21 @@ derive_mesh_area_lights(const FrameSceneDescription& description,
                 "A frame scene material requires finite non-negative emitted radiance."));
         }
         if (material.spectral->normal_map) {
-            if (auto status = validate_normal_map_binding(description.host_image_textures,
-                                                          *material.spectral->normal_map);
+            if (auto status = scene_record_validation::validate_normal_map_binding(
+                    description.host_image_textures, *material.spectral->normal_map);
                 !status) {
                 return std::unexpected(std::move(status.error()));
             }
         }
         if (material.spectral->bump_map) {
-            if (auto status = validate_bump_map_binding(description.host_image_textures,
-                                                        *material.spectral->bump_map);
+            if (auto status = scene_record_validation::validate_bump_map_binding(
+                    description.host_image_textures, *material.spectral->bump_map);
                 !status) {
                 return std::unexpected(std::move(status.error()));
             }
         }
     }
     return {};
-}
-
-[[nodiscard]] core::Result<ResolvedInstanceTransforms>
-resolve_instance_transforms(const std::vector<SceneInstance>& instances) {
-    auto resolved = ResolvedInstanceTransforms{};
-    auto states = std::vector<HierarchyState>{};
-    auto pending_world = std::vector<std::optional<renderer::AffineTransform>>{};
-    auto chain = std::vector<std::size_t>{};
-    const auto instance_count = instances.size();
-    if (instance_count > resolved.local.max_size() || instance_count > resolved.world.max_size() ||
-        instance_count > states.max_size() || instance_count > pending_world.max_size() ||
-        instance_count > chain.max_size()) {
-        return std::unexpected(scene_error(core::StatusCode::resource_exhausted,
-                                           "Frame scene hierarchy exceeds host container limits."));
-    }
-
-    resolved.local.reserve(instances.size());
-    for (const auto& instance : instances) {
-        auto local = renderer::AffineTransform::from_matrix(instance.local_to_parent);
-        if (!local) {
-            return std::unexpected(
-                scene_error(core::StatusCode::invalid_argument,
-                            "A frame scene instance local transform must be finite, affine, "
-                            "and invertible."));
-        }
-        resolved.local.push_back(std::move(*local));
-    }
-
-    states.assign(instances.size(), HierarchyState::unresolved);
-    pending_world.resize(instances.size());
-    chain.reserve(instances.size());
-
-    for (std::size_t start = 0; start < instances.size(); ++start) {
-        if (states[start] == HierarchyState::resolved) {
-            continue;
-        }
-
-        chain.clear();
-        auto current = start;
-        while (states[current] != HierarchyState::resolved) {
-            if (states[current] == HierarchyState::resolving) {
-                return std::unexpected(
-                    scene_error(core::StatusCode::invalid_argument,
-                                "A frame scene instance hierarchy contains a cycle."));
-            }
-
-            states[current] = HierarchyState::resolving;
-            chain.push_back(current);
-            if (!instances[current].parent) {
-                break;
-            }
-
-            const auto parent_index = find_record_index(instances, *instances[current].parent);
-            if (!parent_index) {
-                return std::unexpected(
-                    scene_error(core::StatusCode::invalid_argument,
-                                "A frame scene instance references an unknown parent instance."));
-            }
-            current = *parent_index;
-        }
-
-        while (!chain.empty()) {
-            const auto instance_index = chain.back();
-            chain.pop_back();
-            const auto& instance = instances[instance_index];
-
-            if (instance.parent) {
-                const auto parent_index = find_record_index(instances, *instance.parent);
-                if (!parent_index || states[*parent_index] != HierarchyState::resolved ||
-                    !pending_world[*parent_index]) {
-                    return std::unexpected(
-                        scene_error(core::StatusCode::internal_error,
-                                    "Frame scene hierarchy resolution lost a validated parent."));
-                }
-
-                auto world =
-                    renderer::AffineTransform::from_matrix(pending_world[*parent_index]->matrix() *
-                                                           resolved.local[instance_index].matrix());
-                if (!world) {
-                    return std::unexpected(scene_error(
-                        core::StatusCode::invalid_argument,
-                        "A frame scene hierarchy produced an invalid world transform."));
-                }
-                pending_world[instance_index] = std::move(*world);
-            } else {
-                pending_world[instance_index] = resolved.local[instance_index];
-            }
-            states[instance_index] = HierarchyState::resolved;
-        }
-    }
-
-    resolved.world.reserve(instances.size());
-    for (auto& world : pending_world) {
-        if (!world) {
-            return std::unexpected(
-                scene_error(core::StatusCode::internal_error,
-                            "Frame scene hierarchy resolution left an instance unresolved."));
-        }
-        resolved.world.push_back(std::move(*world));
-    }
-    return resolved;
 }
 
 } // namespace
@@ -715,8 +431,8 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
             !status) {
             return std::unexpected(std::move(status.error()));
         }
-        if (auto status = reject_shared_texture_identifiers(description.constant_textures,
-                                                            description.host_image_textures);
+        if (auto status = scene_record_validation::reject_shared_texture_identifiers(
+                description.constant_textures, description.host_image_textures);
             !status) {
             return std::unexpected(std::move(status.error()));
         }
@@ -742,12 +458,14 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
         }
 
         for (const auto& texture : description.constant_textures) {
-            if (auto status = validate_constant_texture(texture); !status) {
+            if (auto status = scene_record_validation::validate_constant_texture(texture);
+                !status) {
                 return std::unexpected(std::move(status.error()));
             }
         }
         for (const auto& texture : description.host_image_textures) {
-            if (auto status = validate_host_image_texture(texture); !status) {
+            if (auto status = scene_record_validation::validate_host_image_texture(texture);
+                !status) {
                 return std::unexpected(std::move(status.error()));
             }
         }
@@ -787,7 +505,8 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
             return std::unexpected(std::move(status.error()));
         }
 
-        auto transforms = resolve_instance_transforms(description.instances);
+        auto transforms =
+            scene_hierarchy_validation::resolve_instance_transforms(description.instances);
         if (!transforms) {
             return std::unexpected(std::move(transforms.error()));
         }
