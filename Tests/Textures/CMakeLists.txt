@@ -37,6 +37,7 @@ if(TARGET Blackframe::HostImage)
         HostImageEwaFilterTest.cpp
         HostImageFilterTest.cpp
         HostImageMipChainTest.cpp
+        HostUdimTextureTest.cpp
     )
     blackframe_set_target_role(BlackframeHostImageCacheTests test)
     target_link_libraries(
@@ -87,6 +88,23 @@ if(TARGET Blackframe::HostImage)
         )
         set_tests_properties(
             Blackframe.TextureEwaObliquePreview
+            PROPERTIES
+                LABELS "regression;cpu"
+                TIMEOUT 60
+        )
+
+        add_test(
+            NAME Blackframe.TextureUdimGridPreview
+            COMMAND
+                "${CMAKE_COMMAND}"
+                "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeHostImageCacheTests>"
+                "-DGTEST_FILTER=HostUdimTextureTest.WritesStableMultiUdimGrid"
+                "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-texture-udim-grid-800x800.png"
+                "-DEXPECTED_SHA256=5fa22126d136ce934513162d3052a73b63d904fada4bdcdf2d70061127902268"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer/PngChecksumTest.cmake"
+        )
+        set_tests_properties(
+            Blackframe.TextureUdimGridPreview
             PROPERTIES
                 LABELS "regression;cpu"
                 TIMEOUT 60

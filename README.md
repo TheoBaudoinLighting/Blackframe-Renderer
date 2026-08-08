@@ -83,6 +83,9 @@ NVTX ranges, and reusable RAII workspaces with explicit out-of-memory reporting.
   including odd extents. Trilinear sampling blends bilinear results at an explicit finite LOD.
 - Host EWA filtering consumes an explicit UV footprint, bounds anisotropy and texel visits, and
   evaluates the same Gaussian ellipse in float transport or double reference precision.
+- Host UDIM descriptors resolve one `<UDIM>` token with standard ten-column numbering and return
+  the addressed image plus tile-local UVs. Missing tiles fail explicitly instead of selecting a
+  neighbor, tile 1001, or a diagnostic color.
 - Constant float, color, and spectrum textures are evaluated by scalar, CPU, and CUDA backends.
   Invalid tags, modes, coordinates, channels, budgets, or LODs fail explicitly.
 

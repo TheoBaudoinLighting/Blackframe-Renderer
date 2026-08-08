@@ -185,9 +185,11 @@ if(TARGET Blackframe::OpenImageIo)
             Include/Blackframe/Renderer/HostImageCache.hpp
             Include/Blackframe/Renderer/HostImageFilter.hpp
             Include/Blackframe/Renderer/HostImageMipChain.hpp
+            Include/Blackframe/Renderer/HostUdimTexture.hpp
             Source/HostImageCache.cpp
             Source/HostImageFilter.cpp
             Source/HostImageMipChain.cpp
+            Source/HostUdimTexture.cpp
     )
     add_library(Blackframe::HostImage ALIAS BlackframeHostImage)
     blackframe_set_target_role(BlackframeHostImage renderer_io)
