@@ -81,8 +81,13 @@ NVTX ranges, and reusable RAII workspaces with explicit out-of-memory reporting.
   repeat, clamp, mirrored-repeat, or black-border addressing.
 - Mip pyramids are generated from the converted snapshot down to 1x1 with exact-area box averages,
   including odd extents. Trilinear sampling blends bilinear results at an explicit finite LOD.
-- Host EWA filtering consumes an explicit UV footprint, bounds anisotropy and texel visits, and
-  evaluates the same Gaussian ellipse in float transport or double reference precision.
+- EWA filtering consumes an explicit UV footprint and bounds anisotropy and texel visits. Host
+  evaluation supports float transport and double reference precision; CUDA surface maps use the
+  same bounded float contract.
+- Spectral materials can bind data-tagged tangent-space normal maps and filtered bump maps by
+  texture ID. Normal-map Y orientation is explicit, bump gradients preserve the current shading
+  normal, and geometric normals remain unchanged for visibility and ray offsets. `scalar_ref`
+  uses ray differentials; CPU and CUDA wavefront paths use propagated ray cones.
 - Host UDIM descriptors resolve one `<UDIM>` token with standard ten-column numbering and return
   the addressed image plus tile-local UVs. Missing tiles fail explicitly instead of selecting a
   neighbor, tile 1001, or a diagnostic color.
@@ -115,8 +120,9 @@ SMAPE, mean bias, heatmaps, time, rays, samples, queue statistics, and memory wh
 - There is no general scene-file loader or command-line scene renderer yet. The Cornell JSON files
   are closed validation descriptors, not an interchange format.
 - Transport is vacuum-only. Unsupported media are rejected.
-- Host image textures are not yet bound to material parameters, scene packets, or device uploads.
-  Blackframe does not invent an implicit RGB-to-spectrum conversion.
+- Image textures currently bind only to normal and bump material slots; reflectance and emission
+  image parameters are not connected yet. Blackframe does not invent an implicit RGB-to-spectrum
+  conversion.
 - Ray cones are circular footprints. Their ideal reflection/transmission bound assumes a locally
   constant closure frame; interpolated-normal variation is not bounded. Continuous lobes have
   unbounded support, so diffuse and GGX use documented finite spread policies. Full anisotropic

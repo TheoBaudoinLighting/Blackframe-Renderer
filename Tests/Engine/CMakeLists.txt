@@ -80,6 +80,25 @@ gtest_discover_tests(
         LABELS "unit;cpu"
 )
 
+if(TARGET Blackframe::HostImage)
+    target_sources(
+        BlackframeSceneTransportTests
+        PRIVATE
+            SceneSurfaceTextureTest.cpp
+    )
+    target_link_libraries(
+        BlackframeSceneTransportTests
+        PRIVATE
+            Blackframe::HostImage
+    )
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
+    target_compile_definitions(
+        BlackframeSceneTransportTests
+        PRIVATE
+            BLACKFRAME_ENGINE_SURFACE_MAP_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+    )
+endif()
+
 add_executable(
     BlackframeAccelBackendTests
     AccelBackendContract.hpp

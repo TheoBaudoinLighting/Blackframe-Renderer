@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/Detail/BsdfOnlyPathLoop.hpp>
 #include <Blackframe/Renderer/DirectLighting.hpp>
 #include <Blackframe/Renderer/PunctualLights.hpp>
+#include <Blackframe/Renderer/RayCone.hpp>
 #include <Blackframe/Renderer/ShadingNormalCorrection.hpp>
 #include <Blackframe/Renderer/ShadowRay.hpp>
 #include <algorithm>
@@ -528,6 +529,7 @@ accumulate_weighted_emission(const renderer::TransportSpectrum& accumulated,
 
 struct RayDifferentialTracker final {
     std::optional<renderer::RayDifferential> active;
+    std::optional<renderer::RayCone> cone;
     RayDifferentialLossReason loss_reason{RayDifferentialLossReason::none};
     std::uint32_t propagated_specular_bounces{};
 };
@@ -536,7 +538,32 @@ struct RayDifferentialTracker final {
                                                     const detail::ScenePathSurface& surface,
                                                     const renderer::ClosureMixtureSample& sample,
                                                     const renderer::Vector3 outgoing_local,
+                                                    const renderer::Ray& current_ray,
                                                     const renderer::Ray& next_ray) {
+    const auto closures = surface.closures().closure_set().closures();
+    if (sample.selected_closure >= closures.size()) {
+        return std::unexpected(
+            scene_mis_error(core::StatusCode::internal_error,
+                            "A sampled delta closure does not identify a source closure record."));
+    }
+    const auto& closure = closures[sample.selected_closure];
+    if (!tracker.cone) {
+        return std::unexpected(
+            scene_mis_error(core::StatusCode::internal_error,
+                            "A scalar ray-differential path lost its required ray-cone sidecar."));
+    }
+    const auto advanced_cone =
+        renderer::advance_ray_cone(*tracker.cone, current_ray, surface.ray_parameter());
+    if (!advanced_cone) {
+        return std::unexpected(advanced_cone.error());
+    }
+    const auto propagated_cone = renderer::propagate_ray_cone_scattering(
+        *advanced_cone, closure, sample.lobes, outgoing_local, sample.incoming_local);
+    if (!propagated_cone) {
+        return std::unexpected(propagated_cone.error());
+    }
+    tracker.cone = *propagated_cone;
+
     if (!tracker.active) {
         return {};
     }
@@ -550,13 +577,6 @@ struct RayDifferentialTracker final {
             core::StatusCode::internal_error,
             "An active scalar ray differential reached a surface without differential data."));
     }
-    const auto closures = surface.closures().closure_set().closures();
-    if (sample.selected_closure >= closures.size()) {
-        return std::unexpected(
-            scene_mis_error(core::StatusCode::internal_error,
-                            "A sampled delta closure does not identify a source closure record."));
-    }
-    const auto& closure = closures[sample.selected_closure];
     const auto& differentials = *surface.differentials();
     const auto rx_position = surface.position() + differentials.positions.dpdx;
     const auto ry_position = surface.position() + differentials.positions.dpdy;
@@ -663,9 +683,20 @@ struct RayDifferentialTracker final {
     };
 
     while (true) {
-        const auto resolved = differentials != nullptr && differentials->active
-                                  ? surface_query.closest_hit(*differentials->active)
-                                  : surface_query.closest_hit(ray);
+        const auto resolved = [&]() -> core::Result<std::optional<detail::ScenePathSurface>> {
+            if (differentials == nullptr) {
+                return surface_query.closest_hit(ray);
+            }
+            if (differentials->active) {
+                return surface_query.closest_hit(*differentials->active);
+            }
+            if (!differentials->cone) {
+                return std::unexpected(scene_mis_error(
+                    core::StatusCode::internal_error,
+                    "A scalar differential path lost its ray-cone footprint sidecar."));
+            }
+            return surface_query.closest_hit(ray, *differentials->cone);
+        }();
         if (!resolved) {
             return std::unexpected(resolved.error());
         }
@@ -841,7 +872,7 @@ struct RayDifferentialTracker final {
         }
         if (differentials != nullptr) {
             const auto differential_status = update_ray_differentials(
-                *differentials, surface, bsdf_sample, outgoing_local, *next_ray);
+                *differentials, surface, bsdf_sample, outgoing_local, ray, *next_ray);
             if (!differential_status) {
                 return std::unexpected(differential_status.error());
             }
@@ -990,7 +1021,11 @@ core::Result<SceneMisRayDifferentialResult> trace_scene_mis_with_ray_differentia
     const renderer::LightSampler& light_sampler, const renderer::MisHeuristic heuristic,
     const renderer::PathDepthLimits& depth_limits,
     const renderer::RussianRoulettePolicy& roulette_policy) {
-    auto tracker = RayDifferentialTracker{.active = initial_ray};
+    const auto cone = renderer::ray_cone_from_differential(initial_ray);
+    if (!cone) {
+        return std::unexpected(cone.error());
+    }
+    auto tracker = RayDifferentialTracker{.active = initial_ray, .cone = *cone};
     auto path =
         trace_scene_mis_impl(initial_ray.ray(), initial_state, sample_stream, acceleration,
                              light_sampler, heuristic, depth_limits, roulette_policy, &tracker);

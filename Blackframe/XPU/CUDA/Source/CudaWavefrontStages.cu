@@ -88,6 +88,11 @@ constexpr auto Gamma7 = (7.0F * FloatEpsilon) / (1.0F - 7.0F * FloatEpsilon);
 constexpr auto Gamma7Double =
     (7.0 * static_cast<double>(FloatEpsilon)) / (1.0 - 7.0 * static_cast<double>(FloatEpsilon));
 constexpr auto MaximumFloat = 0x1.fffffeP+127F;
+constexpr auto ExactFloatTexelLimit = 8388608.0F;
+constexpr auto MaximumEwaAnisotropy = std::uint32_t{64U};
+constexpr auto DataTextureColorSpace = std::uint32_t{0U};
+constexpr auto MaximumTextureWrapMode = std::uint32_t{3U};
+constexpr auto MaximumNormalYConvention = std::uint32_t{1U};
 
 struct Vector3 final {
     float x{};
@@ -105,9 +110,56 @@ struct SurfaceData final {
     Vector3 position_error{};
     Vector3 geometric_normal{};
     Vector3 shading_normal{};
+    Vector2 uv{};
     Vector3 dpdu{};
     Vector3 dpdv{};
     std::uint32_t material_index{};
+};
+
+struct TextureCoordinateDifferentials final {
+    float dudx{};
+    float dvdx{};
+    float dudy{};
+    float dvdy{};
+};
+
+struct SceneImageTexture final {
+    std::uint64_t mip_offset{};
+    std::uint64_t mip_count{};
+    std::uint32_t channel_count{};
+};
+
+struct SceneImageMip final {
+    std::uint64_t texel_offset{};
+    std::uint64_t texel_count{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
+
+struct EwaFootprint final {
+    float major_x{1.0F};
+    float major_y{};
+    float minor_x{};
+    float minor_y{1.0F};
+    float major_radius{1.0F};
+    float minor_radius{1.0F};
+    float minor_length{};
+};
+
+struct EwaEllipse final {
+    float center_x{};
+    float center_y{};
+    float major_x{1.0F};
+    float major_y{};
+    float minor_x{};
+    float minor_y{1.0F};
+    float inverse_major_radius{1.0F};
+    float inverse_minor_radius{1.0F};
+    std::int64_t minimum_x{};
+    std::int64_t maximum_x{};
+    std::int64_t minimum_y{};
+    std::int64_t maximum_y{};
+    std::uint64_t visit_count{};
 };
 
 struct SceneMaterialClosureRange final {
@@ -207,6 +259,7 @@ enum class ShadeFailureDetail : std::uint32_t {
     geometric_support = 28U,
     ray_cone_advance = 29U,
     ray_cone_scattering = 30U,
+    surface_maps = 31U,
 };
 
 [[nodiscard]] __device__ constexpr std::uint32_t value(const WavefrontStageStatus status) noexcept {
@@ -692,8 +745,21 @@ scene_descriptor(const SceneSoaHeader* const header, const std::uint32_t column)
         column < scene_column::texture_id) {
         return header.environment_count;
     }
-    if (column >= scene_column::texture_id && column < scene_column::count) {
+    if (column >= scene_column::texture_id && column < scene_column::material_normal_map_present) {
         return header.texture_count;
+    }
+    if (column >= scene_column::material_normal_map_present &&
+        column < scene_column::image_texture_id) {
+        return header.material_count;
+    }
+    if (column >= scene_column::image_texture_id && column < scene_column::image_mip_width) {
+        return header.image_texture_count;
+    }
+    if (column >= scene_column::image_mip_width && column < scene_column::image_texel_value) {
+        return header.image_mip_count;
+    }
+    if (column == scene_column::image_texel_value) {
+        return header.image_texel_count;
     }
     return 0U;
 }
@@ -714,6 +780,8 @@ scene_column_element_size(const std::uint32_t column) noexcept {
          column < scene_column::material_closure_offset) ||
         column == scene_column::material_closure_frame_mode ||
         column == scene_column::instance_parent_present ||
+        column == scene_column::material_normal_map_present ||
+        column == scene_column::material_bump_map_present ||
         (column >= scene_column::environment_wavelength_measure &&
          column < scene_column::environment_radiance)) {
         return sizeof(std::uint8_t);
@@ -732,8 +800,17 @@ scene_column_element_size(const std::uint32_t column) noexcept {
         (column >= scene_column::environment_wavelength_nanometers &&
          column < scene_column::environment_wavelength_measure) ||
         (column >= scene_column::environment_radiance && column < scene_column::texture_id) ||
-        (column >= scene_column::texture_value && column < scene_column::count)) {
+        (column >= scene_column::texture_value &&
+         column < scene_column::material_normal_map_present) ||
+        column == scene_column::material_bump_map_scale ||
+        column == scene_column::image_texel_value) {
         return sizeof(float);
+    }
+    if (column == scene_column::image_texture_mip_offset ||
+        column == scene_column::image_texture_mip_count ||
+        column == scene_column::image_mip_texel_offset ||
+        column == scene_column::image_mip_texel_count) {
+        return sizeof(std::uint64_t);
     }
     return sizeof(std::uint32_t);
 }
@@ -755,7 +832,8 @@ scene_column_element_size(const std::uint32_t column) noexcept {
         header->triangle_count > 0xFFFFFFFFULL || header->material_count > 0xFFFFFFFFULL ||
         header->closure_count > 0xFFFFFFFFULL || header->instance_count > 0xFFFFFFFFULL ||
         header->mesh_area_light_count > 0xFFFFFFFFULL ||
-        header->punctual_light_count > 0xFFFFFFFFULL || header->texture_count > 0xFFFFFFFFULL) {
+        header->punctual_light_count > 0xFFFFFFFFULL || header->texture_count > 0xFFFFFFFFULL ||
+        header->image_texture_count > 0xFFFFFFFFULL || header->image_mip_count > 0xFFFFFFFFULL) {
         return SceneDeviceStatus::invalid_scene;
     }
     if (header->mesh_area_light_count > MaximumUniformLightCount) {
@@ -763,7 +841,7 @@ scene_column_element_size(const std::uint32_t column) noexcept {
     }
     const auto* const reserved =
         reinterpret_cast<const std::uint64_t*>(bytes + offsetof(SceneSoaHeader, reserved));
-    for (auto index = std::uint32_t{0U}; index < 4U; ++index) {
+    for (auto index = std::uint32_t{0U}; index < 5U; ++index) {
         if (reserved[index] != 0U) {
             return SceneDeviceStatus::invalid_scene;
         }
@@ -1495,6 +1573,7 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
         .x = hit.barycentric_vertex0, .y = hit.barycentric_vertex1, .z = hit.barycentric_vertex2};
     Vector3 local_vertices[3U]{};
     Vector2 texture_coordinates[3U]{};
+    auto uv = Vector2{};
     for (auto corner = std::uint32_t{0U}; corner < 3U; ++corner) {
         const auto local_vertex = scene_values<std::uint32_t>(
             bytes, scene, scene_column::triangle_vertex_0 + corner)[triangle];
@@ -1524,6 +1603,8 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
             return SceneDeviceStatus::numerical_failure;
         }
         local_normal = add(local_normal, multiply(vertex_normal, weight));
+        uv.x = fmaf(texture_coordinates[corner].x, weight, uv.x);
+        uv.y = fmaf(texture_coordinates[corner].y, weight, uv.y);
     }
     float inverse[shared::SceneSoaMatrixElementCount]{};
     float matrix[shared::SceneSoaMatrixElementCount]{};
@@ -1571,11 +1652,13 @@ __global__ void hit_stage_kernel(const WavefrontQueueDeviceSoa queues,
         .position_error = world_position.absolute_error,
         .geometric_normal = geometric_normal,
         .shading_normal = shading_normal,
+        .uv = uv,
         .dpdu = dpdu,
         .dpdv = dpdv,
         .material_index = material,
     };
     return finite_vector(surface.position) && finite_vector(surface.position_error) &&
+                   isfinite(surface.uv.x) && isfinite(surface.uv.y) &&
                    finite_vector(surface.dpdu) && finite_vector(surface.dpdv)
                ? SceneDeviceStatus::valid
                : SceneDeviceStatus::numerical_failure;
@@ -2786,6 +2869,809 @@ valid_surface_event(const transport::ScatteringLobe lobes) noexcept {
     return valid_ray_cone(advanced);
 }
 
+[[nodiscard]] __device__ bool known_texture_wrap(const std::uint32_t mode) noexcept {
+    return mode <= MaximumTextureWrapMode;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus load_image_texture(const std::uint8_t* const bytes,
+                                                              const SceneSoaHeader& scene,
+                                                              const std::uint32_t texture_id,
+                                                              SceneImageTexture& texture) noexcept {
+    if (scene.image_texture_count == 0U) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto* const ids =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::image_texture_id);
+    const auto* const mip_offsets =
+        scene_values<std::uint64_t>(bytes, scene, scene_column::image_texture_mip_offset);
+    const auto* const mip_counts =
+        scene_values<std::uint64_t>(bytes, scene, scene_column::image_texture_mip_count);
+    const auto* const channel_counts =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::image_texture_channel_count);
+    const auto* const color_spaces =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::image_texture_storage_color_space);
+    auto found = false;
+    auto previous_id = std::uint32_t{};
+    auto expected_mip_offset = std::uint64_t{};
+    for (auto index = std::uint64_t{}; index < scene.image_texture_count; ++index) {
+        if ((index != 0U && ids[index] <= previous_id) || mip_counts[index] == 0U ||
+            mip_offsets[index] != expected_mip_offset ||
+            mip_offsets[index] > scene.image_mip_count ||
+            mip_counts[index] > scene.image_mip_count - mip_offsets[index] ||
+            channel_counts[index] == 0U) {
+            return SceneDeviceStatus::invalid_scene;
+        }
+        expected_mip_offset += mip_counts[index];
+        previous_id = ids[index];
+        if (ids[index] == texture_id) {
+            if (found || color_spaces[index] != DataTextureColorSpace) {
+                return SceneDeviceStatus::invalid_scene;
+            }
+            found = true;
+            texture = SceneImageTexture{
+                .mip_offset = mip_offsets[index],
+                .mip_count = mip_counts[index],
+                .channel_count = channel_counts[index],
+            };
+        }
+    }
+    return found && expected_mip_offset == scene.image_mip_count ? SceneDeviceStatus::valid
+                                                                 : SceneDeviceStatus::invalid_scene;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus load_image_mip(const std::uint8_t* const bytes,
+                                                          const SceneSoaHeader& scene,
+                                                          const SceneImageTexture texture,
+                                                          const std::uint64_t local_level,
+                                                          SceneImageMip& mip) noexcept {
+    if (local_level >= texture.mip_count ||
+        texture.mip_offset > scene.image_mip_count - local_level) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto mip_index = texture.mip_offset + local_level;
+    if (mip_index >= scene.image_mip_count) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto width =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::image_mip_width)[mip_index];
+    const auto height =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::image_mip_height)[mip_index];
+    const auto texel_offset =
+        scene_values<std::uint64_t>(bytes, scene, scene_column::image_mip_texel_offset)[mip_index];
+    const auto texel_count =
+        scene_values<std::uint64_t>(bytes, scene, scene_column::image_mip_texel_count)[mip_index];
+    if (width == 0U || height == 0U || texture.channel_count == 0U ||
+        static_cast<float>(width) != static_cast<double>(width) ||
+        static_cast<float>(height) != static_cast<double>(height)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto pixels = static_cast<std::uint64_t>(width) * height;
+    if (pixels / width != height ||
+        pixels > MaximumU64 / static_cast<std::uint64_t>(texture.channel_count) ||
+        texel_count != pixels * texture.channel_count || texel_offset > scene.image_texel_count ||
+        texel_count > scene.image_texel_count - texel_offset) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    auto expected_texel_offset = std::uint64_t{};
+    if (mip_index != 0U) {
+        const auto previous_offset = scene_values<std::uint64_t>(
+            bytes, scene, scene_column::image_mip_texel_offset)[mip_index - 1U];
+        const auto previous_count = scene_values<std::uint64_t>(
+            bytes, scene, scene_column::image_mip_texel_count)[mip_index - 1U];
+        if (previous_offset > scene.image_texel_count ||
+            previous_count > scene.image_texel_count - previous_offset) {
+            return SceneDeviceStatus::invalid_scene;
+        }
+        expected_texel_offset = previous_offset + previous_count;
+    }
+    if (texel_offset != expected_texel_offset ||
+        (mip_index + 1U == scene.image_mip_count &&
+         texel_count != scene.image_texel_count - texel_offset)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    if (local_level != 0U) {
+        const auto previous_index = mip_index - 1U;
+        const auto previous_width = scene_values<std::uint32_t>(
+            bytes, scene, scene_column::image_mip_width)[previous_index];
+        const auto previous_height = scene_values<std::uint32_t>(
+            bytes, scene, scene_column::image_mip_height)[previous_index];
+        if (previous_width == 0U || previous_height == 0U ||
+            width != (previous_width > 1U ? previous_width / 2U : 1U) ||
+            height != (previous_height > 1U ? previous_height / 2U : 1U)) {
+            return SceneDeviceStatus::invalid_scene;
+        }
+    }
+    mip = SceneImageMip{
+        .texel_offset = texel_offset,
+        .texel_count = texel_count,
+        .width = width,
+        .height = height,
+    };
+    return SceneDeviceStatus::valid;
+}
+
+[[nodiscard]] __device__ bool wrap_texture_index(const std::int64_t index,
+                                                 const std::uint32_t extent,
+                                                 const std::uint32_t mode, bool& present,
+                                                 std::uint32_t& wrapped) noexcept {
+    if (extent == 0U || !known_texture_wrap(mode)) {
+        return false;
+    }
+    present = true;
+    switch (mode) {
+    case 0U: {
+        const auto modulus = static_cast<std::int64_t>(extent);
+        auto remainder = index % modulus;
+        if (remainder < 0) {
+            remainder += modulus;
+        }
+        wrapped = static_cast<std::uint32_t>(remainder);
+        return true;
+    }
+    case 1U:
+        wrapped = index < 0 ? 0U
+                            : (index >= static_cast<std::int64_t>(extent)
+                                   ? extent - 1U
+                                   : static_cast<std::uint32_t>(index));
+        return true;
+    case 2U: {
+        const auto period = static_cast<std::int64_t>(extent) * 2;
+        auto phase = index % period;
+        if (phase < 0) {
+            phase += period;
+        }
+        const auto local = phase < static_cast<std::int64_t>(extent) ? phase : period - 1 - phase;
+        wrapped = static_cast<std::uint32_t>(local);
+        return true;
+    }
+    case 3U:
+        if (index < 0 || index >= static_cast<std::int64_t>(extent)) {
+            present = false;
+            wrapped = 0U;
+        } else {
+            wrapped = static_cast<std::uint32_t>(index);
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] __device__ bool
+cone_texture_differentials(const WavefrontRayCone cone, const TransportRay& ray,
+                           const SurfaceData& surface,
+                           TextureCoordinateDifferentials& differentials) noexcept {
+    auto direction = Vector3{.x = ray.direction_x, .y = ray.direction_y, .z = ray.direction_z};
+    if (!valid_ray_cone(cone) || !normalize(direction, direction)) {
+        return false;
+    }
+    const auto cosine = fabsf(dot(direction, surface.geometric_normal));
+    if (!isfinite(cosine) || !(cosine > 0.0F)) {
+        return false;
+    }
+    const auto radius = cone.width / cosine;
+    const auto metric_uu = dot(surface.dpdu, surface.dpdu);
+    const auto metric_uv = dot(surface.dpdu, surface.dpdv);
+    const auto metric_vv = dot(surface.dpdv, surface.dpdv);
+    const auto determinant = fmaf(metric_uu, metric_vv, -metric_uv * metric_uv);
+    if (!isfinite(radius) || radius < 0.0F || !isfinite(metric_uu) || !isfinite(metric_uv) ||
+        !isfinite(metric_vv) || !(metric_uu > 0.0F) || !(metric_vv > 0.0F) ||
+        !isfinite(determinant) || !(determinant > 0.0F)) {
+        return false;
+    }
+    if (radius == 0.0F) {
+        return false;
+    }
+    const auto radius_squared = radius * radius;
+    const auto covariance_uu = radius_squared * metric_vv / determinant;
+    const auto covariance_uv = -radius_squared * metric_uv / determinant;
+    const auto covariance_vv = radius_squared * metric_uu / determinant;
+    if (!isfinite(radius_squared) || !(radius_squared > 0.0F) || !isfinite(covariance_uu) ||
+        !isfinite(covariance_uv) || !isfinite(covariance_vv) || !(covariance_uu > 0.0F) ||
+        !(covariance_vv > 0.0F)) {
+        return false;
+    }
+    const auto dudx = sqrtf(covariance_uu);
+    const auto dvdx = covariance_uv / dudx;
+    auto remaining = fmaf(-dvdx, dvdx, covariance_vv);
+    const auto covariance_tolerance = 64.0F * FloatEpsilon * covariance_vv;
+    if (remaining < 0.0F && remaining >= -covariance_tolerance) {
+        remaining = 0.0F;
+    }
+    const auto dvdy = sqrtf(remaining);
+    differentials = TextureCoordinateDifferentials{
+        .dudx = dudx,
+        .dvdx = dvdx,
+        .dudy = 0.0F,
+        .dvdy = dvdy,
+    };
+    return isfinite(dudx) && dudx > 0.0F && isfinite(dvdx) && isfinite(dvdy) && dvdy > 0.0F;
+}
+
+[[nodiscard]] __device__ bool make_ewa_footprint(const SceneImageMip mip,
+                                                 const TextureCoordinateDifferentials differentials,
+                                                 const std::uint32_t maximum_anisotropy,
+                                                 EwaFootprint& footprint) noexcept {
+    if (maximum_anisotropy == 0U || maximum_anisotropy > MaximumEwaAnisotropy ||
+        !isfinite(differentials.dudx) || !isfinite(differentials.dvdx) ||
+        !isfinite(differentials.dudy) || !isfinite(differentials.dvdy)) {
+        return false;
+    }
+    const auto width = static_cast<float>(mip.width);
+    const auto height = static_cast<float>(mip.height);
+    const auto dudx = differentials.dudx * width;
+    const auto dvdx = differentials.dvdx * height;
+    const auto dudy = differentials.dudy * width;
+    const auto dvdy = differentials.dvdy * height;
+    if (!isfinite(dudx) || !isfinite(dvdx) || !isfinite(dudy) || !isfinite(dvdy) ||
+        fabsf(dudx) >= ExactFloatTexelLimit || fabsf(dvdx) >= ExactFloatTexelLimit ||
+        fabsf(dudy) >= ExactFloatTexelLimit || fabsf(dvdy) >= ExactFloatTexelLimit) {
+        return false;
+    }
+    const auto covariance_xx = fmaf(dudx, dudx, dudy * dudy);
+    const auto covariance_xy = fmaf(dudx, dvdx, dudy * dvdy);
+    const auto covariance_yy = fmaf(dvdx, dvdx, dvdy * dvdy);
+    const auto trace = covariance_xx + covariance_yy;
+    const auto discriminant = hypotf(covariance_xx - covariance_yy, 2.0F * covariance_xy);
+    const auto maximum_eigenvalue = 0.5F * (trace + discriminant);
+    const auto jacobian_determinant = fmaf(dudx, dvdy, -dudy * dvdx);
+    const auto determinant = jacobian_determinant * jacobian_determinant;
+    auto minimum_eigenvalue = maximum_eigenvalue > 0.0F ? determinant / maximum_eigenvalue : 0.0F;
+    const auto anisotropy = static_cast<float>(maximum_anisotropy);
+    const auto minimum_allowed = maximum_eigenvalue / (anisotropy * anisotropy);
+    minimum_eigenvalue = fmaxf(minimum_eigenvalue, minimum_allowed);
+    const auto angle = maximum_eigenvalue > 0.0F
+                           ? 0.5F * atan2f(2.0F * covariance_xy, covariance_xx - covariance_yy)
+                           : 0.0F;
+    const auto major_x = cosf(angle);
+    const auto major_y = sinf(angle);
+    const auto major_length = sqrtf(maximum_eigenvalue);
+    const auto minor_length = sqrtf(minimum_eigenvalue);
+    footprint = EwaFootprint{
+        .major_x = major_x,
+        .major_y = major_y,
+        .minor_x = -major_y,
+        .minor_y = major_x,
+        .major_radius = hypotf(1.0F, major_length),
+        .minor_radius = hypotf(1.0F, minor_length),
+        .minor_length = minor_length,
+    };
+    return isfinite(covariance_xx) && isfinite(covariance_xy) && isfinite(covariance_yy) &&
+           isfinite(maximum_eigenvalue) && maximum_eigenvalue >= 0.0F &&
+           isfinite(minimum_eigenvalue) && minimum_eigenvalue >= 0.0F &&
+           isfinite(footprint.major_x) && isfinite(footprint.major_y) &&
+           isfinite(footprint.major_radius) && isfinite(footprint.minor_radius) &&
+           isfinite(footprint.minor_length);
+}
+
+[[nodiscard]] __device__ bool make_ewa_ellipse(const SceneImageMip mip, const Vector2 uv,
+                                               const EwaFootprint footprint,
+                                               EwaEllipse& ellipse) noexcept {
+    const auto scaled_x = uv.x * static_cast<float>(mip.width);
+    const auto scaled_y = uv.y * static_cast<float>(mip.height);
+    if (!isfinite(uv.x) || !isfinite(uv.y) || !isfinite(scaled_x) || !isfinite(scaled_y) ||
+        scaled_x <= -ExactFloatTexelLimit || scaled_x >= ExactFloatTexelLimit ||
+        scaled_y <= -ExactFloatTexelLimit || scaled_y >= ExactFloatTexelLimit) {
+        return false;
+    }
+    ellipse = EwaEllipse{
+        .center_x = scaled_x - 0.5F,
+        .center_y = scaled_y - 0.5F,
+        .major_x = footprint.major_x,
+        .major_y = footprint.major_y,
+        .minor_x = footprint.minor_x,
+        .minor_y = footprint.minor_y,
+        .inverse_major_radius = 1.0F / footprint.major_radius,
+        .inverse_minor_radius = 1.0F / footprint.minor_radius,
+    };
+    const auto radius_x = hypotf(footprint.major_radius * footprint.major_x,
+                                 footprint.minor_radius * footprint.minor_x);
+    const auto radius_y = hypotf(footprint.major_radius * footprint.major_y,
+                                 footprint.minor_radius * footprint.minor_y);
+    const auto minimum_x = ceilf(ellipse.center_x - radius_x);
+    const auto maximum_x = floorf(ellipse.center_x + radius_x);
+    const auto minimum_y = ceilf(ellipse.center_y - radius_y);
+    const auto maximum_y = floorf(ellipse.center_y + radius_y);
+    if (!isfinite(radius_x) || !isfinite(radius_y) || !isfinite(minimum_x) ||
+        !isfinite(maximum_x) || !isfinite(minimum_y) || !isfinite(maximum_y) ||
+        minimum_x <= -ExactFloatTexelLimit || maximum_x >= ExactFloatTexelLimit ||
+        minimum_y <= -ExactFloatTexelLimit || maximum_y >= ExactFloatTexelLimit) {
+        return false;
+    }
+    ellipse.minimum_x = static_cast<std::int64_t>(minimum_x);
+    ellipse.maximum_x = static_cast<std::int64_t>(maximum_x);
+    ellipse.minimum_y = static_cast<std::int64_t>(minimum_y);
+    ellipse.maximum_y = static_cast<std::int64_t>(maximum_y);
+    if (ellipse.maximum_x < ellipse.minimum_x || ellipse.maximum_y < ellipse.minimum_y) {
+        return false;
+    }
+    const auto width = static_cast<std::uint64_t>(ellipse.maximum_x - ellipse.minimum_x) + 1U;
+    const auto height = static_cast<std::uint64_t>(ellipse.maximum_y - ellipse.minimum_y) + 1U;
+    if (height != 0U && width > MaximumU64 / height) {
+        return false;
+    }
+    ellipse.visit_count = width * height;
+    return true;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus sample_ewa_ellipse(
+    const std::uint8_t* const bytes, const SceneSoaHeader& scene, const SceneImageTexture texture,
+    const SceneImageMip mip, const EwaEllipse ellipse, const std::uint32_t channel,
+    const std::uint32_t u_wrap, const std::uint32_t v_wrap, float& filtered) noexcept {
+    if (channel >= texture.channel_count || !known_texture_wrap(u_wrap) ||
+        !known_texture_wrap(v_wrap)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    constexpr auto gaussian_alpha = 2.0F;
+    const auto edge_weight = expf(-gaussian_alpha);
+    auto accumulated_weight = 0.0F;
+    filtered = 0.0F;
+    const auto* const texels = scene_values<float>(bytes, scene, scene_column::image_texel_value);
+    for (auto y = ellipse.minimum_y; y <= ellipse.maximum_y; ++y) {
+        auto y_present = false;
+        auto wrapped_y = std::uint32_t{};
+        if (!wrap_texture_index(y, mip.height, v_wrap, y_present, wrapped_y)) {
+            return SceneDeviceStatus::invalid_scene;
+        }
+        const auto offset_y = static_cast<float>(y) - ellipse.center_y;
+        for (auto x = ellipse.minimum_x; x <= ellipse.maximum_x; ++x) {
+            const auto offset_x = static_cast<float>(x) - ellipse.center_x;
+            const auto major_distance =
+                fmaf(offset_x, ellipse.major_x, offset_y * ellipse.major_y) *
+                ellipse.inverse_major_radius;
+            const auto minor_distance =
+                fmaf(offset_x, ellipse.minor_x, offset_y * ellipse.minor_y) *
+                ellipse.inverse_minor_radius;
+            const auto radius_squared =
+                fmaf(major_distance, major_distance, minor_distance * minor_distance);
+            if (!isfinite(radius_squared) || radius_squared < 0.0F) {
+                return SceneDeviceStatus::numerical_failure;
+            }
+            if (radius_squared >= 1.0F) {
+                continue;
+            }
+            const auto weight = edge_weight * expm1f(gaussian_alpha * (1.0F - radius_squared));
+            if (!isfinite(weight) || !(weight > 0.0F)) {
+                return SceneDeviceStatus::numerical_failure;
+            }
+            auto x_present = false;
+            auto wrapped_x = std::uint32_t{};
+            if (!wrap_texture_index(x, mip.width, u_wrap, x_present, wrapped_x)) {
+                return SceneDeviceStatus::invalid_scene;
+            }
+            auto value = 0.0F;
+            if (x_present && y_present) {
+                const auto pixel = static_cast<std::uint64_t>(wrapped_y) * mip.width + wrapped_x;
+                if (pixel > MaximumU64 / texture.channel_count) {
+                    return SceneDeviceStatus::invalid_scene;
+                }
+                const auto local_element = pixel * texture.channel_count + channel;
+                if (local_element >= mip.texel_count ||
+                    mip.texel_offset > scene.image_texel_count - local_element - 1U) {
+                    return SceneDeviceStatus::invalid_scene;
+                }
+                value = texels[mip.texel_offset + local_element];
+                if (!isfinite(value)) {
+                    return SceneDeviceStatus::numerical_failure;
+                }
+            }
+            const auto next_weight = accumulated_weight + weight;
+            if (!isfinite(next_weight) || !(next_weight > 0.0F)) {
+                return SceneDeviceStatus::numerical_failure;
+            }
+            if (accumulated_weight == 0.0F) {
+                filtered = value;
+            } else {
+                filtered += (value - filtered) * (weight / next_weight);
+            }
+            accumulated_weight = next_weight;
+        }
+    }
+    return accumulated_weight > 0.0F && isfinite(filtered) ? SceneDeviceStatus::valid
+                                                           : SceneDeviceStatus::numerical_failure;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus filter_image_ewa(
+    const std::uint8_t* const bytes, const SceneSoaHeader& scene, const SceneImageTexture texture,
+    const Vector2 uv, const TextureCoordinateDifferentials differentials,
+    const std::uint32_t channel, const std::uint32_t u_wrap, const std::uint32_t v_wrap,
+    const std::uint32_t maximum_anisotropy, const std::uint32_t maximum_texel_visits,
+    float& filtered) noexcept {
+    if (texture.mip_count == 0U || channel >= texture.channel_count ||
+        !known_texture_wrap(u_wrap) || !known_texture_wrap(v_wrap) || maximum_anisotropy == 0U ||
+        maximum_anisotropy > MaximumEwaAnisotropy || maximum_texel_visits == 0U ||
+        !isfinite(uv.x) || !isfinite(uv.y)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    auto lower_mip = SceneImageMip{};
+    auto status = load_image_mip(bytes, scene, texture, 0U, lower_mip);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    auto lower_footprint = EwaFootprint{};
+    if (!make_ewa_footprint(lower_mip, differentials, maximum_anisotropy, lower_footprint)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    auto upper_mip = SceneImageMip{};
+    auto upper_footprint = EwaFootprint{};
+    auto has_upper = false;
+    auto fraction = 0.0F;
+    if (lower_footprint.minor_length > 1.0F) {
+        for (auto level = std::uint64_t{1U}; level < texture.mip_count; ++level) {
+            auto candidate_mip = SceneImageMip{};
+            status = load_image_mip(bytes, scene, texture, level, candidate_mip);
+            if (status != SceneDeviceStatus::valid) {
+                return status;
+            }
+            auto candidate_footprint = EwaFootprint{};
+            if (!make_ewa_footprint(candidate_mip, differentials, maximum_anisotropy,
+                                    candidate_footprint)) {
+                return SceneDeviceStatus::numerical_failure;
+            }
+            if (candidate_footprint.minor_length <= 1.0F) {
+                const auto lower_log = logf(lower_footprint.minor_length);
+                const auto upper_log = logf(candidate_footprint.minor_length);
+                const auto denominator = lower_log - upper_log;
+                const auto blend = lower_log / denominator;
+                if (!isfinite(blend) || !(denominator > 0.0F) || blend < 0.0F || blend > 1.0F) {
+                    return SceneDeviceStatus::numerical_failure;
+                }
+                if (blend == 1.0F) {
+                    lower_mip = candidate_mip;
+                    lower_footprint = candidate_footprint;
+                } else {
+                    upper_mip = candidate_mip;
+                    upper_footprint = candidate_footprint;
+                    has_upper = true;
+                    fraction = blend;
+                }
+                break;
+            }
+            lower_mip = candidate_mip;
+            lower_footprint = candidate_footprint;
+        }
+    }
+    if (!has_upper && lower_footprint.minor_length > 1.0F) {
+        lower_footprint = EwaFootprint{};
+    }
+
+    auto lower_ellipse = EwaEllipse{};
+    if (!make_ewa_ellipse(lower_mip, uv, lower_footprint, lower_ellipse)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    auto upper_ellipse = EwaEllipse{};
+    auto total_visits = lower_ellipse.visit_count;
+    if (has_upper) {
+        if (!make_ewa_ellipse(upper_mip, uv, upper_footprint, upper_ellipse) ||
+            total_visits > MaximumU64 - upper_ellipse.visit_count) {
+            return SceneDeviceStatus::numerical_failure;
+        }
+        total_visits += upper_ellipse.visit_count;
+    }
+    if (total_visits > maximum_texel_visits) {
+        return SceneDeviceStatus::unsupported_transport;
+    }
+
+    auto lower = 0.0F;
+    status = sample_ewa_ellipse(bytes, scene, texture, lower_mip, lower_ellipse, channel, u_wrap,
+                                v_wrap, lower);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    if (!has_upper) {
+        filtered = lower;
+        return SceneDeviceStatus::valid;
+    }
+    auto upper = 0.0F;
+    status = sample_ewa_ellipse(bytes, scene, texture, upper_mip, upper_ellipse, channel, u_wrap,
+                                v_wrap, upper);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    filtered = lower + fraction * (upper - lower);
+    return isfinite(filtered) ? SceneDeviceStatus::valid : SceneDeviceStatus::numerical_failure;
+}
+
+[[nodiscard]] __device__ bool projected_tangent_frame(const SurfaceData& surface, Vector3& tangent,
+                                                      Vector3& bitangent) noexcept {
+    const auto tangent_alignment = dot(surface.shading_normal, surface.dpdu);
+    const auto projected = Vector3{
+        .x = fmaf(-tangent_alignment, surface.shading_normal.x, surface.dpdu.x),
+        .y = fmaf(-tangent_alignment, surface.shading_normal.y, surface.dpdu.y),
+        .z = fmaf(-tangent_alignment, surface.shading_normal.z, surface.dpdu.z),
+    };
+    auto base_bitangent = Vector3{};
+    if (!normalize(projected, tangent) ||
+        !normalize(cross(surface.shading_normal, tangent), base_bitangent)) {
+        return false;
+    }
+    const auto dpdv_scale =
+        fmaxf(fabsf(surface.dpdv.x), fmaxf(fabsf(surface.dpdv.y), fabsf(surface.dpdv.z)));
+    if (!isfinite(dpdv_scale) || dpdv_scale == 0.0F) {
+        return false;
+    }
+    const auto handedness = dot(base_bitangent, multiply(surface.dpdv, 1.0F / dpdv_scale));
+    if (!isfinite(handedness) || handedness == 0.0F) {
+        return false;
+    }
+    bitangent = handedness > 0.0F ? base_bitangent : multiply(base_bitangent, -1.0F);
+    return true;
+}
+
+[[nodiscard]] __device__ bool normalized_cross(const Vector3 left, const Vector3 right,
+                                               Vector3& result) noexcept {
+    const auto left_scale = fmaxf(fabsf(left.x), fmaxf(fabsf(left.y), fabsf(left.z)));
+    const auto right_scale = fmaxf(fabsf(right.x), fmaxf(fabsf(right.y), fabsf(right.z)));
+    return isfinite(left_scale) && isfinite(right_scale) && left_scale > 0.0F &&
+           right_scale > 0.0F &&
+           normalize(cross(multiply(left, 1.0F / left_scale), multiply(right, 1.0F / right_scale)),
+                     result);
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus apply_normal_map(
+    const std::uint8_t* const bytes, const SceneSoaHeader& scene,
+    const TextureCoordinateDifferentials differentials, SurfaceData& surface) noexcept {
+    const auto material = surface.material_index;
+    const auto present = scene_values<std::uint8_t>(
+        bytes, scene, scene_column::material_normal_map_present)[material];
+    if (present == 0U) {
+        const auto canonical =
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_texture_id)[material] == 0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_red_channel)[material] == 0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_green_channel)[material] == 0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_blue_channel)[material] == 0U &&
+            scene_values<std::uint32_t>(bytes, scene,
+                                        scene_column::material_normal_map_u_wrap)[material] == 0U &&
+            scene_values<std::uint32_t>(bytes, scene,
+                                        scene_column::material_normal_map_v_wrap)[material] == 0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_maximum_anisotropy)[material] ==
+                0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_maximum_texel_visits)[material] ==
+                0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_normal_map_y_convention)[material] == 0U;
+        return canonical ? SceneDeviceStatus::valid : SceneDeviceStatus::invalid_scene;
+    }
+    if (present != 1U) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto texture_id = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_texture_id)[material];
+    const auto red_channel = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_red_channel)[material];
+    const auto green_channel = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_green_channel)[material];
+    const auto blue_channel = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_blue_channel)[material];
+    const auto u_wrap = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_u_wrap)[material];
+    const auto v_wrap = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_v_wrap)[material];
+    const auto maximum_anisotropy = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_maximum_anisotropy)[material];
+    const auto maximum_texel_visits = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_maximum_texel_visits)[material];
+    const auto y_convention = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_normal_map_y_convention)[material];
+    auto texture = SceneImageTexture{};
+    auto status = load_image_texture(bytes, scene, texture_id, texture);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    if (red_channel >= texture.channel_count || green_channel >= texture.channel_count ||
+        blue_channel >= texture.channel_count || red_channel == green_channel ||
+        red_channel == blue_channel || green_channel == blue_channel ||
+        y_convention > MaximumNormalYConvention) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    float encoded[3U]{};
+    const std::uint32_t channels[]{red_channel, green_channel, blue_channel};
+    for (auto component = std::uint32_t{}; component < 3U; ++component) {
+        status = filter_image_ewa(bytes, scene, texture, surface.uv, differentials,
+                                  channels[component], u_wrap, v_wrap, maximum_anisotropy,
+                                  maximum_texel_visits, encoded[component]);
+        if (status != SceneDeviceStatus::valid) {
+            return status;
+        }
+        if (encoded[component] < 0.0F || encoded[component] > 1.0F) {
+            return SceneDeviceStatus::numerical_failure;
+        }
+    }
+    auto mapped = Vector3{
+        .x = fmaf(2.0F, encoded[0U], -1.0F),
+        .y = fmaf(2.0F, encoded[1U], -1.0F),
+        .z = fmaf(2.0F, encoded[2U], -1.0F),
+    };
+    if (!normalize(mapped, mapped) || !(mapped.z > 0.0F)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    auto tangent = Vector3{};
+    auto bitangent = Vector3{};
+    if (!projected_tangent_frame(surface, tangent, bitangent)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    const auto mapped_y = y_convention == 0U ? mapped.y : -mapped.y;
+    auto shading_normal = Vector3{
+        .x = fmaf(tangent.x, mapped.x,
+                  fmaf(bitangent.x, mapped_y, surface.shading_normal.x * mapped.z)),
+        .y = fmaf(tangent.y, mapped.x,
+                  fmaf(bitangent.y, mapped_y, surface.shading_normal.y * mapped.z)),
+        .z = fmaf(tangent.z, mapped.x,
+                  fmaf(bitangent.z, mapped_y, surface.shading_normal.z * mapped.z)),
+    };
+    if (!normalize(shading_normal, shading_normal) ||
+        !(dot(surface.geometric_normal, shading_normal) > 0.0F)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    surface.shading_normal = shading_normal;
+    return SceneDeviceStatus::valid;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus
+apply_bump_map(const std::uint8_t* const bytes, const SceneSoaHeader& scene,
+               const TextureCoordinateDifferentials differentials, SurfaceData& surface) noexcept {
+    const auto material = surface.material_index;
+    const auto present =
+        scene_values<std::uint8_t>(bytes, scene, scene_column::material_bump_map_present)[material];
+    if (present == 0U) {
+        const auto canonical =
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_bump_map_texture_id)[material] == 0U &&
+            scene_values<std::uint32_t>(bytes, scene,
+                                        scene_column::material_bump_map_channel)[material] == 0U &&
+            __float_as_uint(scene_values<float>(
+                bytes, scene, scene_column::material_bump_map_scale)[material]) == 0U &&
+            scene_values<std::uint32_t>(bytes, scene,
+                                        scene_column::material_bump_map_u_wrap)[material] == 0U &&
+            scene_values<std::uint32_t>(bytes, scene,
+                                        scene_column::material_bump_map_v_wrap)[material] == 0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_bump_map_maximum_anisotropy)[material] == 0U &&
+            scene_values<std::uint32_t>(
+                bytes, scene, scene_column::material_bump_map_maximum_texel_visits)[material] == 0U;
+        return canonical ? SceneDeviceStatus::valid : SceneDeviceStatus::invalid_scene;
+    }
+    if (present != 1U) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto texture_id = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_bump_map_texture_id)[material];
+    const auto channel = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_bump_map_channel)[material];
+    const auto scale =
+        scene_values<float>(bytes, scene, scene_column::material_bump_map_scale)[material];
+    const auto u_wrap =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::material_bump_map_u_wrap)[material];
+    const auto v_wrap =
+        scene_values<std::uint32_t>(bytes, scene, scene_column::material_bump_map_v_wrap)[material];
+    const auto maximum_anisotropy = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_bump_map_maximum_anisotropy)[material];
+    const auto maximum_texel_visits = scene_values<std::uint32_t>(
+        bytes, scene, scene_column::material_bump_map_maximum_texel_visits)[material];
+    auto texture = SceneImageTexture{};
+    auto status = load_image_texture(bytes, scene, texture_id, texture);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    auto base = SceneImageMip{};
+    status = load_image_mip(bytes, scene, texture, 0U, base);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    if (channel >= texture.channel_count || !isfinite(scale)) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    const auto dpdu_alignment = dot(surface.shading_normal, surface.dpdu);
+    const auto dpdv_alignment = dot(surface.shading_normal, surface.dpdv);
+    const auto projected_dpdu = Vector3{
+        .x = fmaf(-dpdu_alignment, surface.shading_normal.x, surface.dpdu.x),
+        .y = fmaf(-dpdu_alignment, surface.shading_normal.y, surface.dpdu.y),
+        .z = fmaf(-dpdu_alignment, surface.shading_normal.z, surface.dpdu.z),
+    };
+    const auto projected_dpdv = Vector3{
+        .x = fmaf(-dpdv_alignment, surface.shading_normal.x, surface.dpdv.x),
+        .y = fmaf(-dpdv_alignment, surface.shading_normal.y, surface.dpdv.y),
+        .z = fmaf(-dpdv_alignment, surface.shading_normal.z, surface.dpdv.z),
+    };
+    auto projected_orientation = Vector3{};
+    if (!isfinite(dpdu_alignment) || !isfinite(dpdv_alignment) || !finite_vector(projected_dpdu) ||
+        !finite_vector(projected_dpdv) ||
+        !normalized_cross(projected_dpdu, projected_dpdv, projected_orientation)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    const auto projected_handedness = dot(surface.shading_normal, projected_orientation);
+    if (!isfinite(projected_handedness) || projected_handedness == 0.0F) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    const auto du = fmaxf(1.0F / static_cast<float>(base.width),
+                          hypotf(differentials.dudx, differentials.dudy));
+    const auto dv = fmaxf(1.0F / static_cast<float>(base.height),
+                          hypotf(differentials.dvdx, differentials.dvdy));
+    if (!isfinite(du) || !(du > 0.0F) || !isfinite(dv) || !(dv > 0.0F)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    const Vector2 coordinates[]{
+        Vector2{.x = surface.uv.x + du, .y = surface.uv.y},
+        Vector2{.x = surface.uv.x - du, .y = surface.uv.y},
+        Vector2{.x = surface.uv.x, .y = surface.uv.y + dv},
+        Vector2{.x = surface.uv.x, .y = surface.uv.y - dv},
+    };
+    float heights[4U]{};
+    for (auto sample = std::uint32_t{}; sample < 4U; ++sample) {
+        status = filter_image_ewa(bytes, scene, texture, coordinates[sample], differentials,
+                                  channel, u_wrap, v_wrap, maximum_anisotropy, maximum_texel_visits,
+                                  heights[sample]);
+        if (status != SceneDeviceStatus::valid) {
+            return status;
+        }
+    }
+    const auto dhdu = (heights[0U] - heights[1U]) / (2.0F * du);
+    const auto dhdv = (heights[2U] - heights[3U]) / (2.0F * dv);
+    const auto scaled_dhdu = scale * dhdu;
+    const auto scaled_dhdv = scale * dhdv;
+    const auto tangent_u = Vector3{
+        .x = fmaf(surface.shading_normal.x, scaled_dhdu, projected_dpdu.x),
+        .y = fmaf(surface.shading_normal.y, scaled_dhdu, projected_dpdu.y),
+        .z = fmaf(surface.shading_normal.z, scaled_dhdu, projected_dpdu.z),
+    };
+    const auto tangent_v = Vector3{
+        .x = fmaf(surface.shading_normal.x, scaled_dhdv, projected_dpdv.x),
+        .y = fmaf(surface.shading_normal.y, scaled_dhdv, projected_dpdv.y),
+        .z = fmaf(surface.shading_normal.z, scaled_dhdv, projected_dpdv.z),
+    };
+    auto shading_normal = Vector3{};
+    if (!isfinite(dhdu) || !isfinite(dhdv) || !isfinite(scaled_dhdu) || !isfinite(scaled_dhdv) ||
+        !finite_vector(tangent_u) || !finite_vector(tangent_v) ||
+        !normalized_cross(tangent_u, tangent_v, shading_normal)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    if (dot(shading_normal, surface.shading_normal) < 0.0F) {
+        shading_normal = multiply(shading_normal, -1.0F);
+    }
+    if (!(dot(shading_normal, surface.shading_normal) > 0.0F) ||
+        !(dot(surface.geometric_normal, shading_normal) > 0.0F)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    surface.shading_normal = shading_normal;
+    return SceneDeviceStatus::valid;
+}
+
+[[nodiscard]] __device__ SceneDeviceStatus apply_surface_maps(const std::uint8_t* const bytes,
+                                                              const SceneSoaHeader& scene,
+                                                              const WavefrontRayCone cone,
+                                                              const TransportRay& ray,
+                                                              SurfaceData& surface) noexcept {
+    const auto normal_present = scene_values<std::uint8_t>(
+        bytes, scene, scene_column::material_normal_map_present)[surface.material_index];
+    const auto bump_present = scene_values<std::uint8_t>(
+        bytes, scene, scene_column::material_bump_map_present)[surface.material_index];
+    if (normal_present == 0U && bump_present == 0U) {
+        const auto empty_differentials = TextureCoordinateDifferentials{};
+        const auto normal_status = apply_normal_map(bytes, scene, empty_differentials, surface);
+        return normal_status == SceneDeviceStatus::valid
+                   ? apply_bump_map(bytes, scene, empty_differentials, surface)
+                   : normal_status;
+    }
+    if (normal_present > 1U || bump_present > 1U) {
+        return SceneDeviceStatus::invalid_scene;
+    }
+    auto differentials = TextureCoordinateDifferentials{};
+    if (!cone_texture_differentials(cone, ray, surface, differentials)) {
+        return SceneDeviceStatus::numerical_failure;
+    }
+    auto status = apply_normal_map(bytes, scene, differentials, surface);
+    if (status != SceneDeviceStatus::valid) {
+        return status;
+    }
+    return apply_bump_map(bytes, scene, differentials, surface);
+}
+
 [[nodiscard]] __device__ bool propagate_ray_cone_scattering(const WavefrontRayCone cone,
                                                             const transport::ClosureRecord& closure,
                                                             const transport::ScatteringLobe event,
@@ -3281,6 +4167,31 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
                                   value(ShadeFailureDetail::surface_data));
         return;
     }
+    const auto normal_map_present = scene_values<std::uint8_t>(
+        scene_bytes, scene, scene_column::material_normal_map_present)[surface.material_index];
+    const auto bump_map_present = scene_values<std::uint8_t>(
+        scene_bytes, scene, scene_column::material_bump_map_present)[surface.material_index];
+    const auto mapped_surface = normal_map_present != 0U || bump_map_present != 0U;
+    auto advanced_cone = WavefrontRayCone{};
+    auto cone_advanced = false;
+    if (mapped_surface) {
+        if (!advance_ray_cone_to_hit(ray_cone, ray, hit.parameter, advanced_cone)) {
+            finish_phase(control, WavefrontLanePhase::terminated);
+            outcomes[index] =
+                outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
+                        slot.value, value(ShadeFailureDetail::ray_cone_advance));
+            return;
+        }
+        cone_advanced = true;
+    }
+    const auto maps_applied = apply_surface_maps(
+        scene_bytes, scene, cone_advanced ? advanced_cone : ray_cone, ray, surface);
+    if (maps_applied != SceneDeviceStatus::valid) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] = outcome(scene_status(maps_applied), WavefrontStageRoute::none, slot.value,
+                                  value(ShadeFailureDetail::surface_maps));
+        return;
+    }
     auto outgoing_world = Vector3{
         .x = -ray.direction_x,
         .y = -ray.direction_y,
@@ -3677,25 +4588,34 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
                     value(ShadeFailureDetail::continuation_ray));
         return;
     }
-    auto advanced_cone = WavefrontRayCone{};
-    if (!advance_ray_cone_to_hit(ray_cone, ray, hit.parameter, advanced_cone)) {
-        finish_phase(control, WavefrontLanePhase::terminated);
-        outcomes[index] =
-            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
-                    value(ShadeFailureDetail::ray_cone_advance));
-        return;
+    auto compact_closure_index = closures.active_count;
+    auto compact_closure_matches = std::uint32_t{};
+    for (auto index = std::uint32_t{}; index < closures.active_count; ++index) {
+        if (filtered_closures.source_indices[index] == bsdf_sample.selected_closure) {
+            compact_closure_index = index;
+            ++compact_closure_matches;
+        }
     }
-    if (bsdf_sample.selected_closure >= closures.active_count) {
+    if (compact_closure_matches != 1U || compact_closure_index >= closures.active_count) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] =
             outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
                     value(ShadeFailureDetail::ray_cone_scattering));
         return;
     }
+    if (!cone_advanced) {
+        if (!advance_ray_cone_to_hit(ray_cone, ray, hit.parameter, advanced_cone)) {
+            finish_phase(control, WavefrontLanePhase::terminated);
+            outcomes[index] =
+                outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none,
+                        slot.value, value(ShadeFailureDetail::ray_cone_advance));
+            return;
+        }
+    }
     auto next_cone = WavefrontRayCone{};
-    if (!propagate_ray_cone_scattering(
-            advanced_cone, closures.closures[bsdf_sample.selected_closure], bsdf_sample.lobes,
-            outgoing_local, bsdf_sample.incoming_local, next_cone)) {
+    if (!propagate_ray_cone_scattering(advanced_cone, closures.closures[compact_closure_index],
+                                       bsdf_sample.lobes, outgoing_local,
+                                       bsdf_sample.incoming_local, next_cone)) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] =
             outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,

@@ -1,6 +1,7 @@
 #include <Blackframe/Backends/GPU/CUDA/SceneSoA.hpp>
 #include <Blackframe/XPU/Shared/ConstantTextureAbi.hpp>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -341,6 +342,7 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
     const auto mesh_area_light_ids = scene.mesh_area_light_instance_ids();
     const auto& environment = scene.spectral_environment();
     const auto textures = scene.constant_textures();
+    const auto image_textures = scene.host_image_textures();
 
     header.magic = xpu::shared::SceneSoaMagic;
     header.abi_major = xpu::shared::SceneSoaAbiMajor;
@@ -356,6 +358,81 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
     header.mesh_area_light_count = mesh_area_light_ids.size();
     header.environment_count = environment.has_value() ? 1U : 0U;
     header.texture_count = textures.size();
+    header.image_texture_count = image_textures.size();
+
+    auto image_mip_offsets = std::vector<std::uint64_t>{};
+    auto image_mip_counts = std::vector<std::uint64_t>{};
+    auto image_channel_counts = std::vector<std::uint32_t>{};
+    auto image_storage_color_spaces = std::vector<std::uint32_t>{};
+    auto mip_images = std::vector<renderer::HostImageHandle>{};
+    auto mip_widths = std::vector<std::uint32_t>{};
+    auto mip_heights = std::vector<std::uint32_t>{};
+    auto mip_texel_offsets = std::vector<std::uint64_t>{};
+    auto mip_texel_counts = std::vector<std::uint64_t>{};
+    image_mip_offsets.reserve(image_textures.size());
+    image_mip_counts.reserve(image_textures.size());
+    image_channel_counts.reserve(image_textures.size());
+    image_storage_color_spaces.reserve(image_textures.size());
+    for (const auto& texture : image_textures) {
+        if (!texture.image || texture.image->level_count() == 0U) {
+            return std::unexpected(scene_soa_error(
+                core::StatusCode::incompatible,
+                "CUDA scene serialization requires every image texture to own a complete mip "
+                "chain."));
+        }
+        const auto base = texture.image->level(0U);
+        if (!base || !*base || (*base)->channel_count() == 0U) {
+            return std::unexpected(scene_soa_error(
+                core::StatusCode::incompatible,
+                "CUDA scene serialization could not resolve an image texture base level."));
+        }
+        image_mip_offsets.push_back(header.image_mip_count);
+        image_mip_counts.push_back(texture.image->level_count());
+        image_channel_counts.push_back((*base)->channel_count());
+        image_storage_color_spaces.push_back(
+            static_cast<std::uint32_t>((*base)->storage_color_space()));
+        if (add_overflows(header.image_mip_count, texture.image->level_count())) {
+            return std::unexpected(
+                scene_soa_error(core::StatusCode::resource_exhausted,
+                                "CUDA scene aggregate image-mip count exceeds the 64-bit schema."));
+        }
+        header.image_mip_count += texture.image->level_count();
+
+        for (auto level_index = std::uint32_t{}; level_index < texture.image->level_count();
+             ++level_index) {
+            const auto level = texture.image->level(level_index);
+            if (!level || !*level || (*level)->width() == 0U || (*level)->height() == 0U ||
+                (*level)->channel_count() != (*base)->channel_count()) {
+                return std::unexpected(scene_soa_error(
+                    core::StatusCode::incompatible,
+                    "CUDA scene serialization encountered an inconsistent image mip level."));
+            }
+            const auto pixel_count = static_cast<std::uint64_t>((*level)->width()) *
+                                     static_cast<std::uint64_t>((*level)->height());
+            const auto texel_count = pixel_count * (*level)->channel_count();
+            if (pixel_count / (*level)->width() != (*level)->height() ||
+                texel_count / pixel_count != (*level)->channel_count() ||
+                texel_count != (*level)->pixels().size() ||
+                add_overflows(header.image_texel_count, texel_count)) {
+                return std::unexpected(scene_soa_error(
+                    core::StatusCode::resource_exhausted,
+                    "CUDA scene image mip storage is not representable in the frozen schema."));
+            }
+            for (const auto value : (*level)->pixels()) {
+                if (!std::isfinite(value)) {
+                    return std::unexpected(scene_soa_error(
+                        core::StatusCode::invalid_argument,
+                        "CUDA scene image texels must all be finite before upload."));
+                }
+            }
+            mip_images.push_back(*level);
+            mip_widths.push_back((*level)->width());
+            mip_heights.push_back((*level)->height());
+            mip_texel_offsets.push_back(header.image_texel_count);
+            mip_texel_counts.push_back(texel_count);
+            header.image_texel_count += texel_count;
+        }
+    }
 
     auto material_closure_offsets = std::vector<std::uint64_t>{};
     material_closure_offsets.reserve(materials.size());
@@ -860,6 +937,208 @@ serialize_scene(const FrameScene& scene, const xpu::cuda::DeviceMemoryBudget bud
                                            }
                                        });
     }
+
+    const auto normal_binding = [](const SceneMaterial& material) -> const SceneNormalMapBinding* {
+        return material.spectral && material.spectral->normal_map ? &*material.spectral->normal_map
+                                                                  : nullptr;
+    };
+    const auto bump_binding = [](const SceneMaterial& material) -> const SceneBumpMapBinding* {
+        return material.spectral && material.spectral->bump_map ? &*material.spectral->bump_map
+                                                                : nullptr;
+    };
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint8_t, column::material_normal_map_present, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                emit(normal_binding(material) != nullptr ? std::uint8_t{1U} : std::uint8_t{0U});
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::material_normal_map_texture_id,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = normal_binding(material);
+                                           emit(binding != nullptr ? binding->texture.value : 0U);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::material_normal_map_red_channel,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = normal_binding(material);
+                                           emit(binding != nullptr ? binding->red_channel : 0U);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::material_normal_map_green_channel,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = normal_binding(material);
+                                           emit(binding != nullptr ? binding->green_channel : 0U);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::material_normal_map_blue_channel,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = normal_binding(material);
+                                           emit(binding != nullptr ? binding->blue_channel : 0U);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_normal_map_u_wrap, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = normal_binding(material);
+                emit(binding != nullptr ? static_cast<std::uint32_t>(binding->u_wrap) : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_normal_map_v_wrap, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = normal_binding(material);
+                emit(binding != nullptr ? static_cast<std::uint32_t>(binding->v_wrap) : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_normal_map_maximum_anisotropy, header.material_count,
+        [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = normal_binding(material);
+                emit(binding != nullptr ? binding->ewa_limits.maximum_anisotropy : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_normal_map_maximum_texel_visits, header.material_count,
+        [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = normal_binding(material);
+                emit(binding != nullptr ? binding->ewa_limits.maximum_texel_visits : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_normal_map_y_convention, header.material_count,
+        [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = normal_binding(material);
+                emit(binding != nullptr ? static_cast<std::uint32_t>(binding->y_convention) : 0U);
+            }
+        });
+
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint8_t, column::material_bump_map_present, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                emit(bump_binding(material) != nullptr ? std::uint8_t{1U} : std::uint8_t{0U});
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::material_bump_map_texture_id,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = bump_binding(material);
+                                           emit(binding != nullptr ? binding->texture.value : 0U);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::material_bump_map_channel,
+                                   header.material_count, [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = bump_binding(material);
+                                           emit(binding != nullptr ? binding->channel : 0U);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(float, column::material_bump_map_scale, header.material_count,
+                                   [&](auto&& emit) {
+                                       for (const auto& material : materials) {
+                                           const auto* binding = bump_binding(material);
+                                           emit(binding != nullptr ? binding->scale : 0.0F);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_bump_map_u_wrap, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = bump_binding(material);
+                emit(binding != nullptr ? static_cast<std::uint32_t>(binding->u_wrap) : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_bump_map_v_wrap, header.material_count, [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = bump_binding(material);
+                emit(binding != nullptr ? static_cast<std::uint32_t>(binding->v_wrap) : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_bump_map_maximum_anisotropy, header.material_count,
+        [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = bump_binding(material);
+                emit(binding != nullptr ? binding->ewa_limits.maximum_anisotropy : 0U);
+            }
+        });
+    BLACKFRAME_APPEND_SCENE_COLUMN(
+        std::uint32_t, column::material_bump_map_maximum_texel_visits, header.material_count,
+        [&](auto&& emit) {
+            for (const auto& material : materials) {
+                const auto* binding = bump_binding(material);
+                emit(binding != nullptr ? binding->ewa_limits.maximum_texel_visits : 0U);
+            }
+        });
+
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::image_texture_id,
+                                   header.image_texture_count, [&](auto&& emit) {
+                                       for (const auto& texture : image_textures) {
+                                           emit(texture.id.value);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint64_t, column::image_texture_mip_offset,
+                                   header.image_texture_count, [&](auto&& emit) {
+                                       for (const auto offset : image_mip_offsets) {
+                                           emit(offset);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint64_t, column::image_texture_mip_count,
+                                   header.image_texture_count, [&](auto&& emit) {
+                                       for (const auto count : image_mip_counts) {
+                                           emit(count);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::image_texture_channel_count,
+                                   header.image_texture_count, [&](auto&& emit) {
+                                       for (const auto count : image_channel_counts) {
+                                           emit(count);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::image_texture_storage_color_space,
+                                   header.image_texture_count, [&](auto&& emit) {
+                                       for (const auto color_space : image_storage_color_spaces) {
+                                           emit(color_space);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::image_mip_width, header.image_mip_count,
+                                   [&](auto&& emit) {
+                                       for (const auto width : mip_widths) {
+                                           emit(width);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint32_t, column::image_mip_height, header.image_mip_count,
+                                   [&](auto&& emit) {
+                                       for (const auto height : mip_heights) {
+                                           emit(height);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint64_t, column::image_mip_texel_offset,
+                                   header.image_mip_count, [&](auto&& emit) {
+                                       for (const auto offset : mip_texel_offsets) {
+                                           emit(offset);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(std::uint64_t, column::image_mip_texel_count,
+                                   header.image_mip_count, [&](auto&& emit) {
+                                       for (const auto count : mip_texel_counts) {
+                                           emit(count);
+                                       }
+                                   });
+    BLACKFRAME_APPEND_SCENE_COLUMN(float, column::image_texel_value, header.image_texel_count,
+                                   [&](auto&& emit) {
+                                       for (const auto& image : mip_images) {
+                                           for (const auto value : image->pixels()) {
+                                               emit(value);
+                                           }
+                                       }
+                                   });
 
 #undef BLACKFRAME_APPEND_SCENE_COLUMN
 

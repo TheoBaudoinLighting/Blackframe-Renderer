@@ -1,3 +1,4 @@
+#include "../../SurfaceMapSphereFixture.hpp"
 #include "ScalarWavefrontImageParity.hpp"
 
 #include <Blackframe/Backends/CPU/Embree/AccelBackend.hpp>
@@ -5,9 +6,14 @@
 #include <Blackframe/Engine/AccelBackend.hpp>
 #include <Blackframe/Engine/FrameScene.hpp>
 #include <Blackframe/Engine/SceneMisPathLoop.hpp>
+#include <Blackframe/Engine/SceneSurfaceInteraction.hpp>
 #include <Blackframe/Engine/TriangleMesh.hpp>
 #include <Blackframe/Renderer/CpuWavefrontScheduler.hpp>
 #include <Blackframe/Renderer/Fresnel.hpp>
+#if BLACKFRAME_CPU_SURFACE_MAP_TESTS
+#include <Blackframe/Renderer/HostImageCache.hpp>
+#include <Blackframe/Renderer/HostImageMipChain.hpp>
+#endif
 #include <Blackframe/Renderer/LightSampler.hpp>
 #include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
@@ -15,10 +21,13 @@
 #include <Blackframe/Renderer/SampleDimensionMap.hpp>
 #include <Blackframe/Renderer/WavelengthSampling.hpp>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <limits>
@@ -28,6 +37,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -317,6 +327,48 @@ make_material_scene(SceneClosureMixture closure_mixture) {
             },
     });
 }
+
+#if BLACKFRAME_CPU_SURFACE_MAP_TESTS
+[[nodiscard]] renderer::HostImageMipChainHandle
+make_cpu_surface_map(const std::string_view name, const std::uint32_t width,
+                     const std::uint32_t height,
+                     const std::span<const renderer::TransportScalar> pixels, const bool rgb) {
+    const auto path = std::filesystem::path{BLACKFRAME_CPU_SURFACE_MAP_TEST_OUTPUT_DIR} / name;
+    EXPECT_EQ(pixels.size(), static_cast<std::size_t>(width) * height * (rgb ? 3U : 1U));
+    auto stream = std::ofstream{path, std::ios::binary | std::ios::trunc};
+    EXPECT_TRUE(stream.is_open());
+    stream << (rgb ? "PF\n" : "Pf\n") << width << ' ' << height << '\n'
+           << (std::endian::native == std::endian::little ? "-1.0\n" : "1.0\n");
+    stream.write(reinterpret_cast<const char*>(pixels.data()),
+                 static_cast<std::streamsize>(pixels.size() * sizeof(pixels.front())));
+    EXPECT_TRUE(stream.good());
+    stream.close();
+    EXPECT_FALSE(stream.fail());
+
+    auto cache = renderer::HostImageCache::create().value();
+    const auto image = cache.load(path, renderer::TextureColorSpace::data);
+    EXPECT_TRUE(image.has_value()) << image.error().message;
+    if (!image) {
+        return {};
+    }
+    const auto mip_chain = renderer::HostImageMipChain::generate(*image);
+    EXPECT_TRUE(mip_chain.has_value()) << mip_chain.error().message;
+    return mip_chain ? *mip_chain : renderer::HostImageMipChainHandle{};
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_cpu_normal_map() {
+    const auto pixels = surface_map_sphere_fixture::normal_map_pixels();
+    return make_cpu_surface_map("cpu-sphere-normal-map.pfm",
+                                surface_map_sphere_fixture::NormalMapWidth,
+                                surface_map_sphere_fixture::NormalMapHeight, pixels, true);
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_cpu_bump_map() {
+    const auto pixels = surface_map_sphere_fixture::bump_map_pixels();
+    return make_cpu_surface_map("cpu-sphere-bump-map.pfm", surface_map_sphere_fixture::BumpMapWidth,
+                                surface_map_sphere_fixture::BumpMapHeight, pixels, false);
+}
+#endif
 
 [[nodiscard]] core::Result<renderer::Ray>
 material_primary_ray(const renderer::Vector3 outgoing_world) {
@@ -1738,6 +1790,102 @@ TEST(WavefrontMisMaterialParityTest,
                                reflection_only);
     }
 }
+
+#if BLACKFRAME_CPU_SURFACE_MAP_TESTS
+TEST(WavefrontMisTransportTextureTest, MatchesScalarNormalAndBumpOnTheSharedUvSphere) {
+    const auto normal_map = make_cpu_normal_map();
+    const auto bump_map = make_cpu_bump_map();
+    ASSERT_TRUE(normal_map);
+    ASSERT_TRUE(bump_map);
+    const auto baseline_scene = surface_map_sphere_fixture::make_scene({}, {});
+    const auto normal_scene = surface_map_sphere_fixture::make_scene(normal_map, {});
+    const auto bump_scene = surface_map_sphere_fixture::make_scene({}, bump_map);
+    const auto combined_scene = surface_map_sphere_fixture::make_scene(normal_map, bump_map);
+    ASSERT_TRUE(baseline_scene.has_value()) << baseline_scene.error().message;
+    ASSERT_TRUE(normal_scene.has_value()) << normal_scene.error().message;
+    ASSERT_TRUE(bump_scene.has_value()) << bump_scene.error().message;
+    ASSERT_TRUE(combined_scene.has_value()) << combined_scene.error().message;
+    const auto ray = surface_map_sphere_fixture::ray();
+    const auto differential = surface_map_sphere_fixture::differential();
+    const auto cone = surface_map_sphere_fixture::cone();
+    ASSERT_TRUE(ray.has_value()) << ray.error().message;
+    ASSERT_TRUE(differential.has_value()) << differential.error().message;
+    ASSERT_TRUE(cone.has_value()) << cone.error().message;
+
+    const auto resolve_pair = [&](const FrameSceneHandle& scene)
+        -> std::pair<ResolvedSceneSurfaceWithDifferentials, ResolvedSceneSurface> {
+        const auto analytic = create_analytic_accel_backend(scene);
+        const auto embree = create_embree_accel_backend(scene);
+        EXPECT_TRUE(analytic.has_value()) << analytic.error().message;
+        EXPECT_TRUE(embree.has_value()) << embree.error().message;
+        const auto analytic_hit = (*analytic)->closest_hit(*ray);
+        const auto embree_hit = (*embree)->closest_hit(*ray);
+        EXPECT_TRUE(analytic_hit.has_value()) << analytic_hit.error().message;
+        EXPECT_TRUE(embree_hit.has_value()) << embree_hit.error().message;
+        EXPECT_TRUE(analytic_hit->has_value());
+        EXPECT_TRUE(embree_hit->has_value());
+        const auto scalar = resolve_scene_surface_hit(*scene, **analytic_hit, *differential);
+        const auto cpu = resolve_scene_surface_hit(*scene, **embree_hit, *ray, *cone);
+        EXPECT_TRUE(scalar.has_value()) << scalar.error().message;
+        EXPECT_TRUE(cpu.has_value()) << cpu.error().message;
+        return {*scalar, *cpu};
+    };
+
+    const auto baseline = resolve_pair(*baseline_scene);
+    const auto normal = resolve_pair(*normal_scene);
+    const auto bump = resolve_pair(*bump_scene);
+    const auto combined = resolve_pair(*combined_scene);
+    for (const auto* mapped : {&normal, &bump, &combined}) {
+        EXPECT_EQ(mapped->first.surface.interaction.identifiers(),
+                  baseline.first.surface.interaction.identifiers());
+        EXPECT_EQ(mapped->second.interaction.identifiers(),
+                  baseline.second.interaction.identifiers());
+        EXPECT_EQ(mapped->first.surface.interaction.geometric_normal(),
+                  baseline.first.surface.interaction.geometric_normal());
+        EXPECT_EQ(mapped->second.interaction.geometric_normal(),
+                  baseline.second.interaction.geometric_normal());
+        EXPECT_NE(mapped->first.surface.interaction.shading_normal(),
+                  baseline.first.surface.interaction.shading_normal());
+        EXPECT_NE(mapped->second.interaction.shading_normal(),
+                  baseline.second.interaction.shading_normal());
+        EXPECT_NEAR(mapped->first.surface.interaction.shading_normal().x,
+                    mapped->second.interaction.shading_normal().x, 2.0e-3F);
+        EXPECT_NEAR(mapped->first.surface.interaction.shading_normal().y,
+                    mapped->second.interaction.shading_normal().y, 2.0e-3F);
+        EXPECT_NEAR(mapped->first.surface.interaction.shading_normal().z,
+                    mapped->second.interaction.shading_normal().z, 2.0e-3F);
+    }
+    EXPECT_NE(combined.first.surface.interaction.shading_normal(),
+              normal.first.surface.interaction.shading_normal());
+    EXPECT_GT(renderer::dot(combined.first.surface.interaction.shading_normal(),
+                            normal.first.surface.interaction.shading_normal()),
+              0.0F);
+
+    const auto backend = create_embree_accel_backend(*combined_scene);
+    const auto scheduler = renderer::CpuWavefrontScheduler::create(1U);
+    const auto sampler = renderer::LightSampler::create_uniform(1U);
+    const auto state = renderer::PathState::create_initial(
+        (*combined_scene)->spectral_environment()->wavelengths, renderer::VacuumMedium);
+    ASSERT_TRUE(backend.has_value()) << backend.error().message;
+    ASSERT_TRUE(scheduler.has_value()) << scheduler.error().message;
+    ASSERT_TRUE(sampler.has_value()) << sampler.error().message;
+    ASSERT_TRUE(state.has_value()) << state.error().message;
+
+    const auto input = std::array{CpuWavefrontMisPathInput{
+        .primary_ray = *ray,
+        .primary_cone = *cone,
+        .initial_state = *state,
+        .sample = {.pixel_x = 0U, .pixel_y = 0U, .sample_index = 0U, .seed = EvaluationSeed},
+    }};
+    const auto rendered = trace_cpu_wavefront_mis(input, *scheduler, **backend, *sampler,
+                                                  renderer::MisHeuristic::power, OneDiffuseBounce,
+                                                  renderer::RussianRoulettePolicy::disabled());
+    ASSERT_TRUE(rendered.has_value()) << rendered.error().message;
+    ASSERT_EQ(rendered->paths.size(), 1U);
+    EXPECT_GT(rendered->report.stage_lanes.hit, 0U);
+    EXPECT_GT(rendered->report.stage_lanes.shade, 0U);
+}
+#endif
 
 TEST(WavefrontMisTransportBackendTest, RejectsTheAnalyticOracleBeforeAnyFallbackCanRun) {
     const auto scene = make_wavefront_scene();

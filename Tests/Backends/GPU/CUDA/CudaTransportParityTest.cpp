@@ -1,4 +1,7 @@
 #include "../../CPU/Embree/CornellWavefrontScene.hpp"
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+#include "../../SurfaceMapSphereFixture.hpp"
+#endif
 
 #include <Blackframe/Backends/GPU/CUDA/SceneBvh.hpp>
 #include <Blackframe/Backends/GPU/CUDA/SceneSoA.hpp>
@@ -9,6 +12,10 @@
 #include <Blackframe/Renderer/DisplayPsnr.hpp>
 #include <Blackframe/Renderer/Film.hpp>
 #include <Blackframe/Renderer/Fresnel.hpp>
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+#include <Blackframe/Renderer/HostImageCache.hpp>
+#include <Blackframe/Renderer/HostImageMipChain.hpp>
+#endif
 #include <Blackframe/Renderer/IndependentSampler.hpp>
 #include <Blackframe/Renderer/LightSampler.hpp>
 #include <Blackframe/Renderer/LinearMetrics.hpp>
@@ -17,11 +24,16 @@
 #include <Blackframe/Renderer/WavelengthSampling.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <functional>
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+#include <filesystem>
+#include <fstream>
+#endif
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <limits>
@@ -52,6 +64,71 @@ constexpr auto OneSurfaceBounce = renderer::PathDepthLimits{
     .specular = 1U,
     .transmission = 1U,
 };
+
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+[[nodiscard]] renderer::HostImageMipChainHandle
+make_cuda_surface_map(const std::string_view name, const std::uint32_t width,
+                      const std::uint32_t height,
+                      const std::span<const renderer::TransportScalar> pixels, const bool rgb) {
+    const auto path = std::filesystem::path{BLACKFRAME_CUDA_SURFACE_MAP_TEST_OUTPUT_DIR} / name;
+    if (pixels.size() != static_cast<std::size_t>(width) * height * (rgb ? 3U : 1U)) {
+        throw std::runtime_error{"CUDA transport surface-map fixture has an invalid pixel count."};
+    }
+    auto stream = std::ofstream{path, std::ios::binary | std::ios::trunc};
+    if (!stream.is_open()) {
+        throw std::runtime_error{"CUDA transport surface-map fixture could not be created."};
+    }
+    stream << (rgb ? "PF\n" : "Pf\n") << width << ' ' << height << '\n'
+           << (std::endian::native == std::endian::little ? "-1.0\n" : "1.0\n");
+    stream.write(reinterpret_cast<const char*>(pixels.data()),
+                 static_cast<std::streamsize>(pixels.size() * sizeof(pixels.front())));
+    if (!stream.good()) {
+        throw std::runtime_error{"CUDA transport surface-map fixture could not be written."};
+    }
+    stream.close();
+    if (stream.fail()) {
+        throw std::runtime_error{"CUDA transport surface-map fixture could not be closed."};
+    }
+
+    auto cache = renderer::HostImageCache::create();
+    if (!cache) {
+        throw std::runtime_error{cache.error().message};
+    }
+    const auto image = cache->load(path, renderer::TextureColorSpace::data);
+    if (!image) {
+        throw std::runtime_error{image.error().message};
+    }
+    const auto mip_chain = renderer::HostImageMipChain::generate(*image);
+    if (!mip_chain) {
+        throw std::runtime_error{mip_chain.error().message};
+    }
+    return *mip_chain;
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_cuda_normal_map() {
+    const auto pixels = surface_map_sphere_fixture::normal_map_pixels();
+    return make_cuda_surface_map("cuda-transport-sphere-normal-map.pfm",
+                                 surface_map_sphere_fixture::NormalMapWidth,
+                                 surface_map_sphere_fixture::NormalMapHeight, pixels, true);
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_cuda_bump_map() {
+    const auto pixels = surface_map_sphere_fixture::bump_map_pixels();
+    return make_cuda_surface_map("cuda-transport-sphere-bump-map.pfm",
+                                 surface_map_sphere_fixture::BumpMapWidth,
+                                 surface_map_sphere_fixture::BumpMapHeight, pixels, false);
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_cuda_flat_bump_map() {
+    const auto pixels = std::vector<renderer::TransportScalar>(
+        static_cast<std::size_t>(surface_map_sphere_fixture::BumpMapWidth) *
+            surface_map_sphere_fixture::BumpMapHeight,
+        0.5F);
+    return make_cuda_surface_map("cuda-transport-sphere-flat-bump-map.pfm",
+                                 surface_map_sphere_fixture::BumpMapWidth,
+                                 surface_map_sphere_fixture::BumpMapHeight, pixels, false);
+}
+#endif
 
 struct ParityConfiguration final {
     std::string_view scene_name;
@@ -892,7 +969,8 @@ positive_image_energy(const renderer::FilmT<Precision>& film) {
 
 [[nodiscard]] core::Result<ParityResult>
 run_parity(const FrameSceneHandle& scene, const std::span<const CudaWavefrontPathInput> inputs,
-           const renderer::LightSampler& light_sampler, const ParityConfiguration& configuration) {
+           const renderer::LightSampler& light_sampler, const ParityConfiguration& configuration,
+           const std::span<const renderer::RayDifferential> scalar_differentials = {}) {
     if (!scene || inputs.empty()) {
         return std::unexpected(parity_error(
             core::StatusCode::invalid_argument,
@@ -904,6 +982,11 @@ run_parity(const FrameSceneHandle& scene, const std::span<const CudaWavefrontPat
         return std::unexpected(parity_error(
             core::StatusCode::incompatible,
             "CUDA transport parity input count does not match its image configuration."));
+    }
+    if (!scalar_differentials.empty() && scalar_differentials.size() != inputs.size()) {
+        return std::unexpected(parity_error(
+            core::StatusCode::incompatible,
+            "CUDA transport parity scalar differential count does not match its inputs."));
     }
 
     auto scalar_backend = create_analytic_accel_backend(scene);
@@ -954,10 +1037,22 @@ run_parity(const FrameSceneHandle& scene, const std::span<const CudaWavefrontPat
     auto maximum_path_error = renderer::ReferenceScalar{};
     for (auto path_index = std::size_t{}; path_index < inputs.size(); ++path_index) {
         const auto& input = inputs[path_index];
-        const auto scalar = trace_scene_mis(
-            input.primary_ray, input.initial_state, renderer::SampleStream{input.sample},
-            **scalar_backend, light_sampler, configuration.heuristic, configuration.depth_limits,
-            configuration.roulette_policy);
+        const auto scalar = [&]() -> core::Result<renderer::BsdfOnlyPathResult> {
+            if (scalar_differentials.empty()) {
+                return trace_scene_mis(input.primary_ray, input.initial_state,
+                                       renderer::SampleStream{input.sample}, **scalar_backend,
+                                       light_sampler, configuration.heuristic,
+                                       configuration.depth_limits, configuration.roulette_policy);
+            }
+            const auto tracked = trace_scene_mis_with_ray_differentials(
+                scalar_differentials[path_index], input.initial_state,
+                renderer::SampleStream{input.sample}, **scalar_backend, light_sampler,
+                configuration.heuristic, configuration.depth_limits, configuration.roulette_policy);
+            if (!tracked) {
+                return std::unexpected(tracked.error());
+            }
+            return tracked->path;
+        }();
         if (!scalar) {
             return std::unexpected(parity_error(scalar.error().code,
                                                 "Scalar parity path " + std::to_string(path_index) +
@@ -1211,6 +1306,301 @@ run_material_parity(const FrameSceneHandle& scene,
     configuration.depth_limits = depth_limits;
     return run_parity(scene, inputs, *sampler, configuration);
 }
+
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+struct SurfaceMapInputs final {
+    std::vector<CudaWavefrontPathInput> cuda;
+    std::vector<renderer::RayDifferential> scalar;
+};
+
+[[nodiscard]] core::Result<SurfaceMapInputs>
+make_surface_map_inputs(const FrameSceneHandle& scene, const std::uint32_t path_count) {
+    if (!scene || !scene->spectral_environment() || path_count == 0U) {
+        return std::unexpected(parity_error(
+            core::StatusCode::invalid_argument,
+            "CUDA sphere surface-map parity requires an explicit scene and non-zero paths."));
+    }
+    const auto ray = surface_map_sphere_fixture::ray();
+    const auto differential = surface_map_sphere_fixture::differential();
+    const auto cone = surface_map_sphere_fixture::cone();
+    const auto state = renderer::PathState::create_initial(
+        scene->spectral_environment()->wavelengths, renderer::VacuumMedium);
+    if (!ray) {
+        return std::unexpected(ray.error());
+    }
+    if (!differential) {
+        return std::unexpected(differential.error());
+    }
+    if (!cone) {
+        return std::unexpected(cone.error());
+    }
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+
+    auto result = SurfaceMapInputs{};
+    result.cuda.reserve(path_count);
+    result.scalar.reserve(path_count);
+    const auto sampler = renderer::IndependentSampler{EvaluationSeed};
+    for (auto path_index = std::uint32_t{}; path_index < path_count; ++path_index) {
+        const auto stream = sampler.make_stream(path_index, 0U, 0U);
+        result.cuda.push_back(CudaWavefrontPathInput{
+            .primary_ray = *ray,
+            .primary_cone = *cone,
+            .initial_state = *state,
+            .sample = stream.index(),
+        });
+        result.scalar.push_back(*differential);
+    }
+    return result;
+}
+
+TEST(CudaTransportParityTest, MatchesNormalAndBumpMapsOnUvSphere) {
+    ASSERT_TRUE(select_test_device());
+    const auto normal_map = make_cuda_normal_map();
+    const auto bump_map = make_cuda_bump_map();
+    const auto flat_bump_map = make_cuda_flat_bump_map();
+    ASSERT_TRUE(normal_map);
+    ASSERT_TRUE(bump_map);
+    ASSERT_TRUE(flat_bump_map);
+    const auto mapped_scene = surface_map_sphere_fixture::make_scene(normal_map, bump_map);
+    const auto negative_v_scene = surface_map_sphere_fixture::make_scene(
+        normal_map, bump_map, renderer::TangentSpaceNormalYConvention::negative_v);
+    const auto baseline_scene = surface_map_sphere_fixture::make_scene({}, {});
+    const auto normal_only_scene = surface_map_sphere_fixture::make_scene(normal_map, {});
+    const auto flat_bump_scene = surface_map_sphere_fixture::make_scene(normal_map, flat_bump_map);
+    ASSERT_TRUE(mapped_scene) << mapped_scene.error().message;
+    ASSERT_TRUE(negative_v_scene) << negative_v_scene.error().message;
+    ASSERT_TRUE(baseline_scene) << baseline_scene.error().message;
+    ASSERT_TRUE(normal_only_scene) << normal_only_scene.error().message;
+    ASSERT_TRUE(flat_bump_scene) << flat_bump_scene.error().message;
+
+    constexpr auto path_count = std::uint32_t{32U};
+    const auto mapped_inputs = make_surface_map_inputs(*mapped_scene, path_count);
+    const auto negative_v_inputs = make_surface_map_inputs(*negative_v_scene, path_count);
+    const auto baseline_inputs = make_surface_map_inputs(*baseline_scene, path_count);
+    const auto normal_only_inputs = make_surface_map_inputs(*normal_only_scene, path_count);
+    const auto flat_bump_inputs = make_surface_map_inputs(*flat_bump_scene, path_count);
+    const auto mapped_sampler = make_uniform_light_sampler(*mapped_scene);
+    const auto negative_v_sampler = make_uniform_light_sampler(*negative_v_scene);
+    const auto baseline_sampler = make_uniform_light_sampler(*baseline_scene);
+    const auto normal_only_sampler = make_uniform_light_sampler(*normal_only_scene);
+    const auto flat_bump_sampler = make_uniform_light_sampler(*flat_bump_scene);
+    ASSERT_TRUE(mapped_inputs) << mapped_inputs.error().message;
+    ASSERT_TRUE(negative_v_inputs) << negative_v_inputs.error().message;
+    ASSERT_TRUE(baseline_inputs) << baseline_inputs.error().message;
+    ASSERT_TRUE(normal_only_inputs) << normal_only_inputs.error().message;
+    ASSERT_TRUE(flat_bump_inputs) << flat_bump_inputs.error().message;
+    ASSERT_TRUE(mapped_sampler) << mapped_sampler.error().message;
+    ASSERT_TRUE(negative_v_sampler) << negative_v_sampler.error().message;
+    ASSERT_TRUE(baseline_sampler) << baseline_sampler.error().message;
+    ASSERT_TRUE(normal_only_sampler) << normal_only_sampler.error().message;
+    ASSERT_TRUE(flat_bump_sampler) << flat_bump_sampler.error().message;
+
+    const auto configuration = material_configuration("SurfaceMapUvSphere", path_count);
+    const auto mapped = run_parity(*mapped_scene, mapped_inputs->cuda, *mapped_sampler,
+                                   configuration, mapped_inputs->scalar);
+    ASSERT_TRUE(mapped) << mapped.error().message;
+    expect_parity(configuration, *mapped);
+    testing::Test::RecordProperty("surface_maps_mse_linear", metric_text(mapped->linear.mse));
+    testing::Test::RecordProperty("surface_maps_rmse_linear", metric_text(mapped->linear.rmse));
+    testing::Test::RecordProperty("surface_maps_bias_mean", metric_text(mapped->linear.mean_bias));
+    testing::Test::RecordProperty("surface_maps_max_abs",
+                                  metric_text(mapped->linear.maximum_absolute_error));
+    testing::Test::RecordProperty("surface_maps_path_radiance_max_abs",
+                                  metric_text(mapped->maximum_path_radiance_absolute_error));
+    testing::Test::RecordProperty("surface_maps_psnr_display", metric_text(mapped->display_psnr));
+
+    const auto negative_v_configuration =
+        material_configuration("SurfaceMapUvSphereNegativeV", path_count);
+    const auto negative_v =
+        run_parity(*negative_v_scene, negative_v_inputs->cuda, *negative_v_sampler,
+                   negative_v_configuration, negative_v_inputs->scalar);
+    ASSERT_TRUE(negative_v) << negative_v.error().message;
+    expect_parity(negative_v_configuration, *negative_v);
+
+    const auto baseline =
+        run_parity(*baseline_scene, baseline_inputs->cuda, *baseline_sampler,
+                   material_configuration("SurfaceMapUvSphereBaseline", path_count));
+    ASSERT_TRUE(baseline) << baseline.error().message;
+    expect_parity(material_configuration("SurfaceMapUvSphereBaseline", path_count), *baseline);
+
+    const auto normal_only_configuration =
+        material_configuration("SurfaceMapUvSphereNormalOnly", path_count);
+    const auto normal_only =
+        run_parity(*normal_only_scene, normal_only_inputs->cuda, *normal_only_sampler,
+                   normal_only_configuration, normal_only_inputs->scalar);
+    ASSERT_TRUE(normal_only) << normal_only.error().message;
+    expect_parity(normal_only_configuration, *normal_only);
+    const auto flat_bump_configuration =
+        material_configuration("SurfaceMapUvSphereFlatBump", path_count);
+    const auto flat_bump = run_parity(*flat_bump_scene, flat_bump_inputs->cuda, *flat_bump_sampler,
+                                      flat_bump_configuration, flat_bump_inputs->scalar);
+    ASSERT_TRUE(flat_bump) << flat_bump.error().message;
+    expect_parity(flat_bump_configuration, *flat_bump);
+
+    auto maximum_terminal_direction_delta = renderer::ReferenceScalar{};
+    auto maximum_radiance_delta = renderer::ReferenceScalar{};
+    ASSERT_EQ(mapped->cuda_paths.size(), baseline->cuda_paths.size());
+    for (auto path_index = std::size_t{}; path_index < mapped->cuda_paths.size(); ++path_index) {
+        const auto& mapped_path = mapped->cuda_paths[path_index];
+        const auto& baseline_path = baseline->cuda_paths[path_index];
+        const auto direction_delta =
+            std::abs(
+                static_cast<renderer::ReferenceScalar>(mapped_path.terminal_ray.direction().x) -
+                baseline_path.terminal_ray.direction().x) +
+            std::abs(
+                static_cast<renderer::ReferenceScalar>(mapped_path.terminal_ray.direction().y) -
+                baseline_path.terminal_ray.direction().y) +
+            std::abs(
+                static_cast<renderer::ReferenceScalar>(mapped_path.terminal_ray.direction().z) -
+                baseline_path.terminal_ray.direction().z);
+        maximum_terminal_direction_delta =
+            std::max(maximum_terminal_direction_delta, direction_delta);
+        for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+            maximum_radiance_delta =
+                std::max(maximum_radiance_delta,
+                         std::abs(static_cast<renderer::ReferenceScalar>(
+                                      mapped_path.state.accumulated_radiance()[lane]) -
+                                  baseline_path.state.accumulated_radiance()[lane]));
+        }
+    }
+    EXPECT_GT(maximum_terminal_direction_delta, 1.0e-3)
+        << "Normal/bump maps must measurably perturb the CUDA shading frame.";
+    EXPECT_GT(maximum_radiance_delta, 1.0e-5)
+        << "Normal/bump maps must measurably change the CUDA sphere transport.";
+
+    auto maximum_y_convention_direction_delta = renderer::ReferenceScalar{};
+    auto maximum_y_convention_radiance_delta = renderer::ReferenceScalar{};
+    ASSERT_EQ(mapped->cuda_paths.size(), negative_v->cuda_paths.size());
+    for (auto path_index = std::size_t{}; path_index < mapped->cuda_paths.size(); ++path_index) {
+        const auto& positive_path = mapped->cuda_paths[path_index];
+        const auto& negative_path = negative_v->cuda_paths[path_index];
+        const auto direction_delta =
+            std::abs(
+                static_cast<renderer::ReferenceScalar>(positive_path.terminal_ray.direction().x) -
+                negative_path.terminal_ray.direction().x) +
+            std::abs(
+                static_cast<renderer::ReferenceScalar>(positive_path.terminal_ray.direction().y) -
+                negative_path.terminal_ray.direction().y) +
+            std::abs(
+                static_cast<renderer::ReferenceScalar>(positive_path.terminal_ray.direction().z) -
+                negative_path.terminal_ray.direction().z);
+        maximum_y_convention_direction_delta =
+            std::max(maximum_y_convention_direction_delta, direction_delta);
+        for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+            maximum_y_convention_radiance_delta =
+                std::max(maximum_y_convention_radiance_delta,
+                         std::abs(static_cast<renderer::ReferenceScalar>(
+                                      positive_path.state.accumulated_radiance()[lane]) -
+                                  negative_path.state.accumulated_radiance()[lane]));
+        }
+    }
+    EXPECT_GT(maximum_y_convention_direction_delta, 1.0e-3)
+        << "positive-V and negative-V normal maps must produce distinct shading frames.";
+    EXPECT_GT(maximum_y_convention_radiance_delta, 1.0e-5)
+        << "The normal-map Y convention must measurably affect sphere transport.";
+    testing::Test::RecordProperty("surface_maps_activation_direction_max_abs",
+                                  metric_text(maximum_terminal_direction_delta));
+    testing::Test::RecordProperty("surface_maps_activation_radiance_max_abs",
+                                  metric_text(maximum_radiance_delta));
+    testing::Test::RecordProperty("surface_maps_y_convention_direction_max_abs",
+                                  metric_text(maximum_y_convention_direction_delta));
+    testing::Test::RecordProperty("surface_maps_y_convention_radiance_max_abs",
+                                  metric_text(maximum_y_convention_radiance_delta));
+
+    ASSERT_EQ(normal_only->cuda_paths.size(), flat_bump->cuda_paths.size());
+    for (auto path_index = std::size_t{}; path_index < normal_only->cuda_paths.size();
+         ++path_index) {
+        const auto& normal_only_path = normal_only->cuda_paths[path_index];
+        const auto& flat_bump_path = flat_bump->cuda_paths[path_index];
+        EXPECT_NEAR(flat_bump_path.terminal_ray.direction().x,
+                    normal_only_path.terminal_ray.direction().x, 2.0e-5F);
+        EXPECT_NEAR(flat_bump_path.terminal_ray.direction().y,
+                    normal_only_path.terminal_ray.direction().y, 2.0e-5F);
+        EXPECT_NEAR(flat_bump_path.terminal_ray.direction().z,
+                    normal_only_path.terminal_ray.direction().z, 2.0e-5F);
+        for (auto lane = std::size_t{}; lane < renderer::TransportSpectrumSampleCount; ++lane) {
+            EXPECT_NEAR(flat_bump_path.state.accumulated_radiance()[lane],
+                        normal_only_path.state.accumulated_radiance()[lane], 2.0e-5F);
+        }
+    }
+}
+
+TEST(CudaTransportParityTest, RejectsMalformedSurfaceMapColumnsOnDevice) {
+    ASSERT_TRUE(select_test_device());
+    const auto normal_map = make_cuda_normal_map();
+    const auto bump_map = make_cuda_bump_map();
+    ASSERT_TRUE(normal_map);
+    ASSERT_TRUE(bump_map);
+    const auto scene = surface_map_sphere_fixture::make_scene(normal_map, bump_map);
+    ASSERT_TRUE(scene) << scene.error().message;
+    const auto inputs = make_surface_map_inputs(*scene, 1U);
+    const auto sampler = make_uniform_light_sampler(*scene);
+    ASSERT_TRUE(inputs) << inputs.error().message;
+    ASSERT_TRUE(sampler) << sampler.error().message;
+
+    const auto expect_rejected = [&](const std::uint64_t offset, const auto& value,
+                                     const std::string_view failure_context) {
+        auto scene_soa = CudaSceneSoA::upload(**scene);
+        ASSERT_TRUE(scene_soa) << scene_soa.error().message;
+        auto scene_bvh = CudaSceneBvh::build(*scene_soa);
+        ASSERT_TRUE(scene_bvh) << scene_bvh.error().message;
+        ASSERT_LE(offset, scene_soa->size_bytes());
+        ASSERT_LE(sizeof(value), scene_soa->size_bytes() - static_cast<std::size_t>(offset));
+        auto* destination = const_cast<std::uint8_t*>(scene_soa->device_data()) + offset;
+        ASSERT_EQ(cudaMemcpy(destination, &value, sizeof(value), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        const auto traced = trace_cuda_wavefront_transport(
+            *scene_soa, *scene_bvh, inputs->cuda, std::cref(*sampler),
+            CudaWavefrontTransportOptions{
+                .heuristic = renderer::MisHeuristic::power,
+                .depth_limits = OneSurfaceBounce,
+                .roulette_policy = renderer::RussianRoulettePolicy::disabled(),
+            });
+        EXPECT_FALSE(traced) << failure_context;
+        if (!traced) {
+            EXPECT_NE(traced.error().code, core::StatusCode::success) << failure_context;
+        }
+        EXPECT_TRUE(scene_bvh->close()) << failure_context;
+        EXPECT_TRUE(scene_soa->close()) << failure_context;
+    };
+
+    auto metadata_upload = CudaSceneSoA::upload(**scene);
+    ASSERT_TRUE(metadata_upload) << metadata_upload.error().message;
+    const auto pristine_header = metadata_upload->header();
+    ASSERT_TRUE(metadata_upload->close());
+    auto truncated_texels =
+        pristine_header.columns[xpu::shared::scene_soa_column::image_texel_value];
+    ASSERT_GT(truncated_texels.element_count, 0U);
+    --truncated_texels.element_count;
+    expect_rejected(offsetof(xpu::shared::SceneSoaHeader, columns) +
+                        sizeof(xpu::shared::SceneSoaColumnDescriptor) *
+                            xpu::shared::scene_soa_column::image_texel_value,
+                    truncated_texels, "A truncated device texel column must fail before shading.");
+
+    const auto invalid_channel = std::uint32_t{99U};
+    expect_rejected(
+        pristine_header.columns[xpu::shared::scene_soa_column::material_normal_map_red_channel]
+            .offset_bytes,
+        invalid_channel, "An out-of-range device normal-map channel must fail explicitly.");
+    const auto invalid_y_convention = std::uint32_t{2U};
+    expect_rejected(
+        pristine_header.columns[xpu::shared::scene_soa_column::material_normal_map_y_convention]
+            .offset_bytes,
+        invalid_y_convention, "An unknown device normal-map Y convention must fail explicitly.");
+    const auto color_storage =
+        static_cast<std::uint32_t>(renderer::TextureColorSpace::scene_linear_srgb);
+    expect_rejected(
+        pristine_header.columns[xpu::shared::scene_soa_column::image_texture_storage_color_space]
+            .offset_bytes,
+        color_storage, "A color-tagged device normal map must fail instead of being sampled.");
+    const auto empty_mip_range = std::uint64_t{};
+    expect_rejected(pristine_header.columns[xpu::shared::scene_soa_column::image_texture_mip_count]
+                        .offset_bytes,
+                    empty_mip_range, "An empty device image mip range must fail explicitly.");
+}
+#endif
 
 TEST(CudaTransportParityTest, MatchesPrimaryEnvironmentMiss) {
     ASSERT_TRUE(select_test_device());

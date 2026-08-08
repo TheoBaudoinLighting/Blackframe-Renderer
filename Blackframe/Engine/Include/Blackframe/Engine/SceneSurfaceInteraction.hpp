@@ -5,6 +5,7 @@
 #include <Blackframe/Renderer/ClosureMixture.hpp>
 #include <Blackframe/Renderer/Emission.hpp>
 #include <Blackframe/Renderer/LocalFrame.hpp>
+#include <Blackframe/Renderer/RayCone.hpp>
 #include <Blackframe/Renderer/RayDifferential.hpp>
 #include <Blackframe/Renderer/SurfaceInteraction.hpp>
 #include <optional>
@@ -20,6 +21,7 @@ struct ResolvedSceneSurface final {
     renderer::ClosureMixture closures;
     renderer::OrthonormalFrame closure_frame;
     renderer::OneSidedSurfaceEmission emission;
+    renderer::TransportScalar ray_parameter{};
 };
 
 // The scalar reference path evaluates its two analytic neighbors on the extension of the central
@@ -48,10 +50,19 @@ resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const re
 resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit,
                           const renderer::RayDifferential& ray);
 
+[[nodiscard]] core::Result<ResolvedSceneSurface> resolve_scene_surface_hit(const FrameScene& scene,
+                                                                           const AccelHit& hit,
+                                                                           const renderer::Ray& ray,
+                                                                           renderer::RayCone cone);
+
 [[nodiscard]] core::Result<std::optional<ResolvedSceneSurface>>
 resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray);
 
 [[nodiscard]] core::Result<std::optional<ResolvedSceneSurfaceWithDifferentials>>
 resolve_scene_surface(const AccelBackend& acceleration, const renderer::RayDifferential& ray);
+
+[[nodiscard]] core::Result<std::optional<ResolvedSceneSurface>>
+resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray,
+                      renderer::RayCone cone);
 
 } // namespace blackframe::engine

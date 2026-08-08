@@ -279,6 +279,7 @@ core::Status AccelBackend::validate_refit_scene(const FrameSceneHandle& scene) c
                         "Acceleration refit cannot change geometry identifiers or meshes."));
     }
     if (!std::ranges::equal(scene_->constant_textures(), scene->constant_textures()) ||
+        !std::ranges::equal(scene_->host_image_textures(), scene->host_image_textures()) ||
         !std::ranges::equal(scene_->materials(), scene->materials()) ||
         !std::ranges::equal(scene_->punctual_lights(), scene->punctual_lights()) ||
         scene_->spectral_environment() != scene->spectral_environment()) {

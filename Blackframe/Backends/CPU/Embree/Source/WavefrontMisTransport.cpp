@@ -1402,8 +1402,8 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
                                                                 "A CPU wavefront hit lane received "
                                                                 "incomplete intersection state."))};
                         }
-                        const auto resolved =
-                            resolve_scene_surface_hit(*scene, *runtime.hit, *runtime.ray);
+                        const auto resolved = resolve_scene_surface_hit(
+                            *scene, *runtime.hit, *runtime.ray, *runtime.cone);
                         if (!resolved) {
                             return core::Status{std::unexpected(resolved.error())};
                         }

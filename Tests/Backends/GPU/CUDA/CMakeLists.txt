@@ -16,6 +16,22 @@ target_link_libraries(
         GTest::gtest_main
 )
 
+if(TARGET Blackframe::HostImage)
+    target_link_libraries(BlackframeCudaSceneTests PRIVATE Blackframe::HostImage)
+    target_compile_definitions(
+        BlackframeCudaSceneTests
+        PRIVATE
+            BLACKFRAME_CUDA_SURFACE_MAP_TESTS=1
+            BLACKFRAME_CUDA_SURFACE_MAP_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+    )
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
+else()
+    target_compile_definitions(
+        BlackframeCudaSceneTests
+        PRIVATE BLACKFRAME_CUDA_SURFACE_MAP_TESTS=0
+    )
+endif()
+
 gtest_discover_tests(
     BlackframeCudaSceneTests
     DISCOVERY_MODE PRE_TEST
@@ -237,6 +253,22 @@ target_link_libraries(
         Blackframe::ProjectOptions
         GTest::gtest_main
 )
+
+if(TARGET Blackframe::HostImage)
+    target_link_libraries(BlackframeCudaTransportParityTests PRIVATE Blackframe::HostImage)
+    target_compile_definitions(
+        BlackframeCudaTransportParityTests
+        PRIVATE
+            BLACKFRAME_CUDA_SURFACE_MAP_TESTS=1
+            BLACKFRAME_CUDA_SURFACE_MAP_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+    )
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
+else()
+    target_compile_definitions(
+        BlackframeCudaTransportParityTests
+        PRIVATE BLACKFRAME_CUDA_SURFACE_MAP_TESTS=0
+    )
+endif()
 
 gtest_discover_tests(
     BlackframeCudaTransportParityTests

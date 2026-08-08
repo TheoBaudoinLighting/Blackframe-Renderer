@@ -1,3 +1,4 @@
+#include <Blackframe/Renderer/HostImageCache.hpp>
 #include <Blackframe/Renderer/HostImageFilter.hpp>
 #if defined(BLACKFRAME_HOST_IMAGE_FILTER_PNG)
 #include <Blackframe/Renderer/Film.hpp>

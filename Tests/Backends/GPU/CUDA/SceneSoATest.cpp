@@ -2,6 +2,12 @@
 #include <Blackframe/XPU/CUDA/SceneSoaHash.hpp>
 #include <Blackframe/XPU/Shared/ConstantTextureAbi.hpp>
 #include <Blackframe/XPU/Shared/SceneSoaAbi.hpp>
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+#include "../../SurfaceMapSphereFixture.hpp"
+
+#include <Blackframe/Renderer/HostImageCache.hpp>
+#include <Blackframe/Renderer/HostImageMipChain.hpp>
+#endif
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -9,6 +15,10 @@
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+#include <filesystem>
+#include <fstream>
+#endif
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -28,7 +38,59 @@ namespace column = xpu::shared::scene_soa_column;
 using core::StatusCode;
 using xpu::shared::SceneSoaHeader;
 
-inline constexpr std::uint64_t FrozenRichSceneHash = 0x7C676D09A54980BDULL;
+inline constexpr std::uint64_t FrozenRichSceneHash = 0x9763897EF2337C69ULL;
+
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+[[nodiscard]] renderer::HostImageMipChainHandle
+make_surface_map(const std::string_view name, const std::uint32_t width, const std::uint32_t height,
+                 const std::span<const renderer::TransportScalar> pixels, const bool rgb) {
+    const auto path = std::filesystem::path{BLACKFRAME_CUDA_SURFACE_MAP_TEST_OUTPUT_DIR} / name;
+    if (pixels.size() != static_cast<std::size_t>(width) * height * (rgb ? 3U : 1U)) {
+        throw std::runtime_error{"CUDA surface-map test fixture has an invalid pixel count."};
+    }
+    auto stream = std::ofstream{path, std::ios::binary | std::ios::trunc};
+    if (!stream.is_open()) {
+        throw std::runtime_error{"CUDA surface-map test fixture could not be created."};
+    }
+    stream << (rgb ? "PF\n" : "Pf\n") << width << ' ' << height << '\n'
+           << (std::endian::native == std::endian::little ? "-1.0\n" : "1.0\n");
+    stream.write(reinterpret_cast<const char*>(pixels.data()),
+                 static_cast<std::streamsize>(pixels.size() * sizeof(pixels.front())));
+    if (!stream.good()) {
+        throw std::runtime_error{"CUDA surface-map test fixture could not be written."};
+    }
+    stream.close();
+    if (stream.fail()) {
+        throw std::runtime_error{"CUDA surface-map test fixture could not be closed."};
+    }
+
+    auto cache = renderer::HostImageCache::create();
+    if (!cache) {
+        throw std::runtime_error{cache.error().message};
+    }
+    const auto image = cache->load(path, renderer::TextureColorSpace::data);
+    if (!image) {
+        throw std::runtime_error{image.error().message};
+    }
+    const auto mip_chain = renderer::HostImageMipChain::generate(*image);
+    if (!mip_chain) {
+        throw std::runtime_error{mip_chain.error().message};
+    }
+    return *mip_chain;
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_normal_map() {
+    const auto pixels = surface_map_sphere_fixture::normal_map_pixels();
+    return make_surface_map("cuda-scene-normal-map.pfm", surface_map_sphere_fixture::NormalMapWidth,
+                            surface_map_sphere_fixture::NormalMapHeight, pixels, true);
+}
+
+[[nodiscard]] renderer::HostImageMipChainHandle make_bump_map() {
+    const auto pixels = surface_map_sphere_fixture::bump_map_pixels();
+    return make_surface_map("cuda-scene-bump-map.pfm", surface_map_sphere_fixture::BumpMapWidth,
+                            surface_map_sphere_fixture::BumpMapHeight, pixels, false);
+}
+#endif
 
 [[nodiscard]] testing::AssertionResult select_test_device() {
     int device_count = 0;
@@ -417,16 +479,19 @@ expected_punctual_spectrum(const ScenePunctualLight& light) {
     return std::get<SceneSpotLight>(light).on_axis_spectral_radiant_intensity;
 }
 
-TEST(CudaSceneSoAAbi, FreezesVersionThreeConstantTextureColumns) {
-    EXPECT_EQ(xpu::shared::SceneSoaMagic, 0x33414F53464B4C42ULL);
-    EXPECT_EQ(xpu::shared::SceneSoaAbiMajor, 3U);
+TEST(CudaSceneSoAAbi, FreezesVersionFourSurfaceMapColumns) {
+    EXPECT_EQ(xpu::shared::SceneSoaMagic, 0x34414F53464B4C42ULL);
+    EXPECT_EQ(xpu::shared::SceneSoaAbiMajor, 4U);
     EXPECT_EQ(xpu::shared::SceneSoaAbiMinor, 0U);
     EXPECT_EQ(xpu::shared::SceneSoaClosureParameterScalarCount, 10U);
-    EXPECT_EQ(sizeof(SceneSoaHeader), 4144U);
+    EXPECT_EQ(sizeof(SceneSoaHeader), 4848U);
     EXPECT_EQ(offsetof(SceneSoaHeader, closure_count), 80U);
     EXPECT_EQ(offsetof(SceneSoaHeader, texture_count), 120U);
-    EXPECT_EQ(offsetof(SceneSoaHeader, columns), 128U);
-    EXPECT_EQ(offsetof(SceneSoaHeader, reserved), 4112U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, image_texture_count), 128U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, image_mip_count), 136U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, image_texel_count), 144U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, columns), 152U);
+    EXPECT_EQ(offsetof(SceneSoaHeader, reserved), 4808U);
 
     EXPECT_EQ(column::material_closure_offset, 31U);
     EXPECT_EQ(column::material_closure_count, 32U);
@@ -442,7 +507,21 @@ TEST(CudaSceneSoAAbi, FreezesVersionThreeConstantTextureColumns) {
     EXPECT_EQ(column::texture_id, 160U);
     EXPECT_EQ(column::texture_kind, 161U);
     EXPECT_EQ(column::texture_value, 162U);
-    EXPECT_EQ(column::count, 166U);
+    EXPECT_EQ(column::material_normal_map_present, 166U);
+    EXPECT_EQ(column::material_normal_map_y_convention, 175U);
+    EXPECT_EQ(column::material_bump_map_present, 176U);
+    EXPECT_EQ(column::material_bump_map_maximum_texel_visits, 183U);
+    EXPECT_EQ(column::image_texture_id, 184U);
+    EXPECT_EQ(column::image_texture_mip_offset, 185U);
+    EXPECT_EQ(column::image_texture_mip_count, 186U);
+    EXPECT_EQ(column::image_texture_channel_count, 187U);
+    EXPECT_EQ(column::image_texture_storage_color_space, 188U);
+    EXPECT_EQ(column::image_mip_width, 189U);
+    EXPECT_EQ(column::image_mip_height, 190U);
+    EXPECT_EQ(column::image_mip_texel_offset, 191U);
+    EXPECT_EQ(column::image_mip_texel_count, 192U);
+    EXPECT_EQ(column::image_texel_value, 193U);
+    EXPECT_EQ(column::count, 194U);
 
     EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_closure_offset),
               sizeof(std::uint64_t));
@@ -467,6 +546,15 @@ TEST(CudaSceneSoAAbi, FreezesVersionThreeConstantTextureColumns) {
     EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::texture_kind),
               sizeof(std::uint32_t));
     EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::texture_value), sizeof(float));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_normal_map_present),
+              sizeof(std::uint8_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::material_bump_map_scale),
+              sizeof(float));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::image_texture_mip_offset),
+              sizeof(std::uint64_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::image_mip_texel_count),
+              sizeof(std::uint64_t));
+    EXPECT_EQ(xpu::shared::scene_soa_column_element_size(column::image_texel_value), sizeof(float));
 }
 
 TEST(CudaSceneSoAAbi, RejectsIncompatibleAndMalformedHeaders) {
@@ -489,7 +577,7 @@ TEST(CudaSceneSoAAbi, RejectsIncompatibleAndMalformedHeaders) {
     EXPECT_EQ(xpu::shared::validate_scene_soa_header(invalid),
               xpu::shared::SceneSoaHeaderValidationStatus::incompatible_version);
     invalid = header;
-    invalid.reserved[2] = 1U;
+    invalid.reserved[4] = 1U;
     EXPECT_EQ(xpu::shared::validate_scene_soa_header(invalid),
               xpu::shared::SceneSoaHeaderValidationStatus::nonzero_reserved);
     invalid = header;
@@ -856,6 +944,110 @@ TEST(CudaSceneSoA, MapsEveryCpuFieldToDeviceColumnsBitForBit) {
             }));
     }
 }
+
+#if BLACKFRAME_CUDA_SURFACE_MAP_TESTS
+TEST(CudaSceneSoA, SerializesSurfaceMapBindingsAndMipPayloadBitForBit) {
+    ASSERT_TRUE(select_test_device());
+    const auto normal_map = make_normal_map();
+    const auto bump_map = make_bump_map();
+    ASSERT_TRUE(normal_map);
+    ASSERT_TRUE(bump_map);
+    const auto cpu_scene = surface_map_sphere_fixture::make_scene(normal_map, bump_map);
+    ASSERT_TRUE(cpu_scene) << cpu_scene.error().message;
+
+    auto uploaded_result = CudaSceneSoA::upload(**cpu_scene);
+    ASSERT_TRUE(uploaded_result) << uploaded_result.error().message;
+    auto uploaded = std::move(*uploaded_result);
+    const auto bytes = download(uploaded);
+    const auto header = read_header(bytes);
+    ASSERT_EQ(xpu::shared::validate_scene_soa_header(header),
+              xpu::shared::SceneSoaHeaderValidationStatus::valid);
+    EXPECT_EQ(header.content_hash, normalized_hash(bytes));
+    EXPECT_EQ(header.material_count, 1U);
+    EXPECT_EQ(header.image_texture_count, 2U);
+    EXPECT_EQ(header.image_mip_count,
+              static_cast<std::uint64_t>(normal_map->level_count()) + bump_map->level_count());
+
+    expect_column<std::uint8_t>(bytes, header, column::material_normal_map_present, {1U});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_texture_id,
+                                 {surface_map_sphere_fixture::NormalTextureId.value});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_red_channel, {0U});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_green_channel, {1U});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_blue_channel, {2U});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_u_wrap,
+                                 {static_cast<std::uint32_t>(renderer::TextureWrapMode::repeat)});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_v_wrap,
+                                 {static_cast<std::uint32_t>(renderer::TextureWrapMode::repeat)});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_maximum_anisotropy,
+                                 {renderer::HostImageEwaLimits{}.maximum_anisotropy});
+    expect_column<std::uint32_t>(bytes, header, column::material_normal_map_maximum_texel_visits,
+                                 {renderer::HostImageEwaLimits{}.maximum_texel_visits});
+    expect_column<std::uint32_t>(
+        bytes, header, column::material_normal_map_y_convention,
+        {static_cast<std::uint32_t>(renderer::TangentSpaceNormalYConvention::positive_v)});
+
+    expect_column<std::uint8_t>(bytes, header, column::material_bump_map_present, {1U});
+    expect_column<std::uint32_t>(bytes, header, column::material_bump_map_texture_id,
+                                 {surface_map_sphere_fixture::BumpTextureId.value});
+    expect_column<std::uint32_t>(bytes, header, column::material_bump_map_channel, {0U});
+    expect_column<float>(bytes, header, column::material_bump_map_scale, {0.2F});
+    expect_column<std::uint32_t>(bytes, header, column::material_bump_map_u_wrap,
+                                 {static_cast<std::uint32_t>(renderer::TextureWrapMode::clamp)});
+    expect_column<std::uint32_t>(bytes, header, column::material_bump_map_v_wrap,
+                                 {static_cast<std::uint32_t>(renderer::TextureWrapMode::clamp)});
+    expect_column<std::uint32_t>(bytes, header, column::material_bump_map_maximum_anisotropy,
+                                 {renderer::HostImageEwaLimits{}.maximum_anisotropy});
+    expect_column<std::uint32_t>(bytes, header, column::material_bump_map_maximum_texel_visits,
+                                 {renderer::HostImageEwaLimits{}.maximum_texel_visits});
+
+    const auto images = (*cpu_scene)->host_image_textures();
+    auto expected_ids = std::vector<std::uint32_t>{};
+    auto expected_mip_offsets = std::vector<std::uint64_t>{};
+    auto expected_mip_counts = std::vector<std::uint64_t>{};
+    auto expected_channel_counts = std::vector<std::uint32_t>{};
+    auto expected_color_spaces = std::vector<std::uint32_t>{};
+    auto expected_widths = std::vector<std::uint32_t>{};
+    auto expected_heights = std::vector<std::uint32_t>{};
+    auto expected_texel_offsets = std::vector<std::uint64_t>{};
+    auto expected_texel_counts = std::vector<std::uint64_t>{};
+    auto expected_texels = std::vector<float>{};
+    auto mip_offset = std::uint64_t{};
+    auto texel_offset = std::uint64_t{};
+    for (const auto& image : images) {
+        const auto base = image.image->level(0U);
+        ASSERT_TRUE(base) << base.error().message;
+        expected_ids.push_back(image.id.value);
+        expected_mip_offsets.push_back(mip_offset);
+        expected_mip_counts.push_back(image.image->level_count());
+        expected_channel_counts.push_back((*base)->channel_count());
+        expected_color_spaces.push_back(static_cast<std::uint32_t>((*base)->storage_color_space()));
+        for (auto level_index = std::uint32_t{}; level_index < image.image->level_count();
+             ++level_index) {
+            const auto level = image.image->level(level_index);
+            ASSERT_TRUE(level) << level.error().message;
+            expected_widths.push_back((*level)->width());
+            expected_heights.push_back((*level)->height());
+            expected_texel_offsets.push_back(texel_offset);
+            expected_texel_counts.push_back((*level)->pixels().size());
+            expected_texels.insert(expected_texels.end(), (*level)->pixels().begin(),
+                                   (*level)->pixels().end());
+            texel_offset += (*level)->pixels().size();
+            ++mip_offset;
+        }
+    }
+    EXPECT_EQ(header.image_texel_count, texel_offset);
+    expect_column(bytes, header, column::image_texture_id, expected_ids);
+    expect_column(bytes, header, column::image_texture_mip_offset, expected_mip_offsets);
+    expect_column(bytes, header, column::image_texture_mip_count, expected_mip_counts);
+    expect_column(bytes, header, column::image_texture_channel_count, expected_channel_counts);
+    expect_column(bytes, header, column::image_texture_storage_color_space, expected_color_spaces);
+    expect_column(bytes, header, column::image_mip_width, expected_widths);
+    expect_column(bytes, header, column::image_mip_height, expected_heights);
+    expect_column(bytes, header, column::image_mip_texel_offset, expected_texel_offsets);
+    expect_column(bytes, header, column::image_mip_texel_count, expected_texel_counts);
+    expect_column(bytes, header, column::image_texel_value, expected_texels);
+}
+#endif
 
 TEST(CudaSceneSoA, DeviceHashMatchesHostHashAndFrozenValue) {
     ASSERT_TRUE(select_test_device());

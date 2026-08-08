@@ -33,6 +33,24 @@ namespace {
     return {};
 }
 
+[[nodiscard]] core::Result<std::reference_wrapper<const SceneSpectralMaterial>>
+surface_material(const FrameScene& scene, const AccelHit& hit) {
+    const auto material = scene.material(hit.identifiers.material);
+    if (!material) {
+        return std::unexpected(material.error());
+    }
+    if (!material->get().spectral) {
+        return std::unexpected(
+            surface_error(core::StatusCode::unavailable,
+                          "The hit frame scene material has no spectral transport data."));
+    }
+    return std::cref(*material->get().spectral);
+}
+
+[[nodiscard]] bool has_surface_map(const SceneSpectralMaterial& material) noexcept {
+    return material.normal_map.has_value() || material.bump_map.has_value();
+}
+
 [[nodiscard]] core::Status
 validate_barycentrics(const renderer::TriangleBarycentrics barycentrics) {
     const auto values =
@@ -440,6 +458,229 @@ narrow_texture_derivative(const double value) {
     return narrowed;
 }
 
+[[nodiscard]] core::Result<renderer::TextureCoordinateDifferentials>
+resolve_cone_texture_differentials(const ResolvedSceneSurface& surface, const AccelHit& hit,
+                                   const renderer::Ray& ray, const renderer::RayCone cone) {
+    const auto radius = renderer::ray_cone_surface_footprint_radius(
+        cone, ray, hit.triangle.parameter, surface.interaction.geometric_normal());
+    if (!radius) {
+        return std::unexpected(radius.error());
+    }
+    if (!(*radius > renderer::TransportScalar{0})) {
+        return std::unexpected(
+            surface_error(core::StatusCode::unavailable,
+                          "A mapped frame scene surface requires a non-zero ray-cone footprint."));
+    }
+
+    const auto basis = renderer::OrthonormalFrame::from_normal_and_tangent(
+        surface.interaction.geometric_normal(), surface.interaction.dpdu());
+    if (!basis) {
+        return std::unexpected(surface_error(
+            core::StatusCode::invalid_argument,
+            "A ray cone cannot resolve a surface map through a singular surface tangent."));
+    }
+
+    const auto& dpdu = surface.interaction.dpdu();
+    const auto& dpdv = surface.interaction.dpdv();
+    const auto a = static_cast<double>(renderer::dot(basis->tangent(), dpdu));
+    const auto b = static_cast<double>(renderer::dot(basis->tangent(), dpdv));
+    const auto c = static_cast<double>(renderer::dot(basis->bitangent(), dpdu));
+    const auto d = static_cast<double>(renderer::dot(basis->bitangent(), dpdv));
+    const auto determinant = std::fma(a, d, -b * c);
+    if (!std::isfinite(determinant) || determinant == 0.0) {
+        return std::unexpected(surface_error(
+            core::StatusCode::invalid_argument,
+            "A ray cone cannot resolve a surface map through a singular UV Jacobian."));
+    }
+    const auto footprint_radius = static_cast<double>(*radius);
+    const auto dudx = narrow_texture_derivative(footprint_radius * d / determinant);
+    const auto dvdx = narrow_texture_derivative(-footprint_radius * c / determinant);
+    const auto dudy = narrow_texture_derivative(-footprint_radius * b / determinant);
+    const auto dvdy = narrow_texture_derivative(footprint_radius * a / determinant);
+    for (const auto* derivative : {&dudx, &dvdx, &dudy, &dvdy}) {
+        if (!derivative->has_value()) {
+            return std::unexpected(derivative->error());
+        }
+    }
+    const auto result = renderer::TextureCoordinateDifferentials{
+        .dudx = *dudx,
+        .dvdx = *dvdx,
+        .dudy = *dudy,
+        .dvdy = *dvdy,
+    };
+    const auto footprint_determinant =
+        std::fma(result.dudx, result.dvdy, -result.dvdx * result.dudy);
+    if (!std::isfinite(footprint_determinant) || footprint_determinant == 0.0F) {
+        return std::unexpected(
+            surface_error(core::StatusCode::invalid_argument,
+                          "A ray-cone texture footprint is not full-rank in transport precision."));
+    }
+    return result;
+}
+
+[[nodiscard]] core::Result<renderer::SurfaceInteraction>
+with_shading_normal(const renderer::SurfaceInteraction& interaction,
+                    const renderer::Normal3 shading_normal) {
+    return renderer::SurfaceInteraction::create(
+        interaction.position(), interaction.geometric_normal(), shading_normal, interaction.uv(),
+        interaction.dpdu(), interaction.dpdv(), interaction.identifiers(), interaction.time());
+}
+
+[[nodiscard]] core::Result<renderer::OrthonormalFrame>
+closure_frame_for_interaction(const SceneSpectralMaterial& material,
+                              const renderer::SurfaceInteraction& interaction) {
+    const auto& mixture = material.closure_mixture;
+    auto frame = mixture.frame_mode == SceneClosureFrameMode::surface_tangent
+                     ? renderer::OrthonormalFrame::from_normal_and_tangent(
+                           interaction.shading_normal(), interaction.dpdu())
+                     : renderer::OrthonormalFrame::from_normal(interaction.shading_normal());
+    if (!frame) {
+        return std::unexpected(frame.error());
+    }
+    return frame->rotated_about_normal(mixture.tangent_rotation_radians);
+}
+
+[[nodiscard]] core::Result<renderer::SurfaceInteraction>
+evaluate_surface_maps(const FrameScene& scene, const SceneSpectralMaterial& material,
+                      renderer::SurfaceInteraction interaction,
+                      const renderer::TextureCoordinateDifferentials differentials) {
+    if (!has_surface_map(material)) {
+        return interaction;
+    }
+    if (material.normal_map) {
+        const auto& binding = *material.normal_map;
+        const auto texture = scene.host_image_texture(binding.texture);
+        if (!texture || !texture->get().image) {
+            return std::unexpected(
+                surface_error(core::StatusCode::internal_error,
+                              "A validated normal map lost its immutable host-image texture."));
+        }
+        const auto mapped = renderer::evaluate_host_tangent_space_normal_map(
+            *texture->get().image, interaction, differentials,
+            renderer::HostNormalMapOptions{
+                .channels =
+                    {
+                        .x = binding.red_channel,
+                        .y = binding.green_channel,
+                        .z = binding.blue_channel,
+                    },
+                .y_convention = binding.y_convention,
+                .u_wrap = binding.u_wrap,
+                .v_wrap = binding.v_wrap,
+                .ewa_limits = binding.ewa_limits,
+            });
+        if (!mapped) {
+            return std::unexpected(mapped.error());
+        }
+        auto replaced = with_shading_normal(interaction, *mapped);
+        if (!replaced) {
+            return std::unexpected(replaced.error());
+        }
+        interaction = *replaced;
+    }
+    if (material.bump_map) {
+        const auto& binding = *material.bump_map;
+        const auto texture = scene.host_image_texture(binding.texture);
+        if (!texture || !texture->get().image) {
+            return std::unexpected(
+                surface_error(core::StatusCode::internal_error,
+                              "A validated bump map lost its immutable host-image texture."));
+        }
+        const auto mapped = renderer::evaluate_host_filtered_bump_map(
+            *texture->get().image, interaction, differentials,
+            renderer::HostBumpMapOptions{
+                .height_channel = binding.channel,
+                .u_wrap = binding.u_wrap,
+                .v_wrap = binding.v_wrap,
+                .ewa_limits = binding.ewa_limits,
+                .displacement_scale = binding.scale,
+            });
+        if (!mapped) {
+            return std::unexpected(mapped.error());
+        }
+        auto replaced = with_shading_normal(interaction, *mapped);
+        if (!replaced) {
+            return std::unexpected(replaced.error());
+        }
+        interaction = *replaced;
+    }
+    return interaction;
+}
+
+[[nodiscard]] core::Status
+apply_surface_maps(const FrameScene& scene, const AccelHit& hit,
+                   const renderer::TextureCoordinateDifferentials differentials,
+                   ResolvedSceneSurface& surface) {
+    const auto material = surface_material(scene, hit);
+    if (!material) {
+        return std::unexpected(material.error());
+    }
+    if (!has_surface_map(material->get())) {
+        return {};
+    }
+    const auto mapped =
+        evaluate_surface_maps(scene, material->get(), surface.interaction, differentials);
+    if (!mapped) {
+        return std::unexpected(mapped.error());
+    }
+    const auto frame = closure_frame_for_interaction(material->get(), *mapped);
+    if (!frame) {
+        return std::unexpected(frame.error());
+    }
+    surface.interaction = *mapped;
+    surface.closure_frame = *frame;
+    return {};
+}
+
+[[nodiscard]] core::Result<renderer::SurfaceInteraction>
+auxiliary_interaction(const renderer::SurfaceInteraction& central,
+                      const renderer::Vector3 position_delta, const renderer::TransportScalar du,
+                      const renderer::TransportScalar dv, const renderer::Normal3 shading_normal) {
+    return renderer::SurfaceInteraction::create(
+        central.position() + position_delta, central.geometric_normal(), shading_normal,
+        renderer::Point2{.x = central.uv().x + du, .y = central.uv().y + dv}, central.dpdu(),
+        central.dpdv(), central.identifiers(), central.time());
+}
+
+[[nodiscard]] core::Status
+apply_surface_maps_to_differentials(const FrameScene& scene, const AccelHit& hit,
+                                    ResolvedSceneSurfaceWithDifferentials& resolved) {
+    const auto material = surface_material(scene, hit);
+    if (!material) {
+        return std::unexpected(material.error());
+    }
+    if (!has_surface_map(material->get())) {
+        return {};
+    }
+
+    const auto central = resolved.surface.interaction;
+    const auto& footprint = resolved.differentials.texture_coordinates;
+    auto rx = auxiliary_interaction(central, resolved.differentials.positions.dpdx, footprint.dudx,
+                                    footprint.dvdx, resolved.differentials.rx_shading_normal);
+    auto ry = auxiliary_interaction(central, resolved.differentials.positions.dpdy, footprint.dudy,
+                                    footprint.dvdy, resolved.differentials.ry_shading_normal);
+    if (!rx) {
+        return std::unexpected(rx.error());
+    }
+    if (!ry) {
+        return std::unexpected(ry.error());
+    }
+    auto mapped_rx = evaluate_surface_maps(scene, material->get(), *rx, footprint);
+    auto mapped_ry = evaluate_surface_maps(scene, material->get(), *ry, footprint);
+    if (!mapped_rx) {
+        return std::unexpected(mapped_rx.error());
+    }
+    if (!mapped_ry) {
+        return std::unexpected(mapped_ry.error());
+    }
+    if (auto status = apply_surface_maps(scene, hit, footprint, resolved.surface); !status) {
+        return status;
+    }
+    resolved.differentials.rx_shading_normal = mapped_rx->shading_normal();
+    resolved.differentials.ry_shading_normal = mapped_ry->shading_normal();
+    return {};
+}
+
 [[nodiscard]] core::Result<ResolvedSceneSurfaceDifferentials>
 resolve_surface_differentials(const FrameScene& scene, const AccelHit& hit,
                               const renderer::RayDifferential& ray,
@@ -689,6 +930,7 @@ core::Result<ResolvedSceneSurface> resolve_scene_surface_hit_impl(const FrameSce
         .closures = *closures,
         .closure_frame = *closure_frame,
         .emission = *emission,
+        .ray_parameter = hit.triangle.parameter,
     };
 }
 
@@ -696,7 +938,20 @@ core::Result<ResolvedSceneSurface> resolve_scene_surface_hit_impl(const FrameSce
 
 core::Result<ResolvedSceneSurface>
 resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit, const renderer::Ray& ray) {
-    return resolve_scene_surface_hit_impl(scene, hit, ray);
+    auto surface = resolve_scene_surface_hit_impl(scene, hit, ray);
+    if (!surface) {
+        return std::unexpected(surface.error());
+    }
+    const auto material = surface_material(scene, hit);
+    if (!material) {
+        return std::unexpected(material.error());
+    }
+    if (has_surface_map(material->get())) {
+        return std::unexpected(surface_error(
+            core::StatusCode::unavailable,
+            "A mapped frame scene surface requires explicit ray differentials or a ray cone."));
+    }
+    return surface;
 }
 
 core::Result<ResolvedSceneSurfaceWithDifferentials>
@@ -710,10 +965,39 @@ resolve_scene_surface_hit(const FrameScene& scene, const AccelHit& hit,
     if (!differentials) {
         return std::unexpected(differentials.error());
     }
-    return ResolvedSceneSurfaceWithDifferentials{
+    auto resolved = ResolvedSceneSurfaceWithDifferentials{
         .surface = std::move(*surface),
         .differentials = *differentials,
     };
+    if (auto status = apply_surface_maps_to_differentials(scene, hit, resolved); !status) {
+        return std::unexpected(status.error());
+    }
+    return resolved;
+}
+
+core::Result<ResolvedSceneSurface> resolve_scene_surface_hit(const FrameScene& scene,
+                                                             const AccelHit& hit,
+                                                             const renderer::Ray& ray,
+                                                             const renderer::RayCone cone) {
+    auto surface = resolve_scene_surface_hit_impl(scene, hit, ray);
+    if (!surface) {
+        return std::unexpected(surface.error());
+    }
+    const auto material = surface_material(scene, hit);
+    if (!material) {
+        return std::unexpected(material.error());
+    }
+    if (!has_surface_map(material->get())) {
+        return surface;
+    }
+    const auto differentials = resolve_cone_texture_differentials(*surface, hit, ray, cone);
+    if (!differentials) {
+        return std::unexpected(differentials.error());
+    }
+    if (auto status = apply_surface_maps(scene, hit, *differentials, *surface); !status) {
+        return std::unexpected(status.error());
+    }
+    return surface;
 }
 
 core::Result<std::optional<ResolvedSceneSurface>>
@@ -758,6 +1042,29 @@ resolve_scene_surface(const AccelBackend& acceleration, const renderer::RayDiffe
         return std::unexpected(resolved.error());
     }
     return std::optional<ResolvedSceneSurfaceWithDifferentials>{std::move(*resolved)};
+}
+
+core::Result<std::optional<ResolvedSceneSurface>>
+resolve_scene_surface(const AccelBackend& acceleration, const renderer::Ray& ray,
+                      const renderer::RayCone cone) {
+    const auto scene = acceleration.frame_scene();
+    if (!scene) {
+        return std::unexpected(
+            surface_error(core::StatusCode::internal_error,
+                          "The acceleration backend has no committed frame scene."));
+    }
+    const auto hit = acceleration.closest_hit(ray);
+    if (!hit) {
+        return std::unexpected(hit.error());
+    }
+    if (!*hit) {
+        return std::optional<ResolvedSceneSurface>{};
+    }
+    auto resolved = resolve_scene_surface_hit(*scene, **hit, ray, cone);
+    if (!resolved) {
+        return std::unexpected(resolved.error());
+    }
+    return std::optional<ResolvedSceneSurface>{std::move(*resolved)};
 }
 
 } // namespace blackframe::engine

@@ -37,6 +37,7 @@ if(TARGET Blackframe::HostImage)
         HostImageEwaFilterTest.cpp
         HostImageFilterTest.cpp
         HostImageMipChainTest.cpp
+        HostSurfaceMapsTest.cpp
         HostUdimTextureTest.cpp
     )
     blackframe_set_target_role(BlackframeHostImageCacheTests test)
@@ -105,6 +106,23 @@ if(TARGET Blackframe::HostImage)
         )
         set_tests_properties(
             Blackframe.TextureUdimGridPreview
+            PROPERTIES
+                LABELS "regression;cpu"
+                TIMEOUT 60
+        )
+
+        add_test(
+            NAME Blackframe.TextureSurfaceMapsPreview
+            COMMAND
+                "${CMAKE_COMMAND}"
+                "-DTEST_EXECUTABLE=$<TARGET_FILE:BlackframeHostImageCacheTests>"
+                "-DGTEST_FILTER=HostSurfaceMapsTest.WritesStableNormalAndBumpSpherePreview"
+                "-DOUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}/artifacts/checksum-texture-surface-maps-800x800.png"
+                "-DEXPECTED_SHA256=e12e868124aafe2dc3fbd70d714457431437af6dba408a3a761e3cb72786c562"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer/PngChecksumTest.cmake"
+        )
+        set_tests_properties(
+            Blackframe.TextureSurfaceMapsPreview
             PROPERTIES
                 LABELS "regression;cpu"
                 TIMEOUT 60

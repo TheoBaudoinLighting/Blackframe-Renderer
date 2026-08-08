@@ -5,6 +5,8 @@
 #include <Blackframe/Renderer/AreaLights.hpp>
 #include <Blackframe/Renderer/ClosureSet.hpp>
 #include <Blackframe/Renderer/ConstantTexture.hpp>
+#include <Blackframe/Renderer/HostImageMipChain.hpp>
+#include <Blackframe/Renderer/HostSurfaceMaps.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
 #include <Blackframe/Renderer/SceneIdentifiers.hpp>
 #include <Blackframe/Renderer/Spectrum.hpp>
@@ -36,6 +38,45 @@ struct SceneConstantTexture final {
 
     [[nodiscard]] constexpr bool operator==(const SceneConstantTexture&) const noexcept = default;
 };
+
+// Host images are immutable, already color-converted mip pyramids. A texture identifier belongs to
+// one shared scene registry: the same value cannot name both a constant and a host image.
+struct SceneHostImageTexture final {
+    renderer::TextureId id{};
+    renderer::HostImageMipChainHandle image;
+
+    [[nodiscard]] bool operator==(const SceneHostImageTexture&) const noexcept = default;
+};
+
+struct SceneNormalMapBinding final {
+    renderer::TextureId texture{};
+    std::uint32_t red_channel{};
+    std::uint32_t green_channel{1U};
+    std::uint32_t blue_channel{2U};
+    renderer::TangentSpaceNormalYConvention y_convention{
+        renderer::TangentSpaceNormalYConvention::positive_v};
+    renderer::TextureWrapMode u_wrap{renderer::TextureWrapMode::repeat};
+    renderer::TextureWrapMode v_wrap{renderer::TextureWrapMode::repeat};
+    renderer::HostImageEwaLimits ewa_limits{};
+
+    [[nodiscard]] constexpr bool operator==(const SceneNormalMapBinding&) const noexcept = default;
+};
+
+struct SceneBumpMapBinding final {
+    renderer::TextureId texture{};
+    std::uint32_t channel{};
+    renderer::TransportScalar scale{1.0F};
+    renderer::TextureWrapMode u_wrap{renderer::TextureWrapMode::repeat};
+    renderer::TextureWrapMode v_wrap{renderer::TextureWrapMode::repeat};
+    renderer::HostImageEwaLimits ewa_limits{};
+
+    [[nodiscard]] constexpr bool operator==(const SceneBumpMapBinding&) const noexcept = default;
+};
+
+static_assert(std::is_standard_layout_v<SceneNormalMapBinding>);
+static_assert(std::is_trivially_copyable_v<SceneNormalMapBinding>);
+static_assert(std::is_standard_layout_v<SceneBumpMapBinding>);
+static_assert(std::is_trivially_copyable_v<SceneBumpMapBinding>);
 
 enum class SceneClosureFrameMode : std::uint8_t {
     shading_normal = 0U,
@@ -118,6 +159,8 @@ struct SceneSpectralMaterial final {
     renderer::SampledWavelengths wavelengths{};
     SceneClosureMixture closure_mixture{};
     renderer::TransportSpectrum emitted_radiance{};
+    std::optional<SceneNormalMapBinding> normal_map{std::nullopt};
+    std::optional<SceneBumpMapBinding> bump_map{std::nullopt};
 
     [[nodiscard]] constexpr bool operator==(const SceneSpectralMaterial&) const noexcept = default;
 };
@@ -192,6 +235,7 @@ struct SceneInstance final {
 
 struct FrameSceneDescription final {
     std::vector<SceneConstantTexture> constant_textures{};
+    std::vector<SceneHostImageTexture> host_image_textures{};
     std::vector<SceneObject> objects;
     std::vector<SceneGeometry> geometries;
     std::vector<SceneMaterial> materials;
@@ -221,6 +265,7 @@ class FrameScene final {
 
     [[nodiscard]] std::span<const SceneObject> objects() const noexcept;
     [[nodiscard]] std::span<const SceneConstantTexture> constant_textures() const noexcept;
+    [[nodiscard]] std::span<const SceneHostImageTexture> host_image_textures() const noexcept;
     [[nodiscard]] std::span<const SceneGeometry> geometries() const noexcept;
     [[nodiscard]] std::span<const SceneMaterial> materials() const noexcept;
     [[nodiscard]] std::span<const SceneInstance> instances() const noexcept;
@@ -237,6 +282,8 @@ class FrameScene final {
     object(renderer::ObjectId id) const;
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneConstantTexture>>
     constant_texture(renderer::TextureId id) const;
+    [[nodiscard]] core::Result<std::reference_wrapper<const SceneHostImageTexture>>
+    host_image_texture(renderer::TextureId id) const;
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneGeometry>>
     geometry(renderer::GeometryId id) const;
     [[nodiscard]] core::Result<std::reference_wrapper<const SceneMaterial>>
@@ -256,6 +303,7 @@ class FrameScene final {
                         std::vector<renderer::InstanceId>&& mesh_area_light_instance_ids) noexcept;
 
     std::vector<SceneConstantTexture> constant_textures_;
+    std::vector<SceneHostImageTexture> host_image_textures_;
     std::vector<SceneObject> objects_;
     std::vector<SceneGeometry> geometries_;
     std::vector<SceneMaterial> materials_;

@@ -1,3 +1,4 @@
+#include <Blackframe/Renderer/HostImageCache.hpp>
 #include <Blackframe/Renderer/HostImageFilter.hpp>
 #include <Blackframe/Renderer/HostImageMipChain.hpp>
 #include <Blackframe/Renderer/RayDifferential.hpp>

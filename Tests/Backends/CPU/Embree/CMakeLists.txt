@@ -228,6 +228,7 @@ gtest_discover_tests(
 
 add_executable(
     BlackframeEmbreeWavefrontMisTests
+    ../../SurfaceMapSphereFixture.hpp
     WavefrontMisTransportTest.cpp
 )
 blackframe_set_target_role(BlackframeEmbreeWavefrontMisTests test)
@@ -239,6 +240,26 @@ target_link_libraries(
         Blackframe::ProjectOptions
         GTest::gtest_main
 )
+
+if(TARGET Blackframe::HostImage)
+    target_link_libraries(
+        BlackframeEmbreeWavefrontMisTests
+        PRIVATE
+            Blackframe::HostImage
+    )
+    target_compile_definitions(
+        BlackframeEmbreeWavefrontMisTests
+        PRIVATE
+            BLACKFRAME_CPU_SURFACE_MAP_TESTS=1
+            BLACKFRAME_CPU_SURFACE_MAP_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/artifacts"
+    )
+else()
+    target_compile_definitions(
+        BlackframeEmbreeWavefrontMisTests
+        PRIVATE
+            BLACKFRAME_CPU_SURFACE_MAP_TESTS=0
+    )
+endif()
 
 gtest_discover_tests(
     BlackframeEmbreeWavefrontMisTests

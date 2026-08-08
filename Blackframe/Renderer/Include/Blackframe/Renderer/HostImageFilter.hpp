@@ -2,7 +2,7 @@
 
 #include <Blackframe/Core/Status.hpp>
 #include <Blackframe/Renderer/GeometryTypes.hpp>
-#include <Blackframe/Renderer/HostImageCache.hpp>
+#include <Blackframe/Renderer/HostImage.hpp>
 #include <Blackframe/Renderer/TextureCoordinateDifferentials.hpp>
 #include <Blackframe/Renderer/TextureWrap.hpp>
 #include <cstdint>

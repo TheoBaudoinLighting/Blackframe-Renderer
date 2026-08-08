@@ -8,8 +8,8 @@
 
 namespace blackframe::xpu::shared {
 
-inline constexpr std::uint64_t SceneSoaMagic = 0x33414F53464B4C42ULL; // "BLKFSOA3"
-inline constexpr std::uint16_t SceneSoaAbiMajor = 3U;
+inline constexpr std::uint64_t SceneSoaMagic = 0x34414F53464B4C42ULL; // "BLKFSOA4"
+inline constexpr std::uint16_t SceneSoaAbiMajor = 4U;
 inline constexpr std::uint16_t SceneSoaAbiMinor = 0U;
 inline constexpr std::uint32_t SceneSoaHashAlgorithmFnv1a64 = 1U;
 inline constexpr std::uint64_t SceneSoaFnv1aOffsetBasis = 14695981039346656037ULL;
@@ -97,7 +97,40 @@ inline constexpr std::uint32_t texture_id = 160U;
 inline constexpr std::uint32_t texture_kind = 161U;
 inline constexpr std::uint32_t texture_value = 162U;
 
-inline constexpr std::uint32_t count = 166U;
+inline constexpr std::uint32_t material_normal_map_present = 166U;
+inline constexpr std::uint32_t material_normal_map_texture_id = 167U;
+inline constexpr std::uint32_t material_normal_map_red_channel = 168U;
+inline constexpr std::uint32_t material_normal_map_green_channel = 169U;
+inline constexpr std::uint32_t material_normal_map_blue_channel = 170U;
+inline constexpr std::uint32_t material_normal_map_u_wrap = 171U;
+inline constexpr std::uint32_t material_normal_map_v_wrap = 172U;
+inline constexpr std::uint32_t material_normal_map_maximum_anisotropy = 173U;
+inline constexpr std::uint32_t material_normal_map_maximum_texel_visits = 174U;
+inline constexpr std::uint32_t material_normal_map_y_convention = 175U;
+
+inline constexpr std::uint32_t material_bump_map_present = 176U;
+inline constexpr std::uint32_t material_bump_map_texture_id = 177U;
+inline constexpr std::uint32_t material_bump_map_channel = 178U;
+inline constexpr std::uint32_t material_bump_map_scale = 179U;
+inline constexpr std::uint32_t material_bump_map_u_wrap = 180U;
+inline constexpr std::uint32_t material_bump_map_v_wrap = 181U;
+inline constexpr std::uint32_t material_bump_map_maximum_anisotropy = 182U;
+inline constexpr std::uint32_t material_bump_map_maximum_texel_visits = 183U;
+
+inline constexpr std::uint32_t image_texture_id = 184U;
+inline constexpr std::uint32_t image_texture_mip_offset = 185U;
+inline constexpr std::uint32_t image_texture_mip_count = 186U;
+inline constexpr std::uint32_t image_texture_channel_count = 187U;
+inline constexpr std::uint32_t image_texture_storage_color_space = 188U;
+
+inline constexpr std::uint32_t image_mip_width = 189U;
+inline constexpr std::uint32_t image_mip_height = 190U;
+inline constexpr std::uint32_t image_mip_texel_offset = 191U;
+inline constexpr std::uint32_t image_mip_texel_count = 192U;
+
+inline constexpr std::uint32_t image_texel_value = 193U;
+
+inline constexpr std::uint32_t count = 194U;
 
 } // namespace scene_soa_column
 
@@ -134,8 +167,11 @@ struct alignas(16) SceneSoaHeader final {
     std::uint64_t mesh_area_light_count{};
     std::uint64_t environment_count{};
     std::uint64_t texture_count{};
+    std::uint64_t image_texture_count{};
+    std::uint64_t image_mip_count{};
+    std::uint64_t image_texel_count{};
     std::array<SceneSoaColumnDescriptor, scene_soa_column::count> columns{};
-    std::array<std::uint64_t, 4> reserved{};
+    std::array<std::uint64_t, 5> reserved{};
 };
 
 enum class SceneSoaHeaderValidationStatus : std::uint32_t {
@@ -185,8 +221,20 @@ enum class SceneSoaHeaderValidationStatus : std::uint32_t {
     if (column >= environment_wavelength_nanometers && column < texture_id) {
         return header.environment_count;
     }
-    if (column >= texture_id && column < count) {
+    if (column >= texture_id && column < material_normal_map_present) {
         return header.texture_count;
+    }
+    if ((column >= material_normal_map_present && column < image_texture_id)) {
+        return header.material_count;
+    }
+    if (column >= image_texture_id && column < image_mip_width) {
+        return header.image_texture_count;
+    }
+    if (column >= image_mip_width && column < image_texel_value) {
+        return header.image_mip_count;
+    }
+    if (column == image_texel_value) {
+        return header.image_texel_count;
     }
     return 0U;
 }
@@ -204,6 +252,7 @@ scene_soa_column_element_size(const std::uint32_t column) noexcept {
     if (column == material_spectral_present ||
         (column >= material_wavelength_measure && column < material_closure_offset) ||
         column == material_closure_frame_mode || column == instance_parent_present ||
+        column == material_normal_map_present || column == material_bump_map_present ||
         (column >= environment_wavelength_measure && column < environment_radiance)) {
         return sizeof(std::uint8_t);
     }
@@ -216,8 +265,13 @@ scene_soa_column_element_size(const std::uint32_t column) noexcept {
         (column >= punctual_position_x && column < mesh_area_light_instance_id) ||
         (column >= environment_wavelength_nanometers && column < environment_wavelength_measure) ||
         (column >= environment_radiance && column < texture_id) ||
-        (column >= texture_value && column < count)) {
+        (column >= texture_value && column < material_normal_map_present) ||
+        column == material_bump_map_scale || column == image_texel_value) {
         return sizeof(float);
+    }
+    if (column == image_texture_mip_offset || column == image_texture_mip_count ||
+        column == image_mip_texel_offset || column == image_mip_texel_count) {
+        return sizeof(std::uint64_t);
     }
     return sizeof(std::uint32_t);
 }
@@ -314,7 +368,7 @@ static_assert(offsetof(SceneSoaColumnDescriptor, reserved) == 20U);
 static_assert(std::is_standard_layout_v<SceneSoaHeader>);
 static_assert(std::is_trivially_copyable_v<SceneSoaHeader>);
 static_assert(std::is_trivially_destructible_v<SceneSoaHeader>);
-static_assert(sizeof(SceneSoaHeader) == 4144U);
+static_assert(sizeof(SceneSoaHeader) == 4848U);
 static_assert(alignof(SceneSoaHeader) == 16U);
 static_assert(offsetof(SceneSoaHeader, magic) == 0U);
 static_assert(offsetof(SceneSoaHeader, abi_major) == 8U);
@@ -335,7 +389,10 @@ static_assert(offsetof(SceneSoaHeader, punctual_light_count) == 96U);
 static_assert(offsetof(SceneSoaHeader, mesh_area_light_count) == 104U);
 static_assert(offsetof(SceneSoaHeader, environment_count) == 112U);
 static_assert(offsetof(SceneSoaHeader, texture_count) == 120U);
-static_assert(offsetof(SceneSoaHeader, columns) == 128U);
-static_assert(offsetof(SceneSoaHeader, reserved) == 4112U);
+static_assert(offsetof(SceneSoaHeader, image_texture_count) == 128U);
+static_assert(offsetof(SceneSoaHeader, image_mip_count) == 136U);
+static_assert(offsetof(SceneSoaHeader, image_texel_count) == 144U);
+static_assert(offsetof(SceneSoaHeader, columns) == 152U);
+static_assert(offsetof(SceneSoaHeader, reserved) == 4808U);
 
 } // namespace blackframe::xpu::shared

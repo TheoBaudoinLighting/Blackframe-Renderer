@@ -125,8 +125,21 @@ bvh_descriptor(const SceneBvhHeader* const header, const std::uint32_t array) no
         column < scene_column::texture_id) {
         return header.environment_count;
     }
-    if (column >= scene_column::texture_id && column < scene_column::count) {
+    if (column >= scene_column::texture_id && column < scene_column::material_normal_map_present) {
         return header.texture_count;
+    }
+    if (column >= scene_column::material_normal_map_present &&
+        column < scene_column::image_texture_id) {
+        return header.material_count;
+    }
+    if (column >= scene_column::image_texture_id && column < scene_column::image_mip_width) {
+        return header.image_texture_count;
+    }
+    if (column >= scene_column::image_mip_width && column < scene_column::image_texel_value) {
+        return header.image_mip_count;
+    }
+    if (column == scene_column::image_texel_value) {
+        return header.image_texel_count;
     }
     return 0U;
 }
@@ -147,6 +160,8 @@ scene_column_element_size(const std::uint32_t column) noexcept {
          column < scene_column::material_closure_offset) ||
         column == scene_column::material_closure_frame_mode ||
         column == scene_column::instance_parent_present ||
+        column == scene_column::material_normal_map_present ||
+        column == scene_column::material_bump_map_present ||
         (column >= scene_column::environment_wavelength_measure &&
          column < scene_column::environment_radiance)) {
         return sizeof(std::uint8_t);
@@ -165,8 +180,17 @@ scene_column_element_size(const std::uint32_t column) noexcept {
         (column >= scene_column::environment_wavelength_nanometers &&
          column < scene_column::environment_wavelength_measure) ||
         (column >= scene_column::environment_radiance && column < scene_column::texture_id) ||
-        (column >= scene_column::texture_value && column < scene_column::count)) {
+        (column >= scene_column::texture_value &&
+         column < scene_column::material_normal_map_present) ||
+        column == scene_column::material_bump_map_scale ||
+        column == scene_column::image_texel_value) {
         return sizeof(float);
+    }
+    if (column == scene_column::image_texture_mip_offset ||
+        column == scene_column::image_texture_mip_count ||
+        column == scene_column::image_mip_texel_offset ||
+        column == scene_column::image_mip_texel_count) {
+        return sizeof(std::uint64_t);
     }
     return sizeof(std::uint32_t);
 }
@@ -184,13 +208,14 @@ validate_scene_layout(const std::uint8_t* const bytes, const std::size_t byte_co
         header->hash_algorithm != shared::SceneSoaHashAlgorithmFnv1a64 ||
         header->environment_count > 1U || header->total_size_bytes != byte_count ||
         header->total_size_bytes < sizeof(SceneSoaHeader) ||
-        header->texture_count > 0xFFFFFFFFULL) {
+        header->texture_count > 0xFFFFFFFFULL || header->image_texture_count > 0xFFFFFFFFULL ||
+        header->image_mip_count > 0xFFFFFFFFULL) {
         return SceneClosestHitStatus::invalid_scene;
     }
 
     const auto* const reserved =
         reinterpret_cast<const std::uint64_t*>(bytes + offsetof(SceneSoaHeader, reserved));
-    for (auto index = std::uint32_t{0U}; index < 4U; ++index) {
+    for (auto index = std::uint32_t{0U}; index < 5U; ++index) {
         if (reserved[index] != 0U) {
             return SceneClosestHitStatus::invalid_scene;
         }

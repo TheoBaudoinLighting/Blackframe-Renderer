@@ -45,6 +45,10 @@ struct ScenePathSurface final {
         return surface.position_error;
     }
 
+    [[nodiscard]] renderer::TransportScalar ray_parameter() const noexcept {
+        return surface.ray_parameter;
+    }
+
     [[nodiscard]] const std::optional<ResolvedSceneSurfaceDifferentials>&
     differentials() const noexcept {
         return ray_differentials;
@@ -89,6 +93,21 @@ class SceneSurfaceQuery final {
         return std::optional<ScenePathSurface>{ScenePathSurface{
             .surface = std::move((**resolved).surface),
             .ray_differentials = std::move((**resolved).differentials),
+        }};
+    }
+
+    [[nodiscard]] core::Result<std::optional<ScenePathSurface>>
+    closest_hit(const renderer::Ray& ray, const renderer::RayCone cone) const {
+        auto resolved = resolve_scene_surface(acceleration_, ray, cone);
+        if (!resolved) {
+            return std::unexpected(resolved.error());
+        }
+        if (!*resolved) {
+            return std::optional<ScenePathSurface>{};
+        }
+        return std::optional<ScenePathSurface>{ScenePathSurface{
+            .surface = std::move(**resolved),
+            .ray_differentials = std::nullopt,
         }};
     }
 

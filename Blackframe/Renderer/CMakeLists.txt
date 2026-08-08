@@ -33,6 +33,10 @@ add_library(
         Include/Blackframe/Renderer/GeometryTypes.hpp
         Include/Blackframe/Renderer/GgxMicrofacet.hpp
         Include/Blackframe/Renderer/HdrMetrics.hpp
+        Include/Blackframe/Renderer/HostImage.hpp
+        Include/Blackframe/Renderer/HostImageFilter.hpp
+        Include/Blackframe/Renderer/HostImageMipChain.hpp
+        Include/Blackframe/Renderer/HostSurfaceMaps.hpp
         Include/Blackframe/Renderer/IndependentSampler.hpp
         Include/Blackframe/Renderer/Interval.hpp
         Include/Blackframe/Renderer/LambertianReflection.hpp
@@ -94,6 +98,10 @@ add_library(
         Source/Cie1931ColorMatchingFunctions.inc
         Source/Cie1931Sensor.cpp
         Source/CpuWavefrontScheduler.cpp
+        Source/HostImage.cpp
+        Source/HostImageFilter.cpp
+        Source/HostImageMipChain.cpp
+        Source/HostSurfaceMaps.cpp
         Source/LightSampler.cpp
         Source/NumericConversion.cpp
         Source/OwenScrambling.cpp
@@ -183,12 +191,8 @@ if(TARGET Blackframe::OpenImageIo)
         BlackframeHostImage
         STATIC
             Include/Blackframe/Renderer/HostImageCache.hpp
-            Include/Blackframe/Renderer/HostImageFilter.hpp
-            Include/Blackframe/Renderer/HostImageMipChain.hpp
             Include/Blackframe/Renderer/HostUdimTexture.hpp
             Source/HostImageCache.cpp
-            Source/HostImageFilter.cpp
-            Source/HostImageMipChain.cpp
             Source/HostUdimTexture.cpp
     )
     add_library(Blackframe::HostImage ALIAS BlackframeHostImage)

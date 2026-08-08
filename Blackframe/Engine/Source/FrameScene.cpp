@@ -111,6 +111,136 @@ validate_punctual_light(const ScenePunctualLight& record,
 
 template <typename Record, typename Identifier>
 [[nodiscard]] std::optional<std::size_t> find_record_index(const std::vector<Record>& records,
+                                                           Identifier id) noexcept;
+
+[[nodiscard]] core::Status validate_host_image_texture(const SceneHostImageTexture& record) {
+    if (!record.image) {
+        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
+                                           "A frame scene host-image texture requires an immutable "
+                                           "mip chain."));
+    }
+    const auto source = record.image->source_image();
+    if (!source || record.image->level_count() == 0U || source->channel_count() == 0U) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A frame scene host-image texture requires a non-empty immutable mip chain."));
+    }
+    if (source->source_color_space() != renderer::TextureColorSpace::data ||
+        source->storage_color_space() != renderer::TextureColorSpace::data) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A frame scene surface-detail texture must use the explicit data source and storage "
+            "color spaces."));
+    }
+    return {};
+}
+
+[[nodiscard]] core::Status
+reject_shared_texture_identifiers(const std::vector<SceneConstantTexture>& constants,
+                                  const std::vector<SceneHostImageTexture>& host_images) {
+    auto constant = constants.begin();
+    auto host_image = host_images.begin();
+    while (constant != constants.end() && host_image != host_images.end()) {
+        if (constant->id == host_image->id) {
+            return std::unexpected(
+                scene_error(core::StatusCode::invalid_argument,
+                            "A texture identifier cannot name both a constant and a host image."));
+        }
+        if (constant->id.value < host_image->id.value) {
+            ++constant;
+        } else {
+            ++host_image;
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] bool valid_ewa_limits(const renderer::HostImageEwaLimits limits) noexcept {
+    return limits.maximum_anisotropy >= 1U &&
+           limits.maximum_anisotropy <= renderer::HostImageEwaMaximumAnisotropy &&
+           limits.maximum_texel_visits > 0U;
+}
+
+template <typename Binding>
+[[nodiscard]] core::Result<std::reference_wrapper<const SceneHostImageTexture>>
+validate_surface_map_binding(const std::vector<SceneHostImageTexture>& textures,
+                             const Binding& binding) {
+    if (!renderer::is_valid_texture_wrap_mode(binding.u_wrap) ||
+        !renderer::is_valid_texture_wrap_mode(binding.v_wrap)) {
+        return std::unexpected(scene_error(core::StatusCode::invalid_argument,
+                                           "A frame scene surface map requires explicit valid wrap "
+                                           "modes."));
+    }
+    if (!valid_ewa_limits(binding.ewa_limits)) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene surface map requires valid bounded EWA limits."));
+    }
+    const auto index = find_record_index(textures, binding.texture);
+    if (!index) {
+        return std::unexpected(scene_error(
+            core::StatusCode::invalid_argument,
+            "A frame scene surface map references an unknown host-image texture identifier."));
+    }
+    return std::cref(textures[*index]);
+}
+
+[[nodiscard]] core::Status
+validate_normal_map_binding(const std::vector<SceneHostImageTexture>& textures,
+                            const SceneNormalMapBinding& binding) {
+    switch (binding.y_convention) {
+    case renderer::TangentSpaceNormalYConvention::positive_v:
+    case renderer::TangentSpaceNormalYConvention::negative_v:
+        break;
+    default:
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene normal map requires an explicit supported Y convention."));
+    }
+    const auto texture = validate_surface_map_binding(textures, binding);
+    if (!texture) {
+        return std::unexpected(texture.error());
+    }
+    const auto source = texture->get().image->source_image();
+    const auto channels = source->channel_count();
+    if (binding.red_channel >= channels || binding.green_channel >= channels ||
+        binding.blue_channel >= channels) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene normal map channel lies outside its host image."));
+    }
+    if (binding.red_channel == binding.green_channel ||
+        binding.red_channel == binding.blue_channel ||
+        binding.green_channel == binding.blue_channel) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene normal map requires three distinct source channels."));
+    }
+    return {};
+}
+
+[[nodiscard]] core::Status
+validate_bump_map_binding(const std::vector<SceneHostImageTexture>& textures,
+                          const SceneBumpMapBinding& binding) {
+    if (!std::isfinite(binding.scale)) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene bump map requires a finite signed scale."));
+    }
+    const auto texture = validate_surface_map_binding(textures, binding);
+    if (!texture) {
+        return std::unexpected(texture.error());
+    }
+    if (binding.channel >= texture->get().image->source_image()->channel_count()) {
+        return std::unexpected(
+            scene_error(core::StatusCode::invalid_argument,
+                        "A frame scene bump map channel lies outside its host image."));
+    }
+    return {};
+}
+
+template <typename Record, typename Identifier>
+[[nodiscard]] std::optional<std::size_t> find_record_index(const std::vector<Record>& records,
                                                            const Identifier id) noexcept {
     const auto candidate = std::ranges::lower_bound(
         records, id.value, {}, [](const Record& record) { return record.id.value; });
@@ -385,6 +515,20 @@ derive_mesh_area_lights(const FrameSceneDescription& description,
                 core::StatusCode::invalid_argument,
                 "A frame scene material requires finite non-negative emitted radiance."));
         }
+        if (material.spectral->normal_map) {
+            if (auto status = validate_normal_map_binding(description.host_image_textures,
+                                                          *material.spectral->normal_map);
+                !status) {
+                return std::unexpected(std::move(status.error()));
+            }
+        }
+        if (material.spectral->bump_map) {
+            if (auto status = validate_bump_map_binding(description.host_image_textures,
+                                                        *material.spectral->bump_map);
+                !status) {
+                return std::unexpected(std::move(status.error()));
+            }
+        }
     }
     return {};
 }
@@ -553,6 +697,7 @@ core::Result<FrameSceneHandle> FrameScene::create(const FrameSceneDescription& d
 core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& description) {
     try {
         sort_by_identifier(description.constant_textures);
+        sort_by_identifier(description.host_image_textures);
         sort_by_identifier(description.objects);
         sort_by_identifier(description.geometries);
         sort_by_identifier(description.materials);
@@ -561,6 +706,17 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
         if (auto status = reject_duplicate_identifiers(
                 description.constant_textures,
                 "A frame scene contains duplicate constant-texture identifiers.");
+            !status) {
+            return std::unexpected(std::move(status.error()));
+        }
+        if (auto status = reject_duplicate_identifiers(
+                description.host_image_textures,
+                "A frame scene contains duplicate host-image texture identifiers.");
+            !status) {
+            return std::unexpected(std::move(status.error()));
+        }
+        if (auto status = reject_shared_texture_identifiers(description.constant_textures,
+                                                            description.host_image_textures);
             !status) {
             return std::unexpected(std::move(status.error()));
         }
@@ -587,6 +743,11 @@ core::Result<FrameSceneHandle> FrameScene::create(FrameSceneDescription&& descri
 
         for (const auto& texture : description.constant_textures) {
             if (auto status = validate_constant_texture(texture); !status) {
+                return std::unexpected(std::move(status.error()));
+            }
+        }
+        for (const auto& texture : description.host_image_textures) {
+            if (auto status = validate_host_image_texture(texture); !status) {
                 return std::unexpected(std::move(status.error()));
             }
         }
@@ -654,6 +815,7 @@ FrameScene::FrameScene(FrameSceneDescription&& description,
                        std::vector<renderer::MeshAreaLight>&& mesh_area_lights,
                        std::vector<renderer::InstanceId>&& mesh_area_light_instance_ids) noexcept
     : constant_textures_{std::move(description.constant_textures)},
+      host_image_textures_{std::move(description.host_image_textures)},
       objects_{std::move(description.objects)}, geometries_{std::move(description.geometries)},
       materials_{std::move(description.materials)}, instances_{std::move(description.instances)},
       punctual_lights_{std::move(description.punctual_lights)},
@@ -669,6 +831,10 @@ std::span<const SceneObject> FrameScene::objects() const noexcept {
 
 std::span<const SceneConstantTexture> FrameScene::constant_textures() const noexcept {
     return constant_textures_;
+}
+
+std::span<const SceneHostImageTexture> FrameScene::host_image_textures() const noexcept {
+    return host_image_textures_;
 }
 
 std::span<const SceneGeometry> FrameScene::geometries() const noexcept {
@@ -708,6 +874,12 @@ core::Result<std::reference_wrapper<const SceneConstantTexture>>
 FrameScene::constant_texture(const renderer::TextureId id) const {
     return find_record(constant_textures_, id,
                        "The frame scene does not contain the requested constant texture.");
+}
+
+core::Result<std::reference_wrapper<const SceneHostImageTexture>>
+FrameScene::host_image_texture(const renderer::TextureId id) const {
+    return find_record(host_image_textures_, id,
+                       "The frame scene does not contain the requested host-image texture.");
 }
 
 core::Result<std::reference_wrapper<const SceneGeometry>>
