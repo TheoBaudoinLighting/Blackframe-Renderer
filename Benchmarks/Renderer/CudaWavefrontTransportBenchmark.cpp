@@ -57,8 +57,14 @@ make_cornell_inputs(const renderer::PinholeCamera& camera,
                 if (!primary) {
                     return std::unexpected(primary.error());
                 }
+                const auto primary_cone = camera.generate_primary_ray_cone(
+                    pixel_sample, renderer::PixelJitterMode::uniform, CornellPathTime);
+                if (!primary_cone) {
+                    return std::unexpected(primary_cone.error());
+                }
                 inputs.push_back(CudaWavefrontPathInput{
                     .primary_ray = *primary,
+                    .primary_cone = *primary_cone,
                     .initial_state = *initial_state,
                     .sample = sampler.make_stream(pixel_x, pixel_y, sample_index).index(),
                 });
@@ -77,6 +83,8 @@ make_cornell_inputs(const renderer::PinholeCamera& camera,
             checksum += static_cast<double>(spectrum.values[lane]) * path_weight *
                         static_cast<double>(lane + 1U);
         }
+        checksum += static_cast<double>(batch.terminal_cones[path_index].width()) * path_weight;
+        checksum += static_cast<double>(batch.terminal_cones[path_index].spread()) * path_weight;
     }
     return checksum;
 }
@@ -125,11 +133,14 @@ transport_reports_physically_exact(const CudaWavefrontTransportReport& expected,
 transport_batches_physically_exact(const CudaWavefrontTransportBatch& expected,
                                    const CudaWavefrontTransportBatch& actual) noexcept {
     if (!transport_reports_physically_exact(expected.report, actual.report) ||
-        actual.paths.size() != expected.paths.size()) {
+        actual.paths.size() != expected.paths.size() ||
+        actual.terminal_cones.size() != expected.terminal_cones.size() ||
+        actual.terminal_cones.size() != actual.paths.size()) {
         return false;
     }
     for (auto index = std::size_t{}; index < expected.paths.size(); ++index) {
-        if (!transport_paths_exact(expected.paths[index], actual.paths[index])) {
+        if (!transport_paths_exact(expected.paths[index], actual.paths[index]) ||
+            actual.terminal_cones[index] != expected.terminal_cones[index]) {
             return false;
         }
     }

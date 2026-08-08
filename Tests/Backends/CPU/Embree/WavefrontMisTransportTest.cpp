@@ -344,6 +344,10 @@ make_material_inputs(const FrameSceneHandle& scene, const renderer::Ray& ray,
     if (!dimensions) {
         return std::unexpected(dimensions.error());
     }
+    const auto primary_cone = renderer::RayCone::create(0.0F, 0.0F);
+    if (!primary_cone) {
+        return std::unexpected(primary_cone.error());
+    }
 
     auto requested_count = std::size_t{};
     for (const auto& band : bands) {
@@ -375,6 +379,7 @@ make_material_inputs(const FrameSceneHandle& scene, const renderer::Ray& ray,
                 }
                 inputs.push_back(CpuWavefrontMisPathInput{
                     .primary_ray = ray,
+                    .primary_cone = *primary_cone,
                     .initial_state = *state,
                     .sample = sample,
                 });
@@ -482,12 +487,17 @@ make_inputs(const FrameSceneHandle& scene) {
     if (!state) {
         return std::unexpected(state.error());
     }
+    const auto primary_cone = renderer::RayCone::create(0.0F, 0.0F);
+    if (!primary_cone) {
+        return std::unexpected(primary_cone.error());
+    }
 
     auto inputs = std::vector<CpuWavefrontMisPathInput>{};
     inputs.reserve(PathCount);
     for (auto index = std::size_t{}; index < PathCount; ++index) {
         inputs.push_back(CpuWavefrontMisPathInput{
             .primary_ray = *ray,
+            .primary_cone = *primary_cone,
             .initial_state = *state,
             .sample =
                 renderer::SampleStreamIndex{
@@ -575,6 +585,7 @@ void expect_image_metrics(const std::string_view scene_name, const renderer::Ren
                           const bool require_shadow_queries = true) {
     ASSERT_EQ(inputs.size(), scalar_paths.size());
     ASSERT_EQ(inputs.size(), wavefront.paths.size());
+    ASSERT_EQ(inputs.size(), wavefront.terminal_cones.size());
     constexpr auto expected_worker_count = std::uint32_t{4U};
     const auto queue_status = scalar_wavefront_parity_test::validate_queue_report(
         wavefront.report, inputs.size(), expected_worker_count);
@@ -694,6 +705,7 @@ void expect_material_parity(const std::string_view scene_name,
                             const renderer::PathDepthLimits& depth_limits = OneSurfaceBounce) {
     ASSERT_EQ(parity.scalar.size(), inputs.size());
     ASSERT_EQ(parity.wavefront.paths.size(), inputs.size());
+    ASSERT_EQ(parity.wavefront.terminal_cones.size(), inputs.size());
     for (auto index = std::size_t{}; index < inputs.size(); ++index) {
         SCOPED_TRACE(index);
         expect_path_near(parity.scalar[index], parity.wavefront.paths[index],
@@ -815,6 +827,8 @@ TEST_P(WavefrontMisTransportTest, MatchesAnalyticScalarAndIsIdenticalWithOneOrMa
     ASSERT_TRUE(parallel.has_value()) << parallel.error().message;
     ASSERT_EQ(single->paths.size(), PathCount);
     ASSERT_EQ(parallel->paths.size(), PathCount);
+    ASSERT_EQ(single->terminal_cones.size(), PathCount);
+    ASSERT_EQ(parallel->terminal_cones.size(), PathCount);
     ASSERT_EQ(scalar->size(), PathCount);
 
     for (auto index = std::size_t{}; index < PathCount; ++index) {
@@ -822,6 +836,7 @@ TEST_P(WavefrontMisTransportTest, MatchesAnalyticScalarAndIsIdenticalWithOneOrMa
         expect_path_near((*scalar)[index], single->paths[index], ScalarParityTolerance);
         expect_path_near((*scalar)[index], parallel->paths[index], ScalarParityTolerance);
         expect_path_exact(single->paths[index], parallel->paths[index]);
+        EXPECT_EQ(single->terminal_cones[index], parallel->terminal_cones[index]);
         EXPECT_EQ(single->paths[index].termination, renderer::BsdfOnlyPathTermination::depth_limit);
     }
     expect_image_metrics(
@@ -899,6 +914,7 @@ TEST(WavefrontMisTransportQueueTest, ReportsCanonicalZeroStatisticsForAnEmptyBat
                                 renderer::RussianRoulettePolicy::disabled());
     ASSERT_TRUE(batch.has_value()) << batch.error().message;
     EXPECT_TRUE(batch->paths.empty());
+    EXPECT_TRUE(batch->terminal_cones.empty());
     EXPECT_EQ(batch->report.schema_version, 2U);
     EXPECT_EQ(batch->report.schema_version, CurrentCpuWavefrontMisReportSchemaVersion);
     EXPECT_EQ(batch->report.configured_workers, 4U);
@@ -1541,6 +1557,48 @@ TEST(WavefrontMisMaterialParityTest, MatchesSpecularDeltaEntryExitAndTir) {
         }
         expect_material_parity("SpecularTransmissionTir", *inputs, *parity, false);
     }
+}
+
+TEST(WavefrontMisRayConeTest, PropagatesOnlyWhenAContinuationRayIsCreated) {
+    constexpr auto bands =
+        std::array{ComponentSampleBand{.lower = 0.0F, .upper = 1.0F, .count = 1U}};
+    const auto scene = make_material_scene(mirror_scene_closure());
+    const auto primary = material_primary_ray(renderer::Vector3{.x = 0.6F, .z = 0.8F});
+    const auto cone = renderer::RayCone::create(0.125F, 0.25F);
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    ASSERT_TRUE(primary.has_value()) << primary.error().message;
+    ASSERT_TRUE(cone.has_value()) << cone.error().message;
+    auto inputs = make_material_inputs(*scene, *primary, bands);
+    ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+    inputs->front().primary_cone = *cone;
+
+    const auto continued = trace_material_parity(*scene, *inputs);
+    ASSERT_TRUE(continued.has_value()) << continued.error().message;
+    ASSERT_EQ(continued->wavefront.paths.size(), 1U);
+    ASSERT_EQ(continued->wavefront.terminal_cones.size(), 1U);
+    EXPECT_EQ(continued->wavefront.paths.front().termination,
+              renderer::BsdfOnlyPathTermination::escaped_environment);
+    EXPECT_NE(continued->wavefront.paths.front().terminal_ray.origin(),
+              inputs->front().primary_ray.origin());
+    EXPECT_FLOAT_EQ(continued->wavefront.terminal_cones.front().width(), 0.375F);
+    EXPECT_FLOAT_EQ(continued->wavefront.terminal_cones.front().spread(), 0.25F);
+
+    const auto terminal_hit = trace_material_parity(*scene, *inputs, renderer::PathDepthLimits{},
+                                                    renderer::MisHeuristic::power);
+    ASSERT_TRUE(terminal_hit.has_value()) << terminal_hit.error().message;
+    ASSERT_EQ(terminal_hit->wavefront.paths.size(), 1U);
+    ASSERT_EQ(terminal_hit->wavefront.terminal_cones.size(), 1U);
+    EXPECT_EQ(terminal_hit->wavefront.paths.front().termination,
+              renderer::BsdfOnlyPathTermination::depth_limit);
+    EXPECT_EQ(terminal_hit->wavefront.paths.front().terminal_ray.origin(),
+              inputs->front().primary_ray.origin());
+    EXPECT_EQ(terminal_hit->wavefront.paths.front().terminal_ray.direction(),
+              inputs->front().primary_ray.direction());
+    EXPECT_EQ(terminal_hit->wavefront.paths.front().terminal_ray.t_min(),
+              inputs->front().primary_ray.t_min());
+    EXPECT_EQ(terminal_hit->wavefront.paths.front().terminal_ray.t_max(),
+              inputs->front().primary_ray.t_max());
+    EXPECT_EQ(terminal_hit->wavefront.terminal_cones.front(), inputs->front().primary_cone);
 }
 
 TEST(WavefrontMisMaterialParityTest, MatchesContinuousAndMixedMeasureMixtures) {

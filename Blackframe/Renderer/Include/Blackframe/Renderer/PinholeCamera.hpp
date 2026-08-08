@@ -4,6 +4,7 @@
 #include <Blackframe/Renderer/LocalFrame.hpp>
 #include <Blackframe/Renderer/PixelJitter.hpp>
 #include <Blackframe/Renderer/Ray.hpp>
+#include <Blackframe/Renderer/RayCone.hpp>
 #include <Blackframe/Renderer/RayDifferential.hpp>
 #include <Blackframe/Renderer/RenderConfiguration.hpp>
 #include <algorithm>
@@ -121,6 +122,15 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
                                                                        raster_sample.y, time);
     }
 
+    [[nodiscard]] core::Result<RayConeT<Scalar>>
+    generate_primary_ray_cone(const Point2T<Scalar> raster_sample, const Scalar time) const {
+        const auto differential = generate_primary_ray_differential(raster_sample, time);
+        if (!differential) {
+            return std::unexpected(differential.error());
+        }
+        return ray_cone_from_differential(*differential);
+    }
+
     [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray(const PixelSampleT<Scalar> sample,
                                                                   const Scalar time) const {
         if (sample.pixel_x >= extent_.width || sample.pixel_y >= extent_.height) {
@@ -154,6 +164,15 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
             static_cast<Scalar>(sample.pixel_y) + sample.offset_y, time);
     }
 
+    [[nodiscard]] core::Result<RayConeT<Scalar>>
+    generate_primary_ray_cone(const PixelSampleT<Scalar> sample, const Scalar time) const {
+        const auto differential = generate_primary_ray_differential(sample, time);
+        if (!differential) {
+            return std::unexpected(differential.error());
+        }
+        return ray_cone_from_differential(*differential);
+    }
+
     [[nodiscard]] core::Result<RayT<Scalar>> generate_primary_ray(const PixelSampleIndex index,
                                                                   const PixelJitterMode mode,
                                                                   const Scalar time) const {
@@ -172,6 +191,16 @@ template <GeometryScalar Scalar> class PinholeCameraT final {
             return std::unexpected(sample.error());
         }
         return generate_primary_ray_differential(*sample, time);
+    }
+
+    [[nodiscard]] core::Result<RayConeT<Scalar>>
+    generate_primary_ray_cone(const PixelSampleIndex index, const PixelJitterMode mode,
+                              const Scalar time) const {
+        const auto differential = generate_primary_ray_differential(index, mode, time);
+        if (!differential) {
+            return std::unexpected(differential.error());
+        }
+        return ray_cone_from_differential(*differential);
     }
 
     [[nodiscard]] constexpr const Point3T<Scalar>& origin() const noexcept {

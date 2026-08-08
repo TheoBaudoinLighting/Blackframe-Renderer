@@ -16,6 +16,7 @@
 #include <Blackframe/Renderer/MisHeuristics.hpp>
 #include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
+#include <Blackframe/Renderer/PinholeCamera.hpp>
 #include <Blackframe/Renderer/PixelJitter.hpp>
 #include <Blackframe/Renderer/RussianRoulette.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
@@ -74,6 +75,11 @@ struct Result final {
     CpuWavefrontMisReport wavefront_report;
 };
 
+struct PrimaryRayWithCone final {
+    renderer::Ray ray;
+    renderer::RayCone cone;
+};
+
 [[nodiscard]] inline core::Error parity_error(const core::StatusCode code, std::string message) {
     return core::Error{
         .code = code,
@@ -98,6 +104,32 @@ expected_path_count(const renderer::RenderExtent extent, const std::uint32_t sam
                          "Scalar/wavefront image parity path count is not representable."));
     }
     return width * height * samples;
+}
+
+[[nodiscard]] inline core::Result<PrimaryRayWithCone>
+camera_primary_ray(const renderer::PinholeCamera& camera, const renderer::PixelSampleIndex index,
+                   const renderer::PixelJitterMode mode, const renderer::TransportScalar time) {
+    const auto ray = camera.generate_primary_ray(index, mode, time);
+    const auto cone = camera.generate_primary_ray_cone(index, mode, time);
+    if (!ray) {
+        return std::unexpected(ray.error());
+    }
+    if (!cone) {
+        return std::unexpected(cone.error());
+    }
+    return PrimaryRayWithCone{.ray = *ray, .cone = *cone};
+}
+
+[[nodiscard]] inline core::Result<PrimaryRayWithCone>
+point_primary_ray(core::Result<renderer::Ray> ray) {
+    if (!ray) {
+        return std::unexpected(ray.error());
+    }
+    const auto cone = renderer::RayCone::create(0.0F, 0.0F);
+    if (!cone) {
+        return std::unexpected(cone.error());
+    }
+    return PrimaryRayWithCone{.ray = *ray, .cone = *cone};
 }
 
 template <typename GenerateRay>
@@ -128,12 +160,13 @@ make_inputs(const renderer::RenderExtent extent, const std::uint32_t samples_per
                     .seed = seed,
                 };
                 const auto stream = sampler.make_stream(pixel_x, pixel_y, sample_index);
-                const auto ray = generate_ray(index, stream);
-                if (!ray) {
-                    return std::unexpected(ray.error());
+                const auto primary = generate_ray(index, stream);
+                if (!primary) {
+                    return std::unexpected(primary.error());
                 }
                 inputs.push_back(CpuWavefrontMisPathInput{
-                    .primary_ray = *ray,
+                    .primary_ray = primary->ray,
+                    .primary_cone = primary->cone,
                     .initial_state = *initial_state,
                     .sample = stream.index(),
                 });
@@ -331,10 +364,11 @@ compare(const FrameSceneHandle& scene, const std::span<const CpuWavefrontMisPath
     if (!wavefront) {
         return std::unexpected(wavefront.error());
     }
-    if (wavefront->paths.size() != inputs.size()) {
+    if (wavefront->paths.size() != inputs.size() ||
+        wavefront->terminal_cones.size() != inputs.size()) {
         return std::unexpected(parity_error(
             core::StatusCode::internal_error,
-            "CPU wavefront parity returned a different number of paths than it received."));
+            "CPU wavefront parity returned inconsistent path or cone sidecar counts."));
     }
     if (auto status =
             validate_queue_report(wavefront->report, inputs.size(), configuration.worker_count);

@@ -160,11 +160,17 @@ template <renderer::AccumulationPrecision Precision>
                 };
                 const auto ray = camera.generate_primary_ray(
                     index, renderer::PixelJitterMode::uniform, PathTime);
+                const auto cone = camera.generate_primary_ray_cone(
+                    index, renderer::PixelJitterMode::uniform, PathTime);
                 if (!ray) {
                     return std::unexpected(ray.error());
                 }
+                if (!cone) {
+                    return std::unexpected(cone.error());
+                }
                 inputs.push_back(CpuWavefrontMisPathInput{
                     .primary_ray = *ray,
+                    .primary_cone = *cone,
                     .initial_state = *initial_state,
                     .sample = independent_sampler.make_stream(x, y, sample_index).index(),
                 });
@@ -177,7 +183,9 @@ template <renderer::AccumulationPrecision Precision>
         if (!traced) {
             return std::unexpected(traced.error());
         }
-        if (traced->paths.size() != inputs.size() || traced->report.path_count != inputs.size() ||
+        if (traced->paths.size() != inputs.size() ||
+            traced->terminal_cones.size() != inputs.size() ||
+            traced->report.path_count != inputs.size() ||
             traced->report.schema_version != CurrentCpuWavefrontMisReportSchemaVersion ||
             traced->report.configured_workers != scheduler.worker_count()) {
             return std::unexpected(benchmark_error(
@@ -583,12 +591,19 @@ void cornell_wavefront_queue_statistics(benchmark::State& state) {
             };
             const auto ray =
                 camera->generate_primary_ray(index, renderer::PixelJitterMode::uniform, PathTime);
+            const auto cone = camera->generate_primary_ray_cone(
+                index, renderer::PixelJitterMode::uniform, PathTime);
             if (!ray) {
                 state.SkipWithError(ray.error().message);
                 return;
             }
+            if (!cone) {
+                state.SkipWithError(cone.error().message);
+                return;
+            }
             inputs.push_back(CpuWavefrontMisPathInput{
                 .primary_ray = *ray,
+                .primary_cone = *cone,
                 .initial_state = *initial_state,
                 .sample = independent_sampler.make_stream(x, y, 0U).index(),
             });
@@ -605,7 +620,9 @@ void cornell_wavefront_queue_statistics(benchmark::State& state) {
             state.SkipWithError(traced.error().message);
             return;
         }
-        if (traced->paths.size() != inputs.size() || traced->report.path_count != inputs.size() ||
+        if (traced->paths.size() != inputs.size() ||
+            traced->terminal_cones.size() != inputs.size() ||
+            traced->report.path_count != inputs.size() ||
             traced->report.schema_version != CurrentCpuWavefrontMisReportSchemaVersion ||
             traced->report.configured_workers != scheduler->worker_count()) {
             state.SkipWithError(

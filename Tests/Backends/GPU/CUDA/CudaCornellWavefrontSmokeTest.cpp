@@ -266,6 +266,11 @@ make_inputs(const renderer::PinholeCamera& camera, const renderer::SampledWavele
                 if (!primary) {
                     return std::unexpected(primary.error());
                 }
+                const auto primary_cone = camera.generate_primary_ray_cone(
+                    pixel_sample, renderer::PixelJitterMode::uniform, CornellPathTime);
+                if (!primary_cone) {
+                    return std::unexpected(primary_cone.error());
+                }
                 const auto ray = renderer::Ray::create(primary->origin(), primary->direction(),
                                                        primary->t_min(), primary->t_max(),
                                                        primary->time(), primary->mask(), medium);
@@ -274,6 +279,7 @@ make_inputs(const renderer::PinholeCamera& camera, const renderer::SampledWavele
                 }
                 inputs.push_back(CudaWavefrontPathInput{
                     .primary_ray = *ray,
+                    .primary_cone = *primary_cone,
                     .initial_state = *initial_state,
                     .sample = sampler.make_stream(pixel_x, pixel_y, sample_index).index(),
                 });
@@ -309,6 +315,11 @@ make_pixel_inputs(const renderer::PinholeCamera& camera,
         if (!primary) {
             return std::unexpected(primary.error());
         }
+        const auto primary_cone = camera.generate_primary_ray_cone(
+            pixel_sample, renderer::PixelJitterMode::uniform, CornellPathTime);
+        if (!primary_cone) {
+            return std::unexpected(primary_cone.error());
+        }
         const auto ray = renderer::Ray::create(primary->origin(), primary->direction(),
                                                primary->t_min(), primary->t_max(), primary->time(),
                                                primary->mask(), renderer::VacuumMedium);
@@ -317,6 +328,7 @@ make_pixel_inputs(const renderer::PinholeCamera& camera,
         }
         inputs.push_back(CudaWavefrontPathInput{
             .primary_ray = *ray,
+            .primary_cone = *primary_cone,
             .initial_state = *initial_state,
             .sample = sampler.make_stream(pixel_x, pixel_y, sample_index).index(),
         });
@@ -425,6 +437,8 @@ void add_report(CudaWavefrontTransportReport& destination,
 void expect_transport_paths_exact(const CudaWavefrontTransportBatch& expected,
                                   const CudaWavefrontTransportBatch& actual) {
     ASSERT_EQ(actual.paths.size(), expected.paths.size());
+    ASSERT_EQ(actual.terminal_cones.size(), actual.paths.size());
+    ASSERT_EQ(expected.terminal_cones.size(), expected.paths.size());
     for (auto index = std::size_t{}; index < expected.paths.size(); ++index) {
         SCOPED_TRACE(testing::Message{} << "path " << index);
         const auto& expected_path = expected.paths[index];
@@ -448,6 +462,7 @@ void expect_transport_paths_exact(const CudaWavefrontTransportBatch& expected,
         EXPECT_EQ(actual_path.terminal_ray.mask(), expected_path.terminal_ray.mask());
         EXPECT_EQ(actual_path.terminal_ray.current_medium(),
                   expected_path.terminal_ray.current_medium());
+        EXPECT_EQ(actual.terminal_cones[index], expected.terminal_cones[index]);
     }
 }
 
@@ -589,6 +604,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, RendersCanonicalCornellThroughCudaWavefron
             *workspace, *scene_soa_, *scene_bvh_, *inputs, std::cref(*light_sampler_), options);
         ASSERT_TRUE(traced.has_value()) << traced.error().message;
         ASSERT_EQ(traced->paths.size(), inputs->size());
+        ASSERT_EQ(traced->terminal_cones.size(), traced->paths.size());
 
         const auto& report = traced->report;
         EXPECT_EQ(report.schema_version, CurrentCudaWavefrontTransportReportSchemaVersion);
@@ -806,9 +822,12 @@ TEST_F(CudaCornellWavefrontSmokeTest, SamplesLambertThenEnvironmentWithoutRegist
                               CornellPathTime, renderer::AllRayVisibility, renderer::VacuumMedium);
     ASSERT_TRUE(primary.has_value()) << primary.error().message;
     const auto sampler = renderer::IndependentSampler{CornellSeed};
+    const auto primary_cone = renderer::RayCone::create(0.125F, 0.25F);
+    ASSERT_TRUE(primary_cone.has_value()) << primary_cone.error().message;
     const auto inputs = std::vector{
         CudaWavefrontPathInput{
             .primary_ray = *primary,
+            .primary_cone = *primary_cone,
             .initial_state = *initial_state,
             .sample = sampler.make_stream(0U, 0U, 0U).index(),
         },
@@ -818,6 +837,7 @@ TEST_F(CudaCornellWavefrontSmokeTest, SamplesLambertThenEnvironmentWithoutRegist
         trace_cuda_wavefront_transport(uploaded, bvh, inputs, std::nullopt, transport_options(1U));
     ASSERT_TRUE(traced.has_value()) << traced.error().message;
     ASSERT_EQ(traced->paths.size(), 1U);
+    ASSERT_EQ(traced->terminal_cones.size(), traced->paths.size());
     const auto& path = traced->paths.front();
     EXPECT_EQ(path.termination, CudaWavefrontPathTermination::escaped_environment);
     EXPECT_EQ(path.state.depth(), 1U);
@@ -841,6 +861,20 @@ TEST_F(CudaCornellWavefrontSmokeTest, SamplesLambertThenEnvironmentWithoutRegist
     EXPECT_EQ(traced->report.stage_lanes.miss, 1U);
     EXPECT_EQ(traced->report.stage_lanes.shade, 1U);
     EXPECT_EQ(traced->report.stage_lanes.continuation, 1U);
+
+    const auto advanced = renderer::advance_ray_cone(*primary_cone, *primary, 1.0F);
+    ASSERT_TRUE(advanced.has_value()) << advanced.error().message;
+    auto closures = renderer::ClosureSet{};
+    ASSERT_EQ(closures.append_lambertian_reflection(expected_beta),
+              renderer::ClosureAppendStatus::appended);
+    const auto incoming_local = renderer::normalized(path.terminal_ray.direction());
+    ASSERT_TRUE(incoming_local.has_value()) << incoming_local.error().message;
+    const auto reference_cone = renderer::propagate_ray_cone_scattering(
+        *advanced, closures.closures().front(),
+        renderer::ScatteringLobe::diffuse | renderer::ScatteringLobe::reflection,
+        renderer::Vector3{.z = 1.0F}, *incoming_local);
+    ASSERT_TRUE(reference_cone.has_value()) << reference_cone.error().message;
+    EXPECT_EQ(traced->terminal_cones.front(), *reference_cone);
 
     EXPECT_TRUE(bvh.close().has_value());
     EXPECT_TRUE(uploaded.close().has_value());
@@ -868,9 +902,12 @@ TEST(CudaWavefrontDepthDispatchTest, AllowsSpecularBouncesBeyondDiffuseLimit) {
         renderer::AllRayVisibility, renderer::VacuumMedium);
     ASSERT_TRUE(primary.has_value()) << primary.error().message;
     const auto sampler = renderer::IndependentSampler{CornellSeed};
+    const auto primary_cone = renderer::RayCone::create(0.0F, 0.0F);
+    ASSERT_TRUE(primary_cone.has_value()) << primary_cone.error().message;
     const auto inputs = std::array{
         CudaWavefrontPathInput{
             .primary_ray = *primary,
+            .primary_cone = *primary_cone,
             .initial_state = *initial_state,
             .sample = sampler.make_stream(0U, 0U, 0U).index(),
         },
@@ -1145,6 +1182,12 @@ TEST_F(CudaCornellWavefrontSmokeTest, SynchronousAndAsynchronousTransfersMatchEx
         asynchronous_options);
     ASSERT_TRUE(asynchronous_full_first.has_value()) << asynchronous_full_first.error().message;
     expect_transport_batches_physically_exact(*synchronous_full_first, *asynchronous_full_first);
+    EXPECT_TRUE(std::ranges::any_of(synchronous_full_first->terminal_cones, [](const auto cone) {
+        return cone.width() > 0.0F && cone.spread() > 0.0F;
+    }));
+    EXPECT_TRUE(std::ranges::any_of(asynchronous_full_first->terminal_cones, [](const auto cone) {
+        return cone.width() > 0.0F && cone.spread() > 0.0F;
+    }));
     expect_synchronous_transfer_report(synchronous_full_first->report);
     expect_asynchronous_transfer_report(asynchronous_full_first->report);
 

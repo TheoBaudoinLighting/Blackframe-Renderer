@@ -135,6 +135,86 @@ class CudaWavefrontStageAuditTest : public testing::Test {
     }
 };
 
+template <typename Value> [[nodiscard]] Value* non_null_device_address() noexcept {
+    return reinterpret_cast<Value*>(static_cast<std::uintptr_t>(alignof(Value)));
+}
+
+[[nodiscard]] WavefrontQueueDeviceSoa camera_validation_queues() noexcept {
+    return WavefrontQueueDeviceSoa{
+        .headers = non_null_device_address<shared::QueueHeader>(),
+        .path_slots = non_null_device_address<shared::PathSlot>(),
+        .queue_count = CudaWavefrontQueueCount,
+        .slot_stride = 1U,
+    };
+}
+
+[[nodiscard]] WavefrontStageDeviceSoa camera_validation_streams() noexcept {
+    return WavefrontStageDeviceSoa{
+        .sample_streams = non_null_device_address<shared::SampleStreamIndex>(),
+        .rays = non_null_device_address<shared::TransportRay>(),
+        .ray_cones = non_null_device_address<WavefrontRayCone>(),
+        .path_states = non_null_device_address<shared::TransportPathStateLane>(),
+        .hits = non_null_device_address<shared::ClosestHit>(),
+        .pending_shadows = non_null_device_address<WavefrontPendingShadow>(),
+        .previous_bsdf_samples = non_null_device_address<WavefrontPreviousBsdfSample>(),
+        .controls = non_null_device_address<WavefrontLaneControl>(),
+        .capacity = 1U,
+        .reserved = 0U,
+        .reserved_tail = {0U, 0U},
+    };
+}
+
+[[nodiscard]] WavefrontCameraInputDeviceSoa camera_validation_inputs() noexcept {
+    return WavefrontCameraInputDeviceSoa{
+        .sample_streams = non_null_device_address<shared::SampleStreamIndex>(),
+        .rays = non_null_device_address<shared::TransportRay>(),
+        .ray_cones = non_null_device_address<WavefrontRayCone>(),
+        .path_states = non_null_device_address<shared::TransportPathStateLane>(),
+        .count = 1U,
+        .reserved = 0U,
+        .reserved_tail = {0U, 0U},
+    };
+}
+
+TEST_F(CudaWavefrontStageAuditTest, CameraLauncherRejectsMissingRayConeColumns) {
+    const auto queues = camera_validation_queues();
+    const auto valid_streams = camera_validation_streams();
+    const auto valid_inputs = camera_validation_inputs();
+    EXPECT_EQ(blackframe_cuda_launch_wavefront_camera_stage(queues, valid_inputs, valid_streams, 0U,
+                                                            nullptr, nullptr),
+              static_cast<int>(cudaSuccess));
+
+    auto missing_stream_cones = valid_streams;
+    missing_stream_cones.ray_cones = nullptr;
+    EXPECT_EQ(blackframe_cuda_launch_wavefront_camera_stage(
+                  queues, valid_inputs, missing_stream_cones, 0U, nullptr, nullptr),
+              static_cast<int>(cudaErrorInvalidValue));
+
+    auto missing_input_cones = valid_inputs;
+    missing_input_cones.ray_cones = nullptr;
+    EXPECT_EQ(blackframe_cuda_launch_wavefront_camera_stage(queues, missing_input_cones,
+                                                            valid_streams, 0U, nullptr, nullptr),
+              static_cast<int>(cudaErrorInvalidValue));
+}
+
+TEST_F(CudaWavefrontStageAuditTest, CameraLauncherRejectsNonCanonicalReservedTails) {
+    const auto queues = camera_validation_queues();
+    const auto valid_streams = camera_validation_streams();
+    const auto valid_inputs = camera_validation_inputs();
+
+    auto noncanonical_streams = valid_streams;
+    noncanonical_streams.reserved_tail[1U] = 1U;
+    EXPECT_EQ(blackframe_cuda_launch_wavefront_camera_stage(
+                  queues, valid_inputs, noncanonical_streams, 0U, nullptr, nullptr),
+              static_cast<int>(cudaErrorInvalidValue));
+
+    auto noncanonical_inputs = valid_inputs;
+    noncanonical_inputs.reserved_tail[0U] = 1U;
+    EXPECT_EQ(blackframe_cuda_launch_wavefront_camera_stage(queues, noncanonical_inputs,
+                                                            valid_streams, 0U, nullptr, nullptr),
+              static_cast<int>(cudaErrorInvalidValue));
+}
+
 TEST_F(CudaWavefrontStageAuditTest, SummarizesSuccessfulOutcomes) {
     const auto outcomes = std::array{
         successful_outcome(WavefrontStageRoute::ray, 0U),

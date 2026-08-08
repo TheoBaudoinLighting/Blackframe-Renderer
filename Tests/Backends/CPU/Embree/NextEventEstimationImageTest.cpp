@@ -645,14 +645,13 @@ TEST(NextEventEstimationParityTest, MatchesScalarReferenceThroughCpuWavefront) {
     const auto inputs = scalar_wavefront_parity_test::make_inputs(
         ReplayExtent, samples_per_pixel, EvaluationSeed,
         (*scene)->spectral_environment()->wavelengths,
-        [](const renderer::PixelSampleIndex& index,
-           const renderer::SampleStream& stream) -> core::Result<renderer::Ray> {
+        [](const renderer::PixelSampleIndex& index, const renderer::SampleStream& stream) {
             const auto position =
                 primary_position(ReplayExtent, index.pixel_x, index.pixel_y, stream);
-            return renderer::Ray::create(
+            return scalar_wavefront_parity_test::point_primary_ray(renderer::Ray::create(
                 position + renderer::Vector3{.z = CameraHeight}, renderer::Vector3{.z = -1.0F},
                 0.0F, std::numeric_limits<renderer::TransportScalar>::infinity(), PathTime,
-                renderer::AllRayVisibility, renderer::VacuumMedium);
+                renderer::AllRayVisibility, renderer::VacuumMedium));
         });
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 

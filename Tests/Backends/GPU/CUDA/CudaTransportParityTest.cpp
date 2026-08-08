@@ -71,6 +71,7 @@ struct ParityResult final {
     renderer::ReferenceScalar cuda_positive_image_energy;
     std::vector<renderer::BsdfOnlyPathResult> scalar_paths;
     std::vector<CudaWavefrontPathResult> cuda_paths;
+    std::vector<renderer::RayCone> cuda_terminal_cones;
     CudaWavefrontTransportReport cuda_report;
 };
 
@@ -670,6 +671,10 @@ make_material_inputs(const FrameSceneHandle& scene, const renderer::Ray& ray,
     if (!dimensions) {
         return std::unexpected(dimensions.error());
     }
+    const auto primary_cone = renderer::RayCone::create(0.0F, 0.0F);
+    if (!primary_cone) {
+        return std::unexpected(primary_cone.error());
+    }
 
     auto requested_count = std::size_t{};
     for (const auto& band : bands) {
@@ -702,6 +707,7 @@ make_material_inputs(const FrameSceneHandle& scene, const renderer::Ray& ray,
                 }
                 inputs.push_back(CudaWavefrontPathInput{
                     .primary_ray = ray,
+                    .primary_cone = *primary_cone,
                     .initial_state = *state,
                     .sample = sample,
                 });
@@ -715,6 +721,37 @@ make_material_inputs(const FrameSceneHandle& scene, const renderer::Ray& ray,
         }
     }
     return inputs;
+}
+
+struct PrimaryRayWithCone final {
+    renderer::Ray ray;
+    renderer::RayCone cone;
+};
+
+[[nodiscard]] core::Result<PrimaryRayWithCone>
+camera_primary_ray(const renderer::PinholeCamera& camera, const renderer::PixelSampleIndex index) {
+    const auto ray =
+        camera.generate_primary_ray(index, renderer::PixelJitterMode::uniform, PathTime);
+    const auto cone =
+        camera.generate_primary_ray_cone(index, renderer::PixelJitterMode::uniform, PathTime);
+    if (!ray) {
+        return std::unexpected(ray.error());
+    }
+    if (!cone) {
+        return std::unexpected(cone.error());
+    }
+    return PrimaryRayWithCone{.ray = *ray, .cone = *cone};
+}
+
+[[nodiscard]] core::Result<PrimaryRayWithCone> point_primary_ray(core::Result<renderer::Ray> ray) {
+    if (!ray) {
+        return std::unexpected(ray.error());
+    }
+    const auto cone = renderer::RayCone::create(0.0F, 0.0F);
+    if (!cone) {
+        return std::unexpected(cone.error());
+    }
+    return PrimaryRayWithCone{.ray = *ray, .cone = *cone};
 }
 
 template <typename GenerateRay>
@@ -740,12 +777,13 @@ make_inputs(const renderer::RenderExtent extent, const std::uint32_t samples_per
                     .seed = seed,
                 };
                 const auto stream = sampler.make_stream(pixel_x, pixel_y, sample_index);
-                const auto ray = generate_ray(index, stream);
-                if (!ray) {
-                    return std::unexpected(ray.error());
+                const auto primary = generate_ray(index, stream);
+                if (!primary) {
+                    return std::unexpected(primary.error());
                 }
                 inputs.push_back(CudaWavefrontPathInput{
-                    .primary_ray = *ray,
+                    .primary_ray = primary->ray,
+                    .primary_cone = primary->cone,
                     .initial_state = *initial_state,
                     .sample = stream.index(),
                 });
@@ -896,10 +934,10 @@ run_parity(const FrameSceneHandle& scene, const std::span<const CudaWavefrontPat
     if (!cuda) {
         return std::unexpected(cuda.error());
     }
-    if (cuda->paths.size() != inputs.size()) {
+    if (cuda->paths.size() != inputs.size() || cuda->terminal_cones.size() != inputs.size()) {
         return std::unexpected(
             parity_error(core::StatusCode::internal_error,
-                         "CUDA transport parity received a different output path count."));
+                         "CUDA transport parity received misaligned path and ray-cone outputs."));
     }
 
     auto scalar_film = renderer::ReferenceFilm::create(configuration.extent);
@@ -960,6 +998,7 @@ run_parity(const FrameSceneHandle& scene, const std::span<const CudaWavefrontPat
     }
 
     auto cuda_paths = cuda->paths;
+    auto cuda_terminal_cones = cuda->terminal_cones;
     const auto cuda_report = cuda->report;
     if (auto status = scene_bvh->close(); !status) {
         return std::unexpected(status.error());
@@ -975,6 +1014,7 @@ run_parity(const FrameSceneHandle& scene, const std::span<const CudaWavefrontPat
         .cuda_positive_image_energy = *cuda_energy,
         .scalar_paths = std::move(scalar_paths),
         .cuda_paths = std::move(cuda_paths),
+        .cuda_terminal_cones = std::move(cuda_terminal_cones),
         .cuda_report = cuda_report,
     };
 }
@@ -1101,9 +1141,14 @@ void expect_parity(const ParityConfiguration& configuration, const ParityResult&
     EXPECT_EQ(result.cuda_report.queue_overflow_attempts, 0U);
     EXPECT_EQ(result.cuda_report.queue_rejected_lanes, 0U);
     ASSERT_EQ(result.cuda_paths.size(), result.scalar_paths.size());
+    ASSERT_EQ(result.cuda_terminal_cones.size(), result.cuda_paths.size());
     for (auto path_index = std::size_t{}; path_index < result.scalar_paths.size(); ++path_index) {
         SCOPED_TRACE(path_index);
         expect_path_parity(result.scalar_paths[path_index], result.cuda_paths[path_index]);
+        EXPECT_TRUE(std::isfinite(result.cuda_terminal_cones[path_index].width()));
+        EXPECT_GE(result.cuda_terminal_cones[path_index].width(), 0.0F);
+        EXPECT_TRUE(std::isfinite(result.cuda_terminal_cones[path_index].spread()));
+        EXPECT_GE(result.cuda_terminal_cones[path_index].spread(), 0.0F);
     }
 }
 
@@ -1178,7 +1223,7 @@ TEST(CudaTransportParityTest, MatchesPrimaryEnvironmentMiss) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, false);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, false));
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1202,7 +1247,7 @@ TEST(CudaTransportParityTest, MatchesDirectionalLightNee) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, true);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, true));
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1232,7 +1277,7 @@ TEST(CudaTransportParityTest, MatchesWideSpotLightNee) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, true);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, true));
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1266,8 +1311,7 @@ TEST_P(CudaAreaEmitterParityTest, MatchesBalanceAndPowerMis) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&camera](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return camera->generate_primary_ray(index, renderer::PixelJitterMode::uniform,
-                                                PathTime);
+            return camera_primary_ray(*camera, index);
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1302,7 +1346,7 @@ TEST(CudaTransportParityTest, MatchesMixedRegistryAndComplementaryEmitterHitMis)
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, true);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, true));
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1349,7 +1393,7 @@ TEST(CudaTransportParityTest, MatchesRussianRouletteDecisions) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, true);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, true));
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1394,7 +1438,7 @@ TEST(CudaTransportParityTest, PreservesRepresentableSubnormalLambertProducts) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, true);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, true));
         });
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
     const auto high_beta_state = renderer::PathState::create(
@@ -1437,7 +1481,7 @@ TEST(CudaTransportParityTest, MatchesPointLightNee) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&configuration](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, configuration.extent, true);
+            return point_primary_ray(make_planar_ray(index, configuration.extent, true));
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1467,10 +1511,10 @@ TEST(CudaTransportParityTest, SkipsOccludedUnrepresentablePointRadiometry) {
         make_inputs(configuration.extent, configuration.samples_per_pixel, configuration.seed,
                     (*scene)->spectral_environment()->wavelengths,
                     [](const renderer::PixelSampleIndex&, const renderer::SampleStream&) {
-                        return renderer::Ray::create(
+                        return point_primary_ray(renderer::Ray::create(
                             renderer::Point3{.z = 0.25F}, renderer::Vector3{.z = -1.0F}, 0.0F,
                             std::numeric_limits<renderer::TransportScalar>::infinity(), PathTime,
-                            renderer::AllRayVisibility, renderer::VacuumMedium);
+                            renderer::AllRayVisibility, renderer::VacuumMedium));
                     });
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
     ASSERT_EQ(inputs->size(), 2U);
@@ -1530,8 +1574,7 @@ TEST(CudaTransportParityTest, MatchesCornellDiffuse) {
         configuration.extent, configuration.samples_per_pixel, configuration.seed,
         (*scene)->spectral_environment()->wavelengths,
         [&camera](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return camera->generate_primary_ray(index, renderer::PixelJitterMode::uniform,
-                                                PathTime);
+            return camera_primary_ray(*camera, index);
         });
     const auto light_sampler = make_uniform_light_sampler(*scene);
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
@@ -1738,18 +1781,25 @@ TEST(CudaTransportAllLobesParityTest, MatchesSpecularDeltaEntryExitAndTir) {
     ASSERT_TRUE(select_test_device());
     constexpr auto bands =
         std::array{ComponentSampleBand{.lower = 0.0F, .upper = 1.0F, .count = 4U}};
+    const auto primary_cone = renderer::RayCone::create(0.125F, 0.25F);
+    ASSERT_TRUE(primary_cone.has_value()) << primary_cone.error().message;
 
     const auto verify = [&](const std::string_view name, SceneClosureMixture closure,
                             const renderer::Vector3 outgoing, const bool expect_support,
                             const renderer::PathDepthCounters expected_depth,
                             const float expected_eta_scale, const renderer::Vector3 expected_ray) {
         SCOPED_TRACE(name);
+        ASSERT_EQ(closure.closures.size(), 1U);
+        const auto reference_closure = closure.closures.closures().front();
         const auto scene = make_material_scene(std::move(closure));
         const auto primary = material_primary_ray(outgoing);
         ASSERT_TRUE(scene.has_value()) << scene.error().message;
         ASSERT_TRUE(primary.has_value()) << primary.error().message;
-        const auto inputs = make_material_inputs(*scene, *primary, bands);
+        auto inputs = make_material_inputs(*scene, *primary, bands);
         ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
+        for (auto& input : *inputs) {
+            input.primary_cone = *primary_cone;
+        }
         const auto parity = run_material_parity(*scene, *inputs, name);
         ASSERT_TRUE(parity.has_value()) << parity.error().message;
         expect_parity(material_configuration(name, inputs->size()), *parity, expect_support);
@@ -1763,6 +1813,7 @@ TEST(CudaTransportAllLobesParityTest, MatchesSpecularDeltaEntryExitAndTir) {
                 EXPECT_EQ(path.state.eta_scale(), 1.0F);
                 EXPECT_EQ(path.state.accumulated_radiance(), renderer::TransportSpectrum{});
                 EXPECT_EQ(path.terminal_ray.direction(), inputs->at(index).primary_ray.direction());
+                EXPECT_EQ(parity->cuda_terminal_cones[index], inputs->at(index).primary_cone);
                 continue;
             }
             EXPECT_EQ(path.termination, renderer::BsdfOnlyPathTermination::escaped_environment);
@@ -1773,6 +1824,25 @@ TEST(CudaTransportAllLobesParityTest, MatchesSpecularDeltaEntryExitAndTir) {
             EXPECT_NEAR(path.terminal_ray.direction().x, expected_ray.x, TerminalGeometryTolerance);
             EXPECT_NEAR(path.terminal_ray.direction().y, expected_ray.y, TerminalGeometryTolerance);
             EXPECT_NEAR(path.terminal_ray.direction().z, expected_ray.z, TerminalGeometryTolerance);
+
+            const auto hit_parameter = -inputs->at(index).primary_ray.origin().z /
+                                       inputs->at(index).primary_ray.direction().z;
+            const auto advanced = renderer::advance_ray_cone(
+                inputs->at(index).primary_cone, inputs->at(index).primary_ray, hit_parameter);
+            ASSERT_TRUE(advanced.has_value()) << advanced.error().message;
+            const auto event =
+                expected_depth.transmission == 0U
+                    ? renderer::ScatteringLobe::specular | renderer::ScatteringLobe::reflection
+                    : renderer::ScatteringLobe::specular | renderer::ScatteringLobe::transmission;
+            const auto reference_cone = renderer::propagate_ray_cone_scattering(
+                *advanced, reference_closure, event, outgoing, expected_ray);
+            ASSERT_TRUE(reference_cone.has_value()) << reference_cone.error().message;
+            EXPECT_NEAR(parity->cuda_terminal_cones[index].width(), reference_cone->width(),
+                        1.0e-6F);
+            EXPECT_NEAR(parity->cuda_terminal_cones[index].spread(), reference_cone->spread(),
+                        1.0e-6F);
+            EXPECT_GT(parity->cuda_terminal_cones[index].width(), 0.0F);
+            EXPECT_GT(parity->cuda_terminal_cones[index].spread(), 0.0F);
         }
         EXPECT_EQ(parity->cuda_report.shadow_queries, 0U);
     };
@@ -2122,7 +2192,7 @@ TEST(CudaTransportParityTest, RejectsUnsupportedOrMismatchedLightSamplersWithout
     const auto inputs = make_inputs(
         extent, 1U, EvaluationSeed, (*scene)->spectral_environment()->wavelengths,
         [extent](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return make_planar_ray(index, extent, true);
+            return point_primary_ray(make_planar_ray(index, extent, true));
         });
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
     auto scene_soa = CudaSceneSoA::upload(**scene);

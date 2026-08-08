@@ -761,8 +761,8 @@ TEST(VeachMisParityTest, MatchesScalarReferenceThroughCpuWavefront) {
     const auto inputs = scalar_wavefront_parity_test::make_inputs(
         extent, samples_per_pixel, EvaluationSeed, test_wavelengths(),
         [&camera](const renderer::PixelSampleIndex& index, const renderer::SampleStream&) {
-            return camera->generate_primary_ray(index, renderer::PixelJitterMode::uniform,
-                                                PathTime);
+            return scalar_wavefront_parity_test::camera_primary_ray(
+                *camera, index, renderer::PixelJitterMode::uniform, PathTime);
         });
     ASSERT_TRUE(inputs.has_value()) << inputs.error().message;
 

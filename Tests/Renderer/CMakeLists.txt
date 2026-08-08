@@ -35,6 +35,7 @@ add_executable(
     PlanarPrimitivesTest.cpp
     PngWriterTest.cpp
     RayTest.cpp
+    RayConeTest.cpp
     RayDifferentialTest.cpp
     RayOriginOffsetTest.cpp
     RenderConfigurationTest.cpp
@@ -290,6 +291,12 @@ if(TARGET Blackframe::Png)
         RayDifferentialTest.WritesStableMirrorAndTransmissionFootprintPreview
         checksum-ray-differential-specular-800x800.png
         fe65ffb737101b249142418bf109bf9b5e36a9945f00dfe80c38c8cac573dd63
+    )
+    blackframe_add_png_checksum_test(
+        Blackframe.RayConeDifferentialComparison
+        RayConeTest.WritesStableDifferentialComparisonPreview
+        checksum-ray-cone-differential-800x800.png
+        2d665362780ceb9d774c74ea8dab47f8453257db2c52085c32de2e3425a29b77
     )
     blackframe_add_png_checksum_test(
         Blackframe.DebugGolden.Normal

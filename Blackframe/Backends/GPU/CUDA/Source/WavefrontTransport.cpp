@@ -38,6 +38,7 @@ using xpu::cuda::WavefrontPendingShadow;
 using xpu::cuda::WavefrontPreviousBsdfSample;
 using xpu::cuda::WavefrontQueueCompactionResult;
 using xpu::cuda::WavefrontQueueCompactionStatus;
+using xpu::cuda::WavefrontRayCone;
 using xpu::cuda::WavefrontStageAudit;
 using xpu::cuda::WavefrontStageDeviceSoa;
 using xpu::cuda::WavefrontStageKind;
@@ -521,6 +522,14 @@ validate_options_and_inputs(const std::span<const CudaWavefrontPathInput> inputs
     }
     for (auto index = std::size_t{}; index < inputs.size(); ++index) {
         const auto& input = inputs[index];
+        if (!std::isfinite(input.primary_cone.width()) || input.primary_cone.width() < 0.0F ||
+            !std::isfinite(input.primary_cone.spread()) || input.primary_cone.spread() < 0.0F) {
+            return std::unexpected(transport_error(
+                core::StatusCode::invalid_argument,
+                "CUDA wavefront transport requires an explicit finite non-negative ray cone at "
+                "path " +
+                    std::to_string(index) + "."));
+        }
         if (input.primary_ray.current_medium() != input.initial_state.current_medium()) {
             return std::unexpected(transport_error(
                 core::StatusCode::incompatible,
@@ -676,6 +685,25 @@ transport_sample_stream_index(const renderer::SampleStreamIndex index) noexcept 
         .sample_index = index.sample_index,
         .seed = index.seed,
     };
+}
+
+[[nodiscard]] WavefrontRayCone transport_ray_cone(const renderer::RayCone cone) noexcept {
+    return WavefrontRayCone{
+        .width = cone.width(),
+        .spread = cone.spread(),
+    };
+}
+
+[[nodiscard]] core::Result<renderer::RayCone> renderer_ray_cone(const WavefrontRayCone cone,
+                                                                const std::size_t path_index) {
+    auto converted = renderer::RayCone::create(cone.width, cone.spread);
+    if (!converted) {
+        return std::unexpected(
+            transport_error(core::StatusCode::internal_error,
+                            "CUDA wavefront terminal ray cone " + std::to_string(path_index) +
+                                " violated the renderer contract: " + converted.error().message));
+    }
+    return converted;
 }
 
 [[nodiscard]] core::Result<renderer::PathState>
@@ -1167,9 +1195,11 @@ queue_header(const xpu::cuda::WavefrontQueueDeviceSoa queues,
 struct CudaWavefrontWorkspaceColumns final {
     SampleStreamIndex* input_samples{};
     TransportRay* input_rays{};
+    WavefrontRayCone* input_ray_cones{};
     TransportPathStateLane* input_states{};
     SampleStreamIndex* stream_samples{};
     TransportRay* stream_rays{};
+    WavefrontRayCone* stream_ray_cones{};
     TransportPathStateLane* stream_states{};
     ClosestHit* hits{};
     WavefrontPendingShadow* pending_shadows{};
@@ -1205,9 +1235,11 @@ allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::s
 
     auto input_samples = allocate_column.template operator()<SampleStreamIndex>(capacity);
     auto input_rays = allocate_column.template operator()<TransportRay>(capacity);
+    auto input_ray_cones = allocate_column.template operator()<WavefrontRayCone>(capacity);
     auto input_states = allocate_column.template operator()<TransportPathStateLane>(capacity);
     auto stream_samples = allocate_column.template operator()<SampleStreamIndex>(capacity);
     auto stream_rays = allocate_column.template operator()<TransportRay>(capacity);
+    auto stream_ray_cones = allocate_column.template operator()<WavefrontRayCone>(capacity);
     auto stream_states = allocate_column.template operator()<TransportPathStateLane>(capacity);
     auto hits = allocate_column.template operator()<ClosestHit>(capacity);
     auto pending_shadows = allocate_column.template operator()<WavefrontPendingShadow>(capacity);
@@ -1230,12 +1262,16 @@ allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::s
             return &input_samples.error();
         if (!input_rays)
             return &input_rays.error();
+        if (!input_ray_cones)
+            return &input_ray_cones.error();
         if (!input_states)
             return &input_states.error();
         if (!stream_samples)
             return &stream_samples.error();
         if (!stream_rays)
             return &stream_rays.error();
+        if (!stream_ray_cones)
+            return &stream_ray_cones.error();
         if (!stream_states)
             return &stream_states.error();
         if (!hits)
@@ -1273,9 +1309,11 @@ allocate_workspace_columns(xpu::cuda::DeviceScratchBuffer& scratch, const std::s
     return CudaWavefrontWorkspaceColumns{
         .input_samples = *input_samples,
         .input_rays = *input_rays,
+        .input_ray_cones = *input_ray_cones,
         .input_states = *input_states,
         .stream_samples = *stream_samples,
         .stream_rays = *stream_rays,
+        .stream_ray_cones = *stream_ray_cones,
         .stream_states = *stream_states,
         .hits = *hits,
         .pending_shadows = *pending_shadows,
@@ -1316,16 +1354,18 @@ scratch_capacity(const std::size_t path_count, const xpu::cuda::DeviceMemoryBudg
     }
 
     constexpr auto column_element_bytes =
-        sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(TransportPathStateLane) +
-        sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(TransportPathStateLane) +
-        sizeof(ClosestHit) + sizeof(WavefrontPendingShadow) + sizeof(WavefrontLaneControl) +
+        sizeof(SampleStreamIndex) + sizeof(TransportRay) + sizeof(WavefrontRayCone) +
+        sizeof(TransportPathStateLane) + sizeof(SampleStreamIndex) + sizeof(TransportRay) +
+        sizeof(WavefrontRayCone) + sizeof(TransportPathStateLane) + sizeof(ClosestHit) +
+        sizeof(WavefrontPendingShadow) + sizeof(WavefrontLaneControl) +
         sizeof(WavefrontPreviousBsdfSample) + sizeof(PathSlot) + sizeof(TransportRay) +
         sizeof(SceneClosestHitResult) + sizeof(SceneOcclusionResult) +
         sizeof(WavefrontStageOutcome);
     constexpr auto column_alignment_slack =
         (alignof(SampleStreamIndex) - 1U) + (alignof(TransportRay) - 1U) +
-        (alignof(TransportPathStateLane) - 1U) + (alignof(SampleStreamIndex) - 1U) +
-        (alignof(TransportRay) - 1U) + (alignof(TransportPathStateLane) - 1U) +
+        (alignof(WavefrontRayCone) - 1U) + (alignof(TransportPathStateLane) - 1U) +
+        (alignof(SampleStreamIndex) - 1U) + (alignof(TransportRay) - 1U) +
+        (alignof(WavefrontRayCone) - 1U) + (alignof(TransportPathStateLane) - 1U) +
         (alignof(ClosestHit) - 1U) + (alignof(WavefrontPendingShadow) - 1U) +
         (alignof(WavefrontPreviousBsdfSample) - 1U) + (alignof(WavefrontLaneControl) - 1U) +
         (alignof(PathSlot) - 1U) + (alignof(TransportRay) - 1U) +
@@ -1413,10 +1453,12 @@ struct CudaWavefrontAsyncStaging final {
                static_cast<bool>(*compute_done) && downloads_ready != nullptr &&
                static_cast<bool>(*downloads_ready) && host_samples != nullptr &&
                static_cast<bool>(*host_samples) && host_rays != nullptr &&
-               static_cast<bool>(*host_rays) && host_states != nullptr &&
+               static_cast<bool>(*host_rays) && host_ray_cones != nullptr &&
+               static_cast<bool>(*host_ray_cones) && host_states != nullptr &&
                static_cast<bool>(*host_states) && final_states != nullptr &&
                static_cast<bool>(*final_states) && final_rays != nullptr &&
-               static_cast<bool>(*final_rays) && final_controls != nullptr &&
+               static_cast<bool>(*final_rays) && final_ray_cones != nullptr &&
+               static_cast<bool>(*final_ray_cones) && final_controls != nullptr &&
                static_cast<bool>(*final_controls) && stage_audit != nullptr &&
                static_cast<bool>(*stage_audit) && compaction_result != nullptr &&
                static_cast<bool>(*compaction_result) && queue_header != nullptr &&
@@ -1463,12 +1505,16 @@ struct CudaWavefrontAsyncStaging final {
             retain_first_close_error(*host_samples, first_error);
         if (host_rays != nullptr)
             retain_first_close_error(*host_rays, first_error);
+        if (host_ray_cones != nullptr)
+            retain_first_close_error(*host_ray_cones, first_error);
         if (host_states != nullptr)
             retain_first_close_error(*host_states, first_error);
         if (final_states != nullptr)
             retain_first_close_error(*final_states, first_error);
         if (final_rays != nullptr)
             retain_first_close_error(*final_rays, first_error);
+        if (final_ray_cones != nullptr)
+            retain_first_close_error(*final_ray_cones, first_error);
         if (final_controls != nullptr)
             retain_first_close_error(*final_controls, first_error);
         if (stage_audit != nullptr)
@@ -1484,9 +1530,11 @@ struct CudaWavefrontAsyncStaging final {
 
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<SampleStreamIndex>> host_samples;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<TransportRay>> host_rays;
+    std::unique_ptr<xpu::cuda::PinnedHostBuffer<WavefrontRayCone>> host_ray_cones;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<TransportPathStateLane>> host_states;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<TransportPathStateLane>> final_states;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<TransportRay>> final_rays;
+    std::unique_ptr<xpu::cuda::PinnedHostBuffer<WavefrontRayCone>> final_ray_cones;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<WavefrontLaneControl>> final_controls;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<WavefrontStageAudit>> stage_audit;
     std::unique_ptr<xpu::cuda::PinnedHostBuffer<WavefrontQueueCompactionResult>> compaction_result;
@@ -1595,6 +1643,10 @@ create_async_staging(const std::size_t capacity) {
     if (!host_rays)
         return std::unexpected(std::move(host_rays.error()));
     staging->host_rays = std::move(*host_rays);
+    auto host_ray_cones = allocate_pinned_buffer<WavefrontRayCone>(capacity);
+    if (!host_ray_cones)
+        return std::unexpected(std::move(host_ray_cones.error()));
+    staging->host_ray_cones = std::move(*host_ray_cones);
     auto host_states = allocate_pinned_buffer<TransportPathStateLane>(capacity);
     if (!host_states)
         return std::unexpected(std::move(host_states.error()));
@@ -1607,6 +1659,10 @@ create_async_staging(const std::size_t capacity) {
     if (!final_rays)
         return std::unexpected(std::move(final_rays.error()));
     staging->final_rays = std::move(*final_rays);
+    auto final_ray_cones = allocate_pinned_buffer<WavefrontRayCone>(capacity);
+    if (!final_ray_cones)
+        return std::unexpected(std::move(final_ray_cones.error()));
+    staging->final_ray_cones = std::move(*final_ray_cones);
     auto final_controls = allocate_pinned_buffer<WavefrontLaneControl>(capacity);
     if (!final_controls)
         return std::unexpected(std::move(final_controls.error()));
@@ -1650,6 +1706,9 @@ struct CudaWavefrontTransportWorkspace::Storage final {
                            : 0U),
           host_rays(selected_transfer_mode == CudaWavefrontTransferMode::synchronous ? path_capacity
                                                                                      : 0U),
+          host_ray_cones(selected_transfer_mode == CudaWavefrontTransferMode::synchronous
+                             ? path_capacity
+                             : 0U),
           host_states(selected_transfer_mode == CudaWavefrontTransferMode::synchronous
                           ? path_capacity
                           : 0U),
@@ -1659,6 +1718,9 @@ struct CudaWavefrontTransportWorkspace::Storage final {
           final_rays(selected_transfer_mode == CudaWavefrontTransferMode::synchronous
                          ? path_capacity
                          : 0U),
+          final_ray_cones(selected_transfer_mode == CudaWavefrontTransferMode::synchronous
+                              ? path_capacity
+                              : 0U),
           final_controls(selected_transfer_mode == CudaWavefrontTransferMode::synchronous
                              ? path_capacity
                              : 0U) {}
@@ -1669,6 +1731,10 @@ struct CudaWavefrontTransportWorkspace::Storage final {
     [[nodiscard]] TransportRay* host_rays_data() noexcept {
         return async_staging != nullptr ? async_staging->host_rays->data() : host_rays.data();
     }
+    [[nodiscard]] WavefrontRayCone* host_ray_cones_data() noexcept {
+        return async_staging != nullptr ? async_staging->host_ray_cones->data()
+                                        : host_ray_cones.data();
+    }
     [[nodiscard]] TransportPathStateLane* host_states_data() noexcept {
         return async_staging != nullptr ? async_staging->host_states->data() : host_states.data();
     }
@@ -1677,6 +1743,10 @@ struct CudaWavefrontTransportWorkspace::Storage final {
     }
     [[nodiscard]] TransportRay* final_rays_data() noexcept {
         return async_staging != nullptr ? async_staging->final_rays->data() : final_rays.data();
+    }
+    [[nodiscard]] WavefrontRayCone* final_ray_cones_data() noexcept {
+        return async_staging != nullptr ? async_staging->final_ray_cones->data()
+                                        : final_ray_cones.data();
     }
     [[nodiscard]] WavefrontLaneControl* final_controls_data() noexcept {
         return async_staging != nullptr ? async_staging->final_controls->data()
@@ -1708,9 +1778,11 @@ struct CudaWavefrontTransportWorkspace::Storage final {
     std::unique_ptr<CudaWavefrontProfilingResources> profiling;
     std::vector<SampleStreamIndex> host_samples;
     std::vector<TransportRay> host_rays;
+    std::vector<WavefrontRayCone> host_ray_cones;
     std::vector<TransportPathStateLane> host_states;
     std::vector<TransportPathStateLane> final_states;
     std::vector<TransportRay> final_rays;
+    std::vector<WavefrontRayCone> final_ray_cones;
     std::vector<WavefrontLaneControl> final_controls;
     WavefrontStageAudit host_stage_audit{};
     WavefrontQueueCompactionResult host_compaction_result{};
@@ -1994,6 +2066,7 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             const auto& columns = storage.columns;
             const auto queue_view = storage.queues.device_view();
             auto* const stream_rays = columns.stream_rays;
+            auto* const stream_ray_cones = columns.stream_ray_cones;
             auto* const stream_states = columns.stream_states;
             auto* const controls = columns.controls;
             auto* const compact_slots = columns.compact_slots;
@@ -2008,6 +2081,7 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             auto* const clear_status = columns.clear_status;
             auto* const host_samples = storage.host_samples_data();
             auto* const host_rays = storage.host_rays_data();
+            auto* const host_ray_cones = storage.host_ray_cones_data();
             auto* const host_states = storage.host_states_data();
             const auto transfer_stream = asynchronous != nullptr
                                              ? native_stream(asynchronous->transfer_stream.get())
@@ -2023,6 +2097,7 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                     return std::unexpected(std::move(converted_ray.error()));
                 }
                 host_rays[index] = *converted_ray;
+                host_ray_cones[index] = transport_ray_cone(inputs[index].primary_cone);
                 host_states[index] = transport_path_state(inputs[index].initial_state);
             }
             if (storage.queues_dirty) {
@@ -2051,12 +2126,13 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
 
             const auto sample_bytes = path_count * sizeof(SampleStreamIndex);
             const auto ray_bytes = path_count * sizeof(TransportRay);
+            const auto ray_cone_bytes = path_count * sizeof(WavefrontRayCone);
             const auto state_bytes = path_count * sizeof(TransportPathStateLane);
             const auto control_bytes = path_count * sizeof(WavefrontLaneControl);
             {
                 const auto upload_range = CudaWavefrontNvtxRange{
                     execution_context.profiling, "upload", CudaWavefrontNvtxCategory::transfer,
-                    0xFF78909CU, sample_bytes + ray_bytes + state_bytes};
+                    0xFF78909CU, sample_bytes + ray_bytes + ray_cone_bytes + state_bytes};
                 if (auto status = copy_host_to_device(
                         columns.input_samples, host_samples, sample_bytes, transfer_stream,
                         storage.transfer_mode, transfer_counters, "sample upload");
@@ -2066,6 +2142,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 if (auto status = copy_host_to_device(columns.input_rays, host_rays, ray_bytes,
                                                       transfer_stream, storage.transfer_mode,
                                                       transfer_counters, "ray upload");
+                    !status) {
+                    return std::unexpected(std::move(status.error()));
+                }
+                if (auto status = copy_host_to_device(
+                        columns.input_ray_cones, host_ray_cones, ray_cone_bytes, transfer_stream,
+                        storage.transfer_mode, transfer_counters, "ray-cone upload");
                     !status) {
                     return std::unexpected(std::move(status.error()));
                 }
@@ -2102,6 +2184,7 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             const auto stream_view = WavefrontStageDeviceSoa{
                 .sample_streams = columns.stream_samples,
                 .rays = columns.stream_rays,
+                .ray_cones = columns.stream_ray_cones,
                 .path_states = columns.stream_states,
                 .hits = columns.hits,
                 .pending_shadows = columns.pending_shadows,
@@ -2109,13 +2192,16 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                 .controls = columns.controls,
                 .capacity = device_capacity,
                 .reserved = 0U,
+                .reserved_tail = {0U, 0U},
             };
             const auto camera_inputs = WavefrontCameraInputDeviceSoa{
                 .sample_streams = columns.input_samples,
                 .rays = columns.input_rays,
+                .ray_cones = columns.input_ray_cones,
                 .path_states = columns.input_states,
                 .count = device_path_count,
                 .reserved = 0U,
+                .reserved_tail = {0U, 0U},
             };
             void* const kernel_stream =
                 opaque_stream(native_stream(execution_context.compute_stream));
@@ -2565,11 +2651,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
 
             auto* const final_states = storage.final_states_data();
             auto* const final_rays = storage.final_rays_data();
+            auto* const final_ray_cones = storage.final_ray_cones_data();
             auto* const final_controls = storage.final_controls_data();
             {
                 const auto download_range = CudaWavefrontNvtxRange{
                     execution_context.profiling, "download", CudaWavefrontNvtxCategory::transfer,
-                    0xFF78909CU, state_bytes + ray_bytes + control_bytes};
+                    0xFF78909CU, state_bytes + ray_bytes + ray_cone_bytes + control_bytes};
                 if (asynchronous != nullptr) {
                     if (auto status = contextual_runtime_status(
                             asynchronous->compute_done->record(*asynchronous->compute_stream),
@@ -2612,6 +2699,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                         !status) {
                         return std::unexpected(std::move(status.error()));
                     }
+                    if (auto status =
+                            enqueue_download(final_ray_cones, stream_ray_cones, ray_cone_bytes,
+                                             "terminal ray-cone download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
                     if (auto status = enqueue_download(final_controls, controls, control_bytes,
                                                        "lane-control download");
                         !status) {
@@ -2643,6 +2736,12 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                         !status) {
                         return std::unexpected(std::move(status.error()));
                     }
+                    if (auto status = copy_device_to_host_and_wait(
+                            final_ray_cones, stream_ray_cones, ray_cone_bytes, execution_context,
+                            "terminal ray-cone download");
+                        !status) {
+                        return std::unexpected(std::move(status.error()));
+                    }
                     if (auto status = copy_device_to_host_and_wait(final_controls, controls,
                                                                    control_bytes, execution_context,
                                                                    "lane-control download");
@@ -2653,15 +2752,20 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
             }
 
             auto paths = std::vector<CudaWavefrontPathResult>{};
+            auto terminal_cones = std::vector<renderer::RayCone>{};
             paths.reserve(path_count);
+            terminal_cones.reserve(path_count);
             for (auto index = std::size_t{}; index < path_count; ++index) {
                 auto state = renderer_path_state(final_states[index], index);
                 auto ray = renderer_ray(final_rays[index], index);
+                auto ray_cone = renderer_ray_cone(final_ray_cones[index], index);
                 auto termination = renderer_termination(final_controls[index], index);
                 if (!state)
                     return std::unexpected(std::move(state.error()));
                 if (!ray)
                     return std::unexpected(std::move(ray.error()));
+                if (!ray_cone)
+                    return std::unexpected(std::move(ray_cone.error()));
                 if (!termination)
                     return std::unexpected(std::move(termination.error()));
                 if (state->current_medium() != renderer::VacuumMedium ||
@@ -2679,13 +2783,18 @@ trace_cuda_wavefront_transport(CudaWavefrontTransportWorkspace& workspace,
                     .termination = termination->reason,
                     .blocked_depth_limits = termination->blocked_depth_limits,
                 });
+                terminal_cones.push_back(*ray_cone);
             }
             report.terminated_paths = path_count;
             report.asynchronous_upload_bytes = transfer_counters.upload_bytes;
             report.asynchronous_download_bytes = transfer_counters.download_bytes;
             report.cross_stream_event_dependencies = transfer_counters.event_dependencies;
             storage.queues_dirty = false;
-            return CudaWavefrontTransportBatch{.paths = std::move(paths), .report = report};
+            return CudaWavefrontTransportBatch{
+                .paths = std::move(paths),
+                .terminal_cones = std::move(terminal_cones),
+                .report = report,
+            };
         } catch (const std::bad_alloc&) {
             return std::unexpected(
                 transport_error(core::StatusCode::resource_exhausted,

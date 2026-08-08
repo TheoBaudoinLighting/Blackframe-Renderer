@@ -8,6 +8,7 @@
 #include <Blackframe/Renderer/MisHeuristics.hpp>
 #include <Blackframe/Renderer/PathDepthLimits.hpp>
 #include <Blackframe/Renderer/PathState.hpp>
+#include <Blackframe/Renderer/RayCone.hpp>
 #include <Blackframe/Renderer/RussianRoulette.hpp>
 #include <Blackframe/Renderer/SampleStream.hpp>
 #include <cstddef>
@@ -25,6 +26,7 @@ inline constexpr std::uint32_t CurrentCpuWavefrontMisReportSchemaVersion = 2U;
 // unique stable path slots and preserves output order.
 struct CpuWavefrontMisPathInput final {
     renderer::Ray primary_ray;
+    renderer::RayCone primary_cone;
     renderer::PathState initial_state;
     renderer::SampleStreamIndex sample;
 };
@@ -109,6 +111,8 @@ struct CpuWavefrontMisReport final {
 
 struct CpuWavefrontMisBatch final {
     std::vector<renderer::BsdfOnlyPathResult> paths;
+    // Each cone is expressed at the origin of the terminal ray in the same path slot.
+    std::vector<renderer::RayCone> terminal_cones;
     CpuWavefrontMisReport report;
 };
 

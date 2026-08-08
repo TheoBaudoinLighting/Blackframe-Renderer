@@ -36,6 +36,7 @@ using cuda::WavefrontPendingBsdfEncoding;
 using cuda::WavefrontPendingShadow;
 using cuda::WavefrontPreviousBsdfSample;
 using cuda::WavefrontQueueDeviceSoa;
+using cuda::WavefrontRayCone;
 using cuda::WavefrontStageAudit;
 using cuda::WavefrontStageDeviceSoa;
 using cuda::WavefrontStageKind;
@@ -204,6 +205,8 @@ enum class ShadeFailureDetail : std::uint32_t {
     probability_measure = 26U,
     eta_scale = 27U,
     geometric_support = 28U,
+    ray_cone_advance = 29U,
+    ray_cone_scattering = 30U,
 };
 
 [[nodiscard]] __device__ constexpr std::uint32_t value(const WavefrontStageStatus status) noexcept {
@@ -481,6 +484,11 @@ valid_pending_shadow_radiometry(const WavefrontPendingShadow& pending) noexcept 
            finite_vector(direction) && dot(direction, direction) > 0.0F && ray.reserved == 0U;
 }
 
+[[nodiscard]] __device__ bool valid_ray_cone(const WavefrontRayCone cone) noexcept {
+    return isfinite(cone.width) && cone.width >= 0.0F && isfinite(cone.spread) &&
+           cone.spread >= 0.0F;
+}
+
 [[nodiscard]] __device__ bool valid_path_state(const TransportPathStateLane& state) noexcept {
     if (!nonnegative_spectrum(state.beta) || !nonnegative_spectrum(state.accumulated_radiance) ||
         !isfinite(state.eta_scale) || !(state.eta_scale > 0.0F)) {
@@ -587,12 +595,13 @@ valid_previous_bsdf_sample(const WavefrontPreviousBsdfSample& previous,
 }
 
 [[nodiscard]] __device__ bool valid_stream_view(const WavefrontStageDeviceSoa streams) noexcept {
-    return streams.reserved == 0U &&
+    return streams.reserved == 0U && streams.reserved_tail[0U] == 0U &&
+           streams.reserved_tail[1U] == 0U &&
            (streams.capacity == 0U ||
             (streams.sample_streams != nullptr && streams.rays != nullptr &&
-             streams.path_states != nullptr && streams.hits != nullptr &&
-             streams.pending_shadows != nullptr && streams.previous_bsdf_samples != nullptr &&
-             streams.controls != nullptr));
+             streams.ray_cones != nullptr && streams.path_states != nullptr &&
+             streams.hits != nullptr && streams.pending_shadows != nullptr &&
+             streams.previous_bsdf_samples != nullptr && streams.controls != nullptr));
 }
 
 [[nodiscard]] __device__ WavefrontStageStatus queue_slot(const WavefrontQueueDeviceSoa queues,
@@ -1279,7 +1288,8 @@ __global__ void camera_stage_kernel(const WavefrontQueueDeviceSoa queues,
                                   WavefrontStageRoute::none, slot.value, control.phase);
         return;
     }
-    if (inputs.reserved != 0U || inputs.sample_streams == nullptr || inputs.rays == nullptr ||
+    if (inputs.reserved != 0U || inputs.reserved_tail[0U] != 0U || inputs.reserved_tail[1U] != 0U ||
+        inputs.sample_streams == nullptr || inputs.rays == nullptr || inputs.ray_cones == nullptr ||
         inputs.path_states == nullptr || slot.value >= inputs.count) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] =
@@ -1287,8 +1297,10 @@ __global__ void camera_stage_kernel(const WavefrontQueueDeviceSoa queues,
         return;
     }
     const auto ray = inputs.rays[slot.value];
+    const auto ray_cone = inputs.ray_cones[slot.value];
     const auto state = inputs.path_states[slot.value];
-    if (!valid_ray(ray) || !valid_path_state(state) || ray.current_medium != state.current_medium) {
+    if (!valid_ray(ray) || !valid_ray_cone(ray_cone) || !valid_path_state(state) ||
+        ray.current_medium != state.current_medium) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] = outcome(!valid_ray(ray) ? WavefrontStageStatus::invalid_ray
                                                   : WavefrontStageStatus::invalid_lane_state,
@@ -1303,6 +1315,7 @@ __global__ void camera_stage_kernel(const WavefrontQueueDeviceSoa queues,
     }
     streams.sample_streams[slot.value] = inputs.sample_streams[slot.value];
     streams.rays[slot.value] = ray;
+    streams.ray_cones[slot.value] = ray_cone;
     streams.path_states[slot.value] = state;
     streams.hits[slot.value] = ClosestHit{};
     streams.pending_shadows[slot.value] = WavefrontPendingShadow{};
@@ -1329,7 +1342,7 @@ gather_rays_kernel(const WavefrontQueueDeviceSoa queues, const WavefrontStageDev
         return;
     }
     if (streams.controls[slot.value].phase != value(WavefrontLanePhase::ray) ||
-        !valid_ray(streams.rays[slot.value])) {
+        !valid_ray(streams.rays[slot.value]) || !valid_ray_cone(streams.ray_cones[slot.value])) {
         outcomes[index] =
             outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
                     streams.controls[slot.value].phase);
@@ -2717,6 +2730,170 @@ valid_surface_event(const transport::ScatteringLobe lobes) noexcept {
            (direction == 0x00000008U || direction == 0x00000010U);
 }
 
+[[nodiscard]] __device__ bool checked_ray_cone_product(const float left, const float right,
+                                                       float& product) noexcept {
+    product = left * right;
+    return isfinite(product) && !(left != 0.0F && right != 0.0F && product == 0.0F);
+}
+
+[[nodiscard]] __device__ bool checked_ray_cone_ratio(const float numerator, const float denominator,
+                                                     float& ratio) noexcept {
+    if (!isfinite(numerator) || !(numerator > 0.0F) || !isfinite(denominator) ||
+        !(denominator > 0.0F)) {
+        return false;
+    }
+    ratio = numerator / denominator;
+    return isfinite(ratio) && ratio > 0.0F;
+}
+
+[[nodiscard]] __device__ bool advance_ray_cone_to_hit(const WavefrontRayCone cone,
+                                                      const TransportRay& ray,
+                                                      const float parameter,
+                                                      WavefrontRayCone& advanced) noexcept {
+    if (!valid_ray_cone(cone) || !isfinite(parameter) || parameter < 0.0F) {
+        return false;
+    }
+    const auto direction = Vector3{
+        .x = ray.direction_x,
+        .y = ray.direction_y,
+        .z = ray.direction_z,
+    };
+    const auto scale = fmaxf(fabsf(direction.x), fmaxf(fabsf(direction.y), fabsf(direction.z)));
+    if (!isfinite(scale) || !(scale > 0.0F)) {
+        return false;
+    }
+    const auto scaled = multiply(direction, 1.0F / scale);
+    const auto normalized_length = sqrtf(dot(scaled, scaled));
+    auto direction_length = 0.0F;
+    if (!isfinite(normalized_length) || !(normalized_length > 0.0F) ||
+        !checked_ray_cone_product(scale, normalized_length, direction_length) ||
+        !(direction_length > 0.0F)) {
+        return false;
+    }
+    auto distance = 0.0F;
+    if (!checked_ray_cone_product(parameter, direction_length, distance) || distance < 0.0F) {
+        return false;
+    }
+    auto growth = 0.0F;
+    if (!checked_ray_cone_product(cone.spread, distance, growth)) {
+        return false;
+    }
+    const auto width = fmaf(cone.spread, distance, cone.width);
+    if (!isfinite(width) || width < cone.width || (growth != 0.0F && width == cone.width)) {
+        return false;
+    }
+    advanced = WavefrontRayCone{.width = width, .spread = cone.spread};
+    return valid_ray_cone(advanced);
+}
+
+[[nodiscard]] __device__ bool propagate_ray_cone_scattering(const WavefrontRayCone cone,
+                                                            const transport::ClosureRecord& closure,
+                                                            const transport::ScatteringLobe event,
+                                                            const transport::Vector3 outgoing_local,
+                                                            const transport::Vector3 incoming_local,
+                                                            WavefrontRayCone& propagated) noexcept {
+    if (!valid_ray_cone(cone) || !valid_surface_event(event) ||
+        !transport::unit_vector(outgoing_local) || !transport::unit_vector(incoming_local) ||
+        outgoing_local.z == 0.0F || incoming_local.z == 0.0F) {
+        return false;
+    }
+
+    const auto reflection = has_lobe(event, transport::ScatteringLobe::reflection);
+    const auto transmission = has_lobe(event, transport::ScatteringLobe::transmission);
+    const auto same_hemisphere = (outgoing_local.z > 0.0F) == (incoming_local.z > 0.0F);
+    if ((reflection && !same_hemisphere) || (transmission && same_hemisphere)) {
+        return false;
+    }
+    auto spread_floor = 0.0F;
+    auto transmission_scale = 1.0F;
+    auto width_scale = 1.0F;
+    switch (closure.kind) {
+    case transport::ClosureKind::lambertian_reflection:
+    case transport::ClosureKind::rough_diffuse_reflection:
+        if (!reflection || !has_lobe(event, transport::ScatteringLobe::diffuse)) {
+            return false;
+        }
+        spread_floor = 1.0F;
+        break;
+    case transport::ClosureKind::rough_conductor_reflection:
+        if (!reflection || !has_lobe(event, transport::ScatteringLobe::glossy)) {
+            return false;
+        }
+        if (!isfinite(closure.parameters[8U]) || closure.parameters[8U] < 0.0F ||
+            !isfinite(closure.parameters[9U]) || closure.parameters[9U] < 0.0F) {
+            return false;
+        }
+        spread_floor = fmaxf(closure.parameters[8U], closure.parameters[9U]);
+        break;
+    case transport::ClosureKind::rough_dielectric:
+        if (!has_lobe(event, transport::ScatteringLobe::glossy)) {
+            return false;
+        }
+        if (!isfinite(closure.parameters[2U]) || closure.parameters[2U] < 0.0F ||
+            !isfinite(closure.parameters[3U]) || closure.parameters[3U] < 0.0F) {
+            return false;
+        }
+        spread_floor = fmaxf(closure.parameters[2U], closure.parameters[3U]);
+        break;
+    case transport::ClosureKind::specular_reflection:
+        if (!reflection || !has_lobe(event, transport::ScatteringLobe::specular)) {
+            return false;
+        }
+        break;
+    case transport::ClosureKind::specular_transmission:
+        if (!transmission || !has_lobe(event, transport::ScatteringLobe::specular)) {
+            return false;
+        }
+        break;
+    case transport::ClosureKind::none:
+        return false;
+    default:
+        return false;
+    }
+
+    if (!isfinite(spread_floor) || spread_floor < 0.0F) {
+        return false;
+    }
+    if (transmission) {
+        if (closure.kind != transport::ClosureKind::rough_dielectric &&
+            closure.kind != transport::ClosureKind::specular_transmission) {
+            return false;
+        }
+        const auto exterior_eta = closure.parameters[0U];
+        const auto interior_eta = closure.parameters[1U];
+        const auto incident_eta = outgoing_local.z > 0.0F ? exterior_eta : interior_eta;
+        const auto transmitted_eta = outgoing_local.z > 0.0F ? interior_eta : exterior_eta;
+        auto eta_ratio = 0.0F;
+        auto cosine_ratio = 0.0F;
+        auto inverse_cosine_ratio = 0.0F;
+        if (!checked_ray_cone_ratio(incident_eta, transmitted_eta, eta_ratio) ||
+            !checked_ray_cone_ratio(fabsf(outgoing_local.z), fabsf(incoming_local.z),
+                                    cosine_ratio) ||
+            !checked_ray_cone_ratio(fabsf(incoming_local.z), fabsf(outgoing_local.z),
+                                    inverse_cosine_ratio)) {
+            return false;
+        }
+        auto meridional_scale = 0.0F;
+        if (!checked_ray_cone_product(eta_ratio, cosine_ratio, meridional_scale)) {
+            return false;
+        }
+        transmission_scale = fmaxf(eta_ratio, meridional_scale);
+        width_scale = fmaxf(1.0F, inverse_cosine_ratio);
+    }
+
+    auto transported_width = 0.0F;
+    auto transported_spread = 0.0F;
+    if (!checked_ray_cone_product(cone.width, width_scale, transported_width) ||
+        !checked_ray_cone_product(cone.spread, transmission_scale, transported_spread)) {
+        return false;
+    }
+    propagated = WavefrontRayCone{
+        .width = transported_width,
+        .spread = fmaxf(transported_spread, spread_floor),
+    };
+    return valid_ray_cone(propagated);
+}
+
 [[nodiscard]] __device__ constexpr bool
 delta_surface_event(const transport::ScatteringLobe lobes) noexcept {
     return valid_surface_event(lobes) && has_lobe(lobes, transport::ScatteringLobe::specular);
@@ -3085,10 +3262,11 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
     }
     auto& state = streams.path_states[slot.value];
     auto& ray = streams.rays[slot.value];
+    auto& ray_cone = streams.ray_cones[slot.value];
     const auto& hit = streams.hits[slot.value];
     auto& previous = streams.previous_bsdf_samples[slot.value];
-    if (!valid_path_state(state) || !valid_ray(ray) || !valid_hit(hit) ||
-        ray.current_medium != state.current_medium ||
+    if (!valid_path_state(state) || !valid_ray(ray) || !valid_ray_cone(ray_cone) ||
+        !valid_hit(hit) || ray.current_medium != state.current_medium ||
         (state.depth == 0U ? previous.valid != 0U : !valid_previous_bsdf_sample(previous, ray))) {
         finish_phase(control, WavefrontLanePhase::terminated);
         outcomes[index] = outcome(WavefrontStageStatus::invalid_lane_state,
@@ -3499,6 +3677,31 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
                     value(ShadeFailureDetail::continuation_ray));
         return;
     }
+    auto advanced_cone = WavefrontRayCone{};
+    if (!advance_ray_cone_to_hit(ray_cone, ray, hit.parameter, advanced_cone)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::ray_cone_advance));
+        return;
+    }
+    if (bsdf_sample.selected_closure >= closures.active_count) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::invalid_lane_state, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::ray_cone_scattering));
+        return;
+    }
+    auto next_cone = WavefrontRayCone{};
+    if (!propagate_ray_cone_scattering(
+            advanced_cone, closures.closures[bsdf_sample.selected_closure], bsdf_sample.lobes,
+            outgoing_local, bsdf_sample.incoming_local, next_cone)) {
+        finish_phase(control, WavefrontLanePhase::terminated);
+        outcomes[index] =
+            outcome(WavefrontStageStatus::numerical_failure, WavefrontStageRoute::none, slot.value,
+                    value(ShadeFailureDetail::ray_cone_scattering));
+        return;
+    }
     auto next_state = state;
     next_state.beta = updated_beta;
     next_state.eta_scale = next_eta_scale;
@@ -3535,6 +3738,7 @@ shade_stage_kernel(const std::uint8_t* const scene_bytes, const std::size_t scen
     }
     state = next_state;
     ray = next_ray;
+    ray_cone = next_cone;
     previous = next_previous;
 
     auto continuation_pending = true;
@@ -3914,12 +4118,13 @@ stage_audit_kernel(const WavefrontStageOutcome* const outcomes, const std::uint3
 }
 
 [[nodiscard]] bool host_stream_view_is_valid(const WavefrontStageDeviceSoa streams) noexcept {
-    return streams.reserved == 0U &&
+    return streams.reserved == 0U && streams.reserved_tail[0U] == 0U &&
+           streams.reserved_tail[1U] == 0U &&
            (streams.capacity == 0U ||
             (streams.sample_streams != nullptr && streams.rays != nullptr &&
-             streams.path_states != nullptr && streams.hits != nullptr &&
-             streams.pending_shadows != nullptr && streams.previous_bsdf_samples != nullptr &&
-             streams.controls != nullptr));
+             streams.ray_cones != nullptr && streams.path_states != nullptr &&
+             streams.hits != nullptr && streams.pending_shadows != nullptr &&
+             streams.previous_bsdf_samples != nullptr && streams.controls != nullptr));
 }
 
 [[nodiscard]] bool host_views_are_valid(const WavefrontQueueDeviceSoa queues,
@@ -3981,9 +4186,10 @@ extern "C" int blackframe_cuda_launch_wavefront_camera_stage(
     const WavefrontStageDeviceSoa streams, const std::uint32_t work_count,
     WavefrontStageOutcome* const outcomes, void* const stream_handle) noexcept {
     if (!host_views_are_valid(queues, streams) || inputs.reserved != 0U ||
+        inputs.reserved_tail[0U] != 0U || inputs.reserved_tail[1U] != 0U ||
         inputs.count > streams.capacity ||
         (inputs.count != 0U && (inputs.sample_streams == nullptr || inputs.rays == nullptr ||
-                                inputs.path_states == nullptr)) ||
+                                inputs.ray_cones == nullptr || inputs.path_states == nullptr)) ||
         (work_count != 0U && outcomes == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }

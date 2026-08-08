@@ -19,6 +19,9 @@ or unsupported path fails before rendering instead of silently choosing a substi
   intersection.
 - Rays carry a bounded parameter interval, time, visibility mask, and current medium identifier.
   Primary pinhole rays support deterministic center sampling or indexed subpixel jitter.
+- Scalar paths propagate full ray differentials across ideal specular events. CPU and CUDA
+  wavefront paths carry explicit ray cones, advance their world-space footprint at hits, and apply
+  the same reflection, Snell, diffuse, and GGX spread rules without changing the traversal ABI.
 - Analytic spheres, planes, and disks coexist with watertight triangles. Surface interactions keep
   geometric and shading normals separate and expose UVs, derivatives, stable IDs, and time.
 - Immutable `FrameScene` snapshots own stable object, geometry, material, texture, light, and
@@ -111,9 +114,10 @@ SMAPE, mean bias, heatmaps, time, rays, samples, queue statistics, and memory wh
 - Transport is vacuum-only. Unsupported media are rejected.
 - Host image textures are not yet bound to material parameters, scene packets, or device uploads.
   Blackframe does not invent an implicit RGB-to-spectrum conversion.
-- The pinhole camera and `scalar_ref` propagate ray differentials across ideal reflection and
-  transmission. Continuous lobes report their loss explicitly; CPU/GPU wavefront propagation is
-  not implemented yet.
+- Ray cones are circular footprints. Their ideal reflection/transmission bound assumes a locally
+  constant closure frame; interpolated-normal variation is not bounded. Continuous lobes have
+  unbounded support, so diffuse and GGX use documented finite spread policies. Full anisotropic
+  derivatives remain a `scalar_ref` validation capability rather than per-lane wavefront state.
 - A latitude-longitude environment-map light contract exists, but scene transport currently
   resolves only the constant environment; maps are not connected to misses, NEE, or MIS.
 - Geometry updates cover full rebuilds and frame-to-frame transform refits, not deformation or

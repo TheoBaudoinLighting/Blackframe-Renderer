@@ -57,6 +57,7 @@ add_library(
         Include/Blackframe/Renderer/PunctualLights.hpp
         Include/Blackframe/Renderer/Quaternion.hpp
         Include/Blackframe/Renderer/Ray.hpp
+        Include/Blackframe/Renderer/RayCone.hpp
         Include/Blackframe/Renderer/RayDifferential.hpp
         Include/Blackframe/Renderer/RayDiagnostics.hpp
         Include/Blackframe/Renderer/RayOriginOffset.hpp

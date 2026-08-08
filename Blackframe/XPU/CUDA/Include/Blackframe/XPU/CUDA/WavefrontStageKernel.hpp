@@ -136,6 +136,13 @@ struct alignas(16) WavefrontLaneControl final {
     std::uint32_t blocked_depth_limits{};
 };
 
+// Backend-local companion to shared::TransportRay. Keeping the cone in an independent SoA column
+// preserves the frozen traversal-ray and PathState host/device layouts.
+struct WavefrontRayCone final {
+    float width{};
+    float spread{};
+};
+
 struct alignas(16) WavefrontPendingShadow final {
     shared::TransportRay ray{};
     shared::TransportSpectrum beta{};
@@ -173,6 +180,7 @@ struct alignas(16) WavefrontPreviousBsdfSample final {
 struct alignas(16) WavefrontStageDeviceSoa final {
     shared::SampleStreamIndex* sample_streams{};
     shared::TransportRay* rays{};
+    WavefrontRayCone* ray_cones{};
     shared::TransportPathStateLane* path_states{};
     shared::ClosestHit* hits{};
     WavefrontPendingShadow* pending_shadows{};
@@ -180,14 +188,17 @@ struct alignas(16) WavefrontStageDeviceSoa final {
     WavefrontLaneControl* controls{};
     std::uint32_t capacity{};
     std::uint32_t reserved{};
+    std::uint32_t reserved_tail[2U]{};
 };
 
 struct alignas(16) WavefrontCameraInputDeviceSoa final {
     const shared::SampleStreamIndex* sample_streams{};
     const shared::TransportRay* rays{};
+    const WavefrontRayCone* ray_cones{};
     const shared::TransportPathStateLane* path_states{};
     std::uint32_t count{};
     std::uint32_t reserved{};
+    std::uint32_t reserved_tail[2U]{};
 };
 
 #define BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(record)                                                \
@@ -199,6 +210,7 @@ BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageOutcome);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageAudit);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontTransportConfig);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontLaneControl);
+BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontRayCone);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontPendingShadow);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontPreviousBsdfSample);
 BLACKFRAME_ASSERT_CUDA_STAGE_RECORD(WavefrontStageDeviceSoa);
@@ -255,6 +267,10 @@ static_assert(offsetof(WavefrontLaneControl, phase) == 0U);
 static_assert(offsetof(WavefrontLaneControl, termination) == 4U);
 static_assert(offsetof(WavefrontLaneControl, flags) == 8U);
 static_assert(offsetof(WavefrontLaneControl, blocked_depth_limits) == 12U);
+static_assert(sizeof(WavefrontRayCone) == 8U);
+static_assert(alignof(WavefrontRayCone) == 4U);
+static_assert(offsetof(WavefrontRayCone, width) == 0U);
+static_assert(offsetof(WavefrontRayCone, spread) == 4U);
 static_assert(sizeof(WavefrontPendingShadow) == 128U);
 static_assert(alignof(WavefrontPendingShadow) == 16U);
 static_assert(offsetof(WavefrontPendingShadow, ray) == 0U);
@@ -283,24 +299,28 @@ static_assert(offsetof(WavefrontPreviousBsdfSample, probability_measure) == 32U)
 static_assert(offsetof(WavefrontPreviousBsdfSample, valid) == 36U);
 static_assert(offsetof(WavefrontPreviousBsdfSample, reserved) == 40U);
 static_assert(sizeof(void*) == 8U);
-static_assert(sizeof(WavefrontStageDeviceSoa) == 64U);
+static_assert(sizeof(WavefrontStageDeviceSoa) == 80U);
 static_assert(alignof(WavefrontStageDeviceSoa) == 16U);
 static_assert(offsetof(WavefrontStageDeviceSoa, sample_streams) == 0U);
 static_assert(offsetof(WavefrontStageDeviceSoa, rays) == 8U);
-static_assert(offsetof(WavefrontStageDeviceSoa, path_states) == 16U);
-static_assert(offsetof(WavefrontStageDeviceSoa, hits) == 24U);
-static_assert(offsetof(WavefrontStageDeviceSoa, pending_shadows) == 32U);
-static_assert(offsetof(WavefrontStageDeviceSoa, previous_bsdf_samples) == 40U);
-static_assert(offsetof(WavefrontStageDeviceSoa, controls) == 48U);
-static_assert(offsetof(WavefrontStageDeviceSoa, capacity) == 56U);
-static_assert(offsetof(WavefrontStageDeviceSoa, reserved) == 60U);
-static_assert(sizeof(WavefrontCameraInputDeviceSoa) == 32U);
+static_assert(offsetof(WavefrontStageDeviceSoa, ray_cones) == 16U);
+static_assert(offsetof(WavefrontStageDeviceSoa, path_states) == 24U);
+static_assert(offsetof(WavefrontStageDeviceSoa, hits) == 32U);
+static_assert(offsetof(WavefrontStageDeviceSoa, pending_shadows) == 40U);
+static_assert(offsetof(WavefrontStageDeviceSoa, previous_bsdf_samples) == 48U);
+static_assert(offsetof(WavefrontStageDeviceSoa, controls) == 56U);
+static_assert(offsetof(WavefrontStageDeviceSoa, capacity) == 64U);
+static_assert(offsetof(WavefrontStageDeviceSoa, reserved) == 68U);
+static_assert(offsetof(WavefrontStageDeviceSoa, reserved_tail) == 72U);
+static_assert(sizeof(WavefrontCameraInputDeviceSoa) == 48U);
 static_assert(alignof(WavefrontCameraInputDeviceSoa) == 16U);
 static_assert(offsetof(WavefrontCameraInputDeviceSoa, sample_streams) == 0U);
 static_assert(offsetof(WavefrontCameraInputDeviceSoa, rays) == 8U);
-static_assert(offsetof(WavefrontCameraInputDeviceSoa, path_states) == 16U);
-static_assert(offsetof(WavefrontCameraInputDeviceSoa, count) == 24U);
-static_assert(offsetof(WavefrontCameraInputDeviceSoa, reserved) == 28U);
+static_assert(offsetof(WavefrontCameraInputDeviceSoa, ray_cones) == 16U);
+static_assert(offsetof(WavefrontCameraInputDeviceSoa, path_states) == 24U);
+static_assert(offsetof(WavefrontCameraInputDeviceSoa, count) == 32U);
+static_assert(offsetof(WavefrontCameraInputDeviceSoa, reserved) == 36U);
+static_assert(offsetof(WavefrontCameraInputDeviceSoa, reserved_tail) == 40U);
 
 } // namespace blackframe::xpu::cuda
 

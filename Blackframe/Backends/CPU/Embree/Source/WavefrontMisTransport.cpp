@@ -161,6 +161,7 @@ struct PendingTermination final {
 struct RuntimePath final {
     renderer::SampleStreamIndex sample{};
     std::optional<renderer::Ray> ray;
+    std::optional<renderer::RayCone> cone;
     renderer::TransportSpectrum beta{};
     renderer::TransportSpectrum radiance{};
     renderer::PathDepthCounters depth_counters{};
@@ -288,6 +289,7 @@ initial_queue_statistics_set(const std::uint64_t capacity) noexcept {
     }
     runtime.sample = input.sample;
     runtime.ray = input.primary_ray;
+    runtime.cone = input.primary_cone;
     runtime.beta = state.beta();
     runtime.radiance = state.accumulated_radiance();
     runtime.depth_counters = state.depth_counters();
@@ -302,7 +304,7 @@ initial_queue_statistics_set(const std::uint64_t capacity) noexcept {
 [[nodiscard]] core::Status finish_path(RuntimePath& runtime,
                                        const renderer::BsdfOnlyPathTermination termination,
                                        const renderer::ScatteringLobe blocked_depth_limits) {
-    if (!runtime.initialized || !runtime.ray || runtime.result) {
+    if (!runtime.initialized || !runtime.ray || !runtime.cone || runtime.result) {
         return std::unexpected(wavefront_error(
             core::StatusCode::internal_error,
             "A CPU wavefront accumulation lane received incomplete or duplicate path state."));
@@ -732,7 +734,8 @@ next_delta_flags(const renderer::PathDeltaFlags current,
                                       const WavefrontDirectLighting& direct_lighting,
                                       const renderer::PathDepthLimits& depth_limits,
                                       const renderer::RussianRoulettePolicy& roulette_policy) {
-    if (!runtime.initialized || !runtime.ray || !runtime.surface || runtime.result) {
+    if (!runtime.initialized || !runtime.ray || !runtime.cone || !runtime.hit || !runtime.surface ||
+        runtime.result) {
         return std::unexpected(wavefront_error(
             core::StatusCode::internal_error,
             "A CPU wavefront shade lane received incomplete path or surface state."));
@@ -905,11 +908,30 @@ next_delta_flags(const renderer::PathDeltaFlags current,
         return std::unexpected(previous.error());
     }
 
+    const auto surface_cone =
+        renderer::advance_ray_cone(*runtime.cone, *runtime.ray, runtime.hit->triangle.parameter);
+    if (!surface_cone) {
+        return std::unexpected(surface_cone.error());
+    }
+    const auto closures = surface.closures.closure_set().closures();
+    if (closure_sample.selected_closure >= closures.size()) {
+        return std::unexpected(wavefront_error(
+            core::StatusCode::internal_error,
+            "A CPU wavefront closure sample does not identify a source closure record."));
+    }
+    const auto next_cone = renderer::propagate_ray_cone_scattering(
+        *surface_cone, closures[closure_sample.selected_closure], closure_sample.lobes,
+        outgoing_local, closure_sample.incoming_local);
+    if (!next_cone) {
+        return std::unexpected(next_cone.error());
+    }
+
     runtime.beta = *updated_beta;
     runtime.depth_counters = depth_event.counters;
     runtime.eta_scale = next_eta_scale;
     runtime.delta_flags = next_delta_flags(runtime.delta_flags, closure_sample.lobes);
     runtime.ray = *next_ray;
+    runtime.cone = *next_cone;
     runtime.previous_bsdf_sample = std::move(*previous);
     if (renderer::bsdf_only_path_loop_detail::zero_spectrum(runtime.beta)) {
         runtime.pending_termination = PendingTermination{
@@ -946,6 +968,7 @@ next_delta_flags(const renderer::PathDeltaFlags current,
                                 "CPU wavefront roulette returned an unsupported outcome."));
         }
     }
+
     runtime.continuation_requested = true;
     return {};
 }
@@ -1207,7 +1230,7 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
         if (auto status = validate_queue_statistics(report); !status) {
             return std::unexpected(status.error());
         }
-        return CpuWavefrontMisBatch{.paths = {}, .report = report};
+        return CpuWavefrontMisBatch{.paths = {}, .terminal_cones = {}, .report = report};
     }
 
     auto initial_states = std::vector<renderer::PathState>{};
@@ -1305,7 +1328,7 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
                 scheduler, inputs.size(), ray,
                 renderer::CpuWavefrontStageKernel{[&](const renderer::CpuWavefrontLane lane) {
                     auto& runtime = runtimes[lane.path_slot.value];
-                    if (!runtime.ray || runtime.result) {
+                    if (!runtime.ray || !runtime.cone || runtime.result) {
                         return core::Status{std::unexpected(
                             wavefront_error(core::StatusCode::internal_error,
                                             "A CPU wavefront ray lane received no active ray."))};
@@ -1340,7 +1363,7 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
                     scheduler, inputs.size(), miss,
                     renderer::CpuWavefrontStageKernel{[&](const renderer::CpuWavefrontLane lane) {
                         auto& runtime = runtimes[lane.path_slot.value];
-                        if (!runtime.ray || runtime.hit || runtime.result) {
+                        if (!runtime.ray || !runtime.cone || runtime.hit || runtime.result) {
                             return core::Status{std::unexpected(wavefront_error(
                                 core::StatusCode::internal_error,
                                 "A CPU wavefront miss lane received contradictory state."))};
@@ -1373,7 +1396,7 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
                     scheduler, inputs.size(), hit,
                     renderer::CpuWavefrontStageKernel{[&](const renderer::CpuWavefrontLane lane) {
                         auto& runtime = runtimes[lane.path_slot.value];
-                        if (!runtime.ray || !runtime.hit || runtime.result) {
+                        if (!runtime.ray || !runtime.cone || !runtime.hit || runtime.result) {
                             return core::Status{
                                 std::unexpected(wavefront_error(core::StatusCode::internal_error,
                                                                 "A CPU wavefront hit lane received "
@@ -1531,8 +1554,9 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
                     scheduler, inputs.size(), continuation,
                     renderer::CpuWavefrontStageKernel{[&](const renderer::CpuWavefrontLane lane) {
                         auto& runtime = runtimes[lane.path_slot.value];
-                        if (!runtime.continuation_requested || !runtime.ray || runtime.result ||
-                            runtime.pending_termination || runtime.pending_shadow) {
+                        if (!runtime.continuation_requested || !runtime.ray || !runtime.cone ||
+                            runtime.result || runtime.pending_termination ||
+                            runtime.pending_shadow) {
                             return core::Status{std::unexpected(wavefront_error(
                                 core::StatusCode::internal_error,
                                 "A CPU continuation lane received contradictory route state."))};
@@ -1562,12 +1586,15 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
     }
 
     auto paths = std::vector<renderer::BsdfOnlyPathResult>{};
+    auto terminal_cones = std::vector<renderer::RayCone>{};
     paths.reserve(runtimes.size());
+    terminal_cones.reserve(runtimes.size());
     for (auto& runtime : runtimes) {
-        if (!runtime.result) {
+        if (!runtime.result || !runtime.cone) {
             return std::unexpected(
                 wavefront_error(core::StatusCode::internal_error,
-                                "CPU wavefront transport ended with an unterminated path slot."));
+                                "CPU wavefront transport ended with an incomplete terminal path "
+                                "slot."));
         }
         if (runtime.closure_samples >
                 std::numeric_limits<std::uint64_t>::max() - report.closure_samples ||
@@ -1583,11 +1610,16 @@ execute_queue(const renderer::CpuWavefrontScheduler& scheduler, const std::size_
         report.light_samples += runtime.light_samples;
         report.shadow_queries += runtime.shadow_queries;
         paths.push_back(std::move(*runtime.result));
+        terminal_cones.push_back(*runtime.cone);
     }
     if (auto status = validate_queue_statistics(report); !status) {
         return std::unexpected(status.error());
     }
-    return CpuWavefrontMisBatch{.paths = std::move(paths), .report = report};
+    return CpuWavefrontMisBatch{
+        .paths = std::move(paths),
+        .terminal_cones = std::move(terminal_cones),
+        .report = report,
+    };
 }
 
 } // namespace
